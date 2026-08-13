@@ -1,0 +1,36 @@
+name: crunchyroll
+version: "1.0.0"
+manifest_version: 1
+
+description: >-
+  Crunchyroll anime streaming MCP connector. Search anime series and movies,
+  browse by genre or popularity, view series/season/episode details, manage
+  your watchlist, track viewing progress, and get personalized recommendations.
+
+source: https://github.com/Itthiago034/mcp-crunchyroll
+
+install:
+  bootstrap:
+    - npm install --production
+  git:
+    url: https://github.com/Itthiago034/mcp-crunchyroll
+    ref: main
+
+transport:
+  command: npx
+  args:
+    - -y
+    - tsx
+    - src/index.ts
+  env: {}
+
+auth: none
+
+tools:
+  default_enabled: []
+
+notes:
+  - "Authentication is handled inside the server itself: use the crunchyroll_login tool once with your Crunchyroll account email and password. Tokens are stored locally in ~/.strider/crunchyroll/ and auto-refreshed."
+  - "Content IDs are available in search/browse results or in Crunchyroll URLs (e.g. https://www.crunchyroll.com/series/G6W4Q7MKY)."
+  - "This server uses the Crunchyroll web API, so its endpoints may change over time."
+  - "Requires Node.js >= 18. The bootstrap installs dependencies with npm; tsx runs the TypeScript source directly via npx. For production use, run `npm run build` and point the command at dist/index.js."

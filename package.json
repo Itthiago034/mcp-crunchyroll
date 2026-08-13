@@ -1,0 +1,40 @@
+{
+  "name": "@striderlabs/mcp-crunchyroll",
+  "version": "0.1.0",
+  "description": "Crunchyroll anime streaming MCP connector for personal AI agents",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "striderlabs-mcp-crunchyroll": "dist/index.js"
+  },
+  "scripts": {
+    "build": "node build.js",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "keywords": [
+    "mcp",
+    "crunchyroll",
+    "anime",
+    "streaming",
+    "modelcontextprotocol"
+  ],
+  "author": "StrikerLabs",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "esbuild": "^0.20.0",
+    "typescript": "^5.3.3",
+    "tsx": "^4.7.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
