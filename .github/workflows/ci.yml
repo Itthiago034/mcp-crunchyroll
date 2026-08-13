@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: install / typecheck / test / build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [18, 20, 22]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Clean checkout from baseline history — no credentials needed
+          fetch-depth: 0
+
+      - name: Set up Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Reproducible install (strict lockfile)
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Tests (unit + MCP stdio harness)
+        run: npm test
+        env:
+          # Guarantee no account dependency: tests only use deliberately
+          # invalid credentials and network-free local checks.
+          CI: true
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify tree stays clean after install/test/build
+        run: |
+          CHANGED=$(git status --porcelain | grep -v '^?? ' || true)
+          if [ -n "$CHANGED" ]; then
+            echo "Versioned files modified during the pipeline:"
+            echo "$CHANGED"
+            exit 1
+          fi
