@@ -6,7 +6,7 @@ on:
 
 jobs:
   build-and-test:
-    name: install / typecheck / test / build
+    name: install / typecheck / build / test
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -29,6 +29,9 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Build
+        run: npm run build
+
       - name: Tests (unit + MCP stdio harness)
         run: npm test
         env:
@@ -36,10 +39,7 @@ jobs:
           # invalid credentials and network-free local checks.
           CI: true
 
-      - name: Build
-        run: npm run build
-
-      - name: Verify tree stays clean after install/test/build
+      - name: Verify tree stays clean after install/typecheck/build/test
         run: |
           CHANGED=$(git status --porcelain | grep -v '^?? ' || true)
           if [ -n "$CHANGED" ]; then
@@ -47,3 +47,4 @@ jobs:
             echo "$CHANGED"
             exit 1
           fi
+
