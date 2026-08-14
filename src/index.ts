@@ -31,6 +31,9 @@ import {
   getSubscription,
 } from "./api.js";
 
+// B6-core: operation-scoped secret redaction (internal, not an MCP surface).
+import { withRedactionScope, safeErrorWithCleanStack, redactSecrets } from "./redact.js";
+
 // ── Server Setup ──────────────────────────────────────────────────────────────
 
 const server = new Server(
@@ -291,14 +294,27 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 
 // ── Tool Handlers ─────────────────────────────────────────────────────────────
 
+// B6-core: every tool call runs inside an operation-scoped redaction scope.
+// The registry is cleared unconditionally in `finally` (success, thrown
+// error, rejected promise, early return), so registered sensitive material
+// can never leak across operations — including concurrent ones, since the
+// scope is carried by AsyncLocalStorage per async chain.
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args = {} } = request.params;
+  return withRedactionScope(async (scope) => {
+    const { name, arguments: args = {} } = request.params;
 
-  try {
-    switch (name) {
-      // ── Auth ──────────────────────────────────────────────────────────────
-      case "crunchyroll_login": {
-        const result = await login(args.email as string, args.password as string);
+    // B6-core: register the raw credentials received by the login handler.
+    // They must not survive in any error path that crosses the MCP boundary.
+    // Empty/whitespace values are rejected by registerSecret by design.
+    if (name === "crunchyroll_login") {
+      scope.registerSecret(String(args.password ?? ""), String(args.email ?? ""));
+    }
+
+    try {
+      switch (name) {
+        // ── Auth ──────────────────────────────────────────────────────────────
+        case "crunchyroll_login": {
+          const result = await login(args.email as string, args.password as string);
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         };
@@ -521,30 +537,39 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
-      default:
-        throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
+        default:
+          throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
+      }
+    } catch (err) {
+      // B6-core: sanitize the error (preserving class, never mutating the
+      // original) and redact registered secrets + static class patterns
+      // from the message and stack before it reaches the model.
+      if (err instanceof McpError) {
+        // Re-derive the McpError message through the redactor: the SDK may
+        // echo err.message into the wire payload.
+        throw new McpError(err.code, redactSecrets(err.message));
+      }
+      const safe = safeErrorWithCleanStack(err);
+      const message = safe.message;
+      const isAuthError = message.includes("Not logged in") || message.includes("401");
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                error: message,
+                ...(isAuthError ? { hint: "Use crunchyroll_login to authenticate first." } : {}),
+              },
+              null,
+              2
+            ),
+          },
+        ],
+        isError: true,
+      };
     }
-  } catch (err) {
-    if (err instanceof McpError) throw err;
-    const message = (err as Error).message;
-    const isAuthError = message.includes("Not logged in") || message.includes("401");
-    return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify(
-            {
-              error: message,
-              ...(isAuthError ? { hint: "Use crunchyroll_login to authenticate first." } : {}),
-            },
-            null,
-            2
-          ),
-        },
-      ],
-      isError: true,
-    };
-  }
+  });
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────
@@ -556,6 +581,10 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error("Fatal error:", err);
+  // B6-core: redact the fatal error before logging to stderr. No registered
+  // secrets exist at bootstrap time, but static class patterns (Bearer /
+  // Authorization headers, key-value bodies) still apply.
+  const safe = err instanceof Error ? redactSecrets(err.message) : redactSecrets(String(err));
+  console.error(`Fatal error: ${safe || "(empty)"}`);
   process.exit(1);
 });

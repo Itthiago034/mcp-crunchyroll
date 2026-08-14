@@ -10,6 +10,10 @@ import {
   isTokenExpired,
 } from "./auth.js";
 
+// B6-core: redaction of upstream error bodies before they become Error
+// messages that can cross the MCP boundary.
+import { redactSecrets } from "./redact.js";
+
 // Crunchyroll API base URLs
 const AUTH_BASE = "https://auth.crunchyroll.com";
 const API_BASE = "https://www.crunchyroll.com";
@@ -155,7 +159,11 @@ async function request<T>(
     } catch {
       // ignore
     }
-    throw new Error(`Crunchyroll API error ${response.status}: ${errBody || response.statusText}`);
+    // B6-core: upstream error bodies can carry sensitive literals (tokens,
+    // credentials). Redact both static class patterns and registered values
+    // before the body becomes an Error message.
+    const safeBody = redactSecrets(errBody || response.statusText);
+    throw new Error(`Crunchyroll API error ${response.status}: ${safeBody}`);
   }
 
   const text = await response.text();
