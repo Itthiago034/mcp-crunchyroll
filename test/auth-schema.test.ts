@@ -338,6 +338,55 @@ describe("B3: persisted auth schema validation", { runInParallel: false }, () =>
     }
   });
 
+  // B3-FIX-3: the year is determined ONLY by the implemented four-digit ISO
+  // profile (\d{4}), the calendar validity and the runtime parseability.
+  // The B3 contract establishes NO year policy (1970..2999 was never part of
+  // the frozen design) — removing that undocumented restriction must not
+  // weaken any other validation.
+  test("B3-FIX-3: years outside the former 1970..2999 undocumented range are accepted", () => {
+    for (const iso of [
+      "1969-12-31T23:59:59Z",
+      "1970-01-01T00:00:00Z",
+      "2999-12-31T23:59:59Z",
+      "3000-01-01T00:00:00Z",
+      "0001-01-01T00:00:00Z",
+    ]) {
+      const s = validateSessionInfo(makeSession({ saved_at: iso }));
+      assert.equal(s.saved_at, iso, `expected acceptance of ${iso}`);
+    }
+  });
+
+  test("B3-FIX-3: syntactic 4-digit year boundaries — runtime parseability decides", () => {
+    // 9999-12-31T23:59:59Z: runtime parses it to a finite epoch, so the
+    // profile + calendar + parseability conjunction accepts it.
+    const maxYear = validateSessionInfo(makeSession({ saved_at: "9999-12-31T23:59:59Z" }));
+    assert.equal(maxYear.saved_at, "9999-12-31T23:59:59Z");
+    assert.ok(
+      Number.isFinite(Date.parse("9999-12-31T23:59:59Z")),
+      "year 9999 must be runtime-parseable for the boundary claim to hold"
+    );
+    // 0000: the regex profile admits four digits; Node's Date.parse accepts
+    // "0000-01-01T00:00:00Z" as a finite epoch. No silent semantic assumption
+    // of year 0000 is made — it is treated exactly like any other year.
+    assert.ok(
+      Number.isFinite(Date.parse("0000-01-01T00:00:00Z")),
+      "year 0000 must be runtime-parseable on the project runtime"
+    );
+    const y0 = validateSessionInfo(makeSession({ saved_at: "0000-01-01T00:00:00Z" }));
+    assert.equal(y0.saved_at, "0000-01-01T00:00:00Z");
+    // year 0000 is a Gregorian leap year under the same rule used for all
+    // other years (0 % 400 === 0), so 0000-02-29 is calendar-valid and
+    // runtime-parseable — it must be ACCEPTED, not silently treated as
+    // having special semantics.
+    const y0Leap = validateSessionInfo(makeSession({ saved_at: "0000-02-29T00:00:00Z" }));
+    assert.equal(y0Leap.saved_at, "0000-02-29T00:00:00Z");
+    // calendar validity still applies at the boundaries:
+    assert.throws(
+      () => validateSessionInfo(makeSession({ saved_at: "0000-02-30T00:00:00Z" })),
+      (err: unknown) => err instanceof StorageError && err.state === "CORRUPT_SESSION"
+    );
+  });
+
   test("B3-FIX-2: second 59 accepted; second 60 (leap second) → CORRUPT_SESSION", () => {
     const ok = validateSessionInfo(makeSession({ saved_at: "2026-08-14T12:00:59Z" }));
     assert.equal(ok.saved_at, "2026-08-14T12:00:59Z");

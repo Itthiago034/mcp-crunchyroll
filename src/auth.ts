@@ -219,7 +219,10 @@ function maxDayOfMonth(year: number, month: number): number {
  * this function itself, never Date parsing (B3-FIX-2-A).
  *
  * Calendar rules (all component-level, no normalization):
- *   year   1970..2999
+ *   year   ANY 4-digit value (0000..9999) — the year is determined ONLY by
+ *          the implemented four-digit ISO profile, the calendar validity and
+ *          the runtime parseability; NO additional year policy is imposed
+ *          (B3-FIX-3)
  *   month  1..12
  *   day    1..maxDayOfMonth(year, month)   — 2026-02-31 is invalid, not March
  *   hour   0..23
@@ -240,7 +243,8 @@ function isStrictIso8601Timestamp(value: unknown): boolean {
   const hour = Number(value.slice(11, 13));
   const minute = Number(value.slice(14, 16));
   const second = Number(value.slice(17, 19));
-  if (year < 1970 || year > 2999) return false;
+  // No undocumented year policy: 0000..9999 is accepted when the calendar
+  // is valid and the runtime parses it (B3-FIX-3).
   if (month < 1 || month > 12) return false;
   if (day < 1 || day > maxDayOfMonth(year, month)) return false;
   if (hour < 0 || hour > 23) return false;
