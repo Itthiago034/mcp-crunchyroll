@@ -302,6 +302,51 @@ describe("B3: persisted auth schema validation", { runInParallel: false }, () =>
     assert.equal(s.saved_at, "2026-08-14T18:00:00-03:00");
   });
 
+  // B3-FIX-2-A: calendar-valid ISO-8601 — the day must exist in the given
+  // month/year (explicit days-per-month + leap-year math). JS normalizes
+  // impossible dates (e.g. 2026-02-31 → March), so the calendar authority is
+  // the validator itself, never Date parsing.
+  test("B3-FIX-2: calendar-valid saved_at dates are accepted", () => {
+    for (const iso of [
+      "2026-01-31T12:00:00Z",
+      "2026-02-28T12:00:00Z",
+      "2024-02-29T12:00:00Z",
+      "2026-04-30T12:00:00Z",
+      "2000-02-29T12:00:00Z",
+    ]) {
+      const s = validateSessionInfo(makeSession({ saved_at: iso }));
+      assert.equal(s.saved_at, iso);
+    }
+  });
+
+  test("B3-FIX-2: calendar-impossible saved_at dates → CORRUPT_SESSION", () => {
+    for (const iso of [
+      "2026-02-29T12:00:00Z",
+      "2026-02-30T12:00:00Z",
+      "2026-02-31T12:00:00Z",
+      "2026-04-31T12:00:00Z",
+      "2026-06-31T12:00:00Z",
+      "2026-09-31T12:00:00Z",
+      "2026-11-31T12:00:00Z",
+      "2100-02-29T12:00:00Z",
+    ]) {
+      assert.throws(
+        () => validateSessionInfo(makeSession({ saved_at: iso })),
+        (err: unknown) => err instanceof StorageError && err.state === "CORRUPT_SESSION",
+        `expected rejection for calendar-impossible ${iso}`
+      );
+    }
+  });
+
+  test("B3-FIX-2: second 59 accepted; second 60 (leap second) → CORRUPT_SESSION", () => {
+    const ok = validateSessionInfo(makeSession({ saved_at: "2026-08-14T12:00:59Z" }));
+    assert.equal(ok.saved_at, "2026-08-14T12:00:59Z");
+    assert.throws(
+      () => validateSessionInfo(makeSession({ saved_at: "2026-08-14T12:00:60Z" })),
+      (err: unknown) => err instanceof StorageError && err.state === "CORRUPT_SESSION"
+    );
+  });
+
   test("B3-FIX-1: saved_at arbitrary non-ISO string → CORRUPT_SESSION", () => {
     assert.throws(
       () => validateSessionInfo(makeSession({ saved_at: "not-a-timestamp" })),
@@ -370,6 +415,143 @@ describe("B3: persisted auth schema validation", { runInParallel: false }, () =>
     assert.equal(s.email, "user@example.com");
     assert.deepEqual(s.unknown_fields, ["some_extra"]);
     assert.equal("some_extra" in s, false);
+  });
+
+  // B3-FIX-2-B: unknown_fields is derived diagnostic metadata — names only,
+  // NON-PERSISTENT, and never an unknown field of itself (idempotent
+  // revalidation). The true B3 contract is tolerate + diagnose by name;
+  // preservation of arbitrary unknown values across a rewrite is NOT
+  // part of the contract.
+
+  test("B3-FIX-2: unknown_fields is names-only, no secret value echoed", () => {
+    const t = validateTokenData({
+      ...makeTokens(),
+      legacy_secret_field: "DO-NOT-ECHO-SYNTHETIC-VALUE",
+    });
+    assert.deepEqual(t.unknown_fields, ["legacy_secret_field"]);
+    // The value must not appear anywhere in the typed result or its JSON form.
+    assert.equal(JSON.stringify(t).includes("DO-NOT-ECHO-SYNTHETIC-VALUE"), false);
+  });
+
+  test("B3-FIX-2: revalidating a validated object does NOT produce [\"unknown_fields\"]", () => {
+    const t = validateTokenData({ ...makeTokens(), legacy_note: "x" });
+    assert.deepEqual(t.unknown_fields, ["legacy_note"]);
+    // Re-validation of the validated representation must be stable and
+    // non-self-contaminating: the non-enumerable diagnostic is not visible
+    // to the validator, so no ["unknown_fields"] is ever produced and no
+    // spurious names appear on re-read.
+    const t2 = validateTokenData(t);
+    assert.equal(t2.unknown_fields, undefined);
+    assert.deepEqual(Object.keys(t2).sort(), [
+      "access_token",
+      "account_id",
+      "expires_at",
+      "refresh_token",
+      "token_type",
+    ]);
+  });
+
+  test("B3-FIX-2: unknown_fields is never persisted by saveTokens(saveTokens→loadTokens) cycle", async () => {
+    await withFakeHome(async () => {
+      // Raw file on disk contains the unknown field.
+      await plantFile(
+        process.env.HOME!,
+        "tokens.json",
+        JSON.stringify({ ...makeTokens(), legacy_note: "old" })
+      );
+      const loaded = await loadTokens();
+      assert.ok(loaded);
+      assert.deepEqual(loaded.unknown_fields, ["legacy_note"]);
+      // Rewrite through the store.
+      await saveTokens(loaded);
+      const reloaded = await loadTokens();
+      assert.ok(reloaded);
+      // After the rewrite, no spurious diagnostic.
+      assert.equal(reloaded.unknown_fields, undefined);
+      // And the raw file contains only the known persisted schema.
+      const fsp = await import("node:fs/promises");
+      const raw = JSON.parse(
+        (await fsp.readFile(
+          join(process.env.HOME!, ".strider", "crunchyroll", "tokens.json"),
+          "utf-8"
+        )) as string
+      );
+      assert.equal(raw["unknown_fields"], undefined);
+      assert.equal(raw["legacy_note"], undefined);
+    });
+  });
+
+  test("B3-FIX-2: unknown_fields is never persisted by saveSessionInfo cycle", async () => {
+    await withFakeHome(async () => {
+      const s = validateSessionInfo({ ...makeSession(), extra_note: "v" });
+      assert.deepEqual(s.unknown_fields, ["extra_note"]);
+      await saveSessionInfo(s);
+      const reloaded = await loadSessionInfo();
+      assert.ok(reloaded);
+      assert.equal(reloaded.unknown_fields, undefined);
+      const fsp = await import("node:fs/promises");
+      const raw = JSON.parse(
+        (await fsp.readFile(
+          join(process.env.HOME!, ".strider", "crunchyroll", "session.json"),
+          "utf-8"
+        )) as string
+      );
+      assert.equal(raw["unknown_fields"], undefined);
+    });
+  });
+
+  test("B3-FIX-2: caller object with extra enumerable properties is sanitized before persistence", async () => {
+    await withFakeHome(async () => {
+      await saveTokens({ ...makeTokens(), stray_property: 1 } as never);
+      const fsp = await import("node:fs/promises");
+      const raw = JSON.parse(
+        (await fsp.readFile(
+          join(process.env.HOME!, ".strider", "crunchyroll", "tokens.json"),
+          "utf-8"
+        )) as string
+      );
+      const keys = Object.keys(raw).sort();
+      assert.deepEqual(
+        keys,
+        ["access_token", "account_id", "expires_at", "refresh_token", "token_type"]
+      );
+      const reloaded = await loadTokens();
+      assert.ok(reloaded);
+      assert.equal(reloaded.unknown_fields, undefined);
+    });
+  });
+
+  test("B3-FIX-2: an enumerable unknown_fields property from the caller is dropped on save", async () => {
+    await withFakeHome(async () => {
+      const doc = { ...makeTokens(), unknown_fields: ["should-not-persist"] };
+      assert.ok(("unknown_fields" in doc)); // enumerable in caller
+      await saveTokens(doc as never);
+      const fsp = await import("node:fs/promises");
+      const raw = JSON.parse(
+        (await fsp.readFile(
+          join(process.env.HOME!, ".strider", "crunchyroll", "tokens.json"),
+          "utf-8"
+        )) as string
+      );
+      assert.equal(raw["unknown_fields"], undefined);
+      const reloaded = await loadTokens();
+      assert.ok(reloaded);
+      assert.equal(reloaded.unknown_fields, undefined);
+    });
+  });
+
+  test("B3-FIX-2: secret values of unknown fields never leak into the typed object", () => {
+    // Validation must succeed (unknown fields are tolerated) — the point is
+    // the absence of the secret value from every observable surface.
+    const t = validateTokenData({
+      ...makeTokens(),
+      legacy_secret_field: "DO-NOT-ECHO-SYNTHETIC-VALUE",
+    } as never);
+    assert.deepEqual(t.unknown_fields, ["legacy_secret_field"]);
+    assert.equal(JSON.stringify(t).includes("DO-NOT-ECHO-SYNTHETIC-VALUE"), false);
+    assert.equal(t["legacy_secret_field" as never], undefined);
+    // And it is never visible as an enumerable property.
+    assert.equal(Object.keys(t).includes("legacy_secret_field"), false);
   });
 
   // 24. versioning/legacy policy: no version field required (design:
@@ -556,9 +738,11 @@ describe("B3: persisted auth schema validation", { runInParallel: false }, () =>
   });
 
   // Production: unknown fields are tolerated + reported by name on load
-  // (design §8: "Tolerado + unknown_fields no diagnóstico"). The persisted
-  // document keeps them (JSON is written as-is) but the typed object
-  // exposes only known fields.
+  // (design §8: "Tolerado + unknown_fields no diagnóstico"). The raw file
+  // keeps them (the runtime has not rewritten it), but the typed object
+  // exposes only known fields — and after a rewrite the unknown field is
+  // dropped by design (preservation of unknown values is NOT in the
+  // B3 contract; the diagnostic must not self-contaminate).
   test("B3-FIX-1 production: unknown fields in the file are tolerated and reported by name", async () => {
     await withFakeHome(async () => {
       await plantFile(
@@ -571,6 +755,16 @@ describe("B3: persisted auth schema validation", { runInParallel: false }, () =>
       assert.equal(tokens.access_token, "synthetic-access-token");
       assert.deepEqual(tokens.unknown_fields, ["legacy_note"]);
       assert.equal("legacy_note" in tokens, false);
+      // And the runtime-produced raw document does not contain the
+      // derived diagnostic — it is metadata, not persisted schema.
+      const fsp = await import("node:fs/promises");
+      const raw = JSON.parse(
+        (await fsp.readFile(
+          join(process.env.HOME!, ".strider", "crunchyroll", "tokens.json"),
+          "utf-8"
+        )) as string
+      );
+      assert.equal(raw["unknown_fields"], undefined);
     });
   });
 

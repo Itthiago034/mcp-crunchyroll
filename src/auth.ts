@@ -139,15 +139,30 @@ export function validateTokenData(value: unknown): TokenData {
   // "Campo desconhecido | Tolerado + unknown_fields no diagnóstico").
   const unknown_fields = unknownFieldNames(value, KNOWN_TOKEN_FIELDS);
 
-  return {
+  const sanitized: TokenData = {
     access_token,
     refresh_token,
     expires_at: expiresRaw,
     token_type,
     account_id,
     ...("profile_id" in value ? { profile_id: value["profile_id"] as string } : {}),
-    ...(unknown_fields ? { unknown_fields } : {}),
   };
+
+  // B3-FIX-2-B: unknown_fields is derived diagnostic metadata — names only,
+  // never persisted, and never an unknown field of itself. Stored as a
+  // NON-ENUMERABLE own property so re-validation of a validated object
+  // observes only the schema-known keys (idempotent diagnosis), and JSON
+  // serialization of the object drops it automatically.
+  if (unknown_fields) {
+    Object.defineProperty(sanitized, "unknown_fields", {
+      value: unknown_fields,
+      writable: false,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+
+  return sanitized;
 }
 
 /** Known top-level tokens.json fields — unknown-field detection uses this list. */
@@ -160,8 +175,8 @@ const KNOWN_TOKEN_FIELDS = new Set([
   "profile_id",
 ]);
 
-// ISO-8601 profile for saved_at (B3-FIX-1): the design says "ISO-8601
-// parseável" without a sub-profile, so the policy is the minimal set
+// ISO-8601 profile for saved_at (B3-FIX-1 + B3-FIX-2): the design says
+// "ISO-8601 parseável" without a sub-profile, so the policy is the minimal set
 // compatible with the values actually produced by new Date().toISOString()
 // (YYYY-MM-DDTHH:mm:ss.sssZ). The format is enforced by a strict regex —
 // Date.parse() alone is NOT used, because it accepts runtime-dependent
@@ -177,11 +192,48 @@ const KNOWN_TOKEN_FIELDS = new Set([
 const ISO8601_RE =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
 
-/** Strict ISO-8601 timestamp validator for saved_at. */
+/** Days in each calendar month (index 1..12) for a non-leap year. */
+const DAYS_IN_MONTH = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+/**
+ * True when the year is a Gregorian leap year:
+ * divisible by 4 AND (not divisible by 100 OR divisible by 400).
+ */
+function isLeapYear(year: number): boolean {
+  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+}
+
+/**
+ * Maximum calendar-valid day for (year, month). Never trusts Date's
+ * normalization — a calendar-impossible date is a corruption, not a
+ * silently normalized March date (B3-FIX-2-A).
+ */
+function maxDayOfMonth(year: number, month: number): number {
+  return month === 2 && isLeapYear(year) ? 29 : DAYS_IN_MONTH[month];
+}
+
+/**
+ * Strict ISO-8601 timestamp validator for saved_at. Enforces the format by
+ * regex, then the CALENDAR by explicit days-per-month/leap-year math, and
+ * finally the runtime parse as a sanity check — the calendar authority is
+ * this function itself, never Date parsing (B3-FIX-2-A).
+ *
+ * Calendar rules (all component-level, no normalization):
+ *   year   1970..2999
+ *   month  1..12
+ *   day    1..maxDayOfMonth(year, month)   — 2026-02-31 is invalid, not March
+ *   hour   0..23
+ *   minute 0..59
+ *   second 0..59                           — leap seconds are NOT represented
+ *                                            by the runtime parser, so they are
+ *                                            not announced as supported
+ *   offset hour/minute must sit inside the accepted profile's explicit range:
+ *     ±HH:MM with 00..23 hours and 00..59 minutes (Z is always valid)
+ *   fractional seconds optional (1..9 digits)
+ */
 function isStrictIso8601Timestamp(value: unknown): boolean {
   if (typeof value !== "string") return false;
   if (!ISO8601_RE.test(value)) return false;
-  // Sanity ranges (calendar-plausible components, not temporal validity).
   const year = Number(value.slice(0, 4));
   const month = Number(value.slice(5, 7));
   const day = Number(value.slice(8, 10));
@@ -190,15 +242,36 @@ function isStrictIso8601Timestamp(value: unknown): boolean {
   const second = Number(value.slice(17, 19));
   if (year < 1970 || year > 2999) return false;
   if (month < 1 || month > 12) return false;
-  if (day < 1 || day > 31) return false;
+  if (day < 1 || day > maxDayOfMonth(year, month)) return false;
   if (hour < 0 || hour > 23) return false;
   if (minute < 0 || minute > 59) return false;
-  if (second < 0 || second > 60) return false; // leap second tolerance
-  const rest = value.slice(19);
-  if (rest.startsWith(".")) {
-    // fractional digits then timezone: already guaranteed by the regex.
+  if (second < 0 || second > 59) return false;
+  // Timezone begins after the second component: index 19 without
+  // fractional seconds, or after the fractional digits with them. The
+  // regex already guarantees the shape; find the timezone marker safely
+  // by scanning from the fractional point (index 19) onward.
+  let tzStart = 19;
+  if (value.length > 19 && value[19] === ".") {
+    const zIdx = value.indexOf("Z", 20);
+    const plusIdx = value.indexOf("+", 20);
+    const minusIdx = value.indexOf("-", 20);
+    if (zIdx !== -1) tzStart = zIdx;
+    else if (plusIdx !== -1) tzStart = plusIdx;
+    else if (minusIdx !== -1) tzStart = minusIdx;
   }
-  // Date.parse sanity: any regex-passing value must also parse finitely.
+  const tz = value.slice(tzStart);
+  if (tz === "Z") {
+    // canonical UTC marker.
+  } else if (tz.startsWith("+") || tz.startsWith("-")) {
+    // offset ±HH:MM — already guaranteed to be 6 chars by the regex.
+    const oh = Number(tz.slice(1, 3));
+    const om = Number(tz.slice(4, 6));
+    if (oh < 0 || oh > 23 || om < 0 || om > 59) return false;
+  } else {
+    // timezone is mandatory and must be Z or ±HH:MM.
+    return false;
+  }
+  // Runtime parse as a sanity check — calendar validity is established above.
   return Number.isFinite(Date.parse(value));
 }
 
@@ -254,7 +327,18 @@ export function validateSessionInfo(value: unknown): SessionInfo {
 
   // Unknown fields: tolerated and reported by name only (design §8:
   // "Campo desconhecido | Tolerado + unknown_fields no diagnóstico").
-  out.unknown_fields = unknownFieldNames(value, KNOWN_SESSION_FIELDS);
+  const unknown_fields = unknownFieldNames(value, KNOWN_SESSION_FIELDS);
+
+  // B3-FIX-2-B: same non-enumerable derived-metadata contract as TokenData —
+  // non-persistent, names only, and re-validation-stable.
+  if (unknown_fields) {
+    Object.defineProperty(out, "unknown_fields", {
+      value: unknown_fields,
+      writable: false,
+      enumerable: false,
+      configurable: true,
+    });
+  }
 
   return out;
 }
@@ -922,10 +1006,15 @@ async function readCredentialFile(filePath: string): Promise<ReadResult | null> 
 export async function saveTokens(tokens: TokenData): Promise<void> {
   // Gate B3: validate BEFORE serializing — writing invalid data would persist
   // corruption even when the storage primitives themselves are sound.
-  validateTokenData(tokens);
+  //
+  // B3-FIX-2-B: serialize the SANITIZED representation returned by the
+  // validator, never the caller's unsanitized object. Non-enumerable
+  // diagnostic metadata (unknown_fields) and any extra enumerable properties
+  // from the caller are dropped — only the known persisted schema is written.
+  const sanitized = validateTokenData(tokens);
   await ensureConfigDir();
   await assertWritablePath(tokenFilePath());
-  await atomicWriteJson(tokenFilePath(), tokens);
+  await atomicWriteJson(tokenFilePath(), sanitized);
 }
 
 /**
@@ -953,10 +1042,16 @@ export async function saveSessionInfo(info: SessionInfo): Promise<void> {
   // Gate B3: validate BEFORE serializing (same rationale as saveTokens).
   // The injected saved_at is ISO-8601 by construction, but the rest of the
   // input is validated exactly as a persisted document would be.
-  validateSessionInfo({ ...info, saved_at: new Date().toISOString() });
+  //
+  // B3-FIX-2-B: saved_at is generated ONCE per operation and reused for both
+  // validation and persistence (no validation/write drift); the serialized
+  // document is the sanitized representation returned by the validator,
+  // which drops non-enumerable diagnostic metadata and caller extras.
+  const saved_at = new Date().toISOString();
+  const sanitized = validateSessionInfo({ ...info, saved_at });
   await ensureConfigDir();
   await assertWritablePath(sessionFilePath());
-  await atomicWriteJson(sessionFilePath(), { ...info, saved_at: new Date().toISOString() });
+  await atomicWriteJson(sessionFilePath(), sanitized);
 }
 
 /**

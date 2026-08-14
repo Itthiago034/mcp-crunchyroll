@@ -583,7 +583,7 @@ test("B2: bundle surface carries no test-only seam", async () => {
   // Prove no `__` test-only symbol reaches it — the test seam must stay
   // source-level, never part of the production surface.
   const built = await import("node:fs/promises").then((fsp) => fsp.readFile(join(process.cwd(), "dist", "index.js"), "utf-8"));
-  const symbols = ["__resetTestHooks", "__setInsecureOwnerHook", "__setTempNameHook", "__observeOpenFlags"];
+  const symbols = ["__resetTestHooks", "__setInsecureOwnerHook", "__setTempNameHook", "__observeOpenFlags", "__forceNoO_NOFOLLOW"];
   for (const sym of symbols) {
     assert.ok(!built.includes(sym), `published bundle must not contain test seam "${sym}"`);
   }
