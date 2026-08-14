@@ -414,3 +414,236 @@ describe("B6-core: MCP boundary (no real credentials, synthetic only)", () => {
     });
   }
 });
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// B6-FIX-1 — deterministic evidence (blockers B6-C1 / B6-C2 / B6-E1)
+// Sentinels only; never real credentials.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+import { existsSync } from "node:fs";
+import { spawn } from "node:child_process";
+import readline from "node:readline";
+import {
+  sanitizeToolResult,
+  registerSensitiveValue,
+} from "../src/redact.js";
+
+const SENTINEL_SUCCESS = "B6_SUCCESS_SENTINEL_5W7K";
+const SENTINEL_BOUNDARY = "B6_BOUNDARY_SENTINEL_2R4V";
+const SENTINEL_TOKEN_RESPONSE = "B6_TOKEN_RESPONSE_SENTINEL_9P3M";
+
+// ── B6-FIX-1 unit: sanitizeToolResult (blocker B6-C1) ────────────────────────
+
+describe("B6-FIX-1: sanitizeToolResult central boundary", () => {
+  test("registered literal is removed from success content", async () => {
+    const out = await withRedactionScope(async (scope) => {
+      scope.registerSecret(SENTINEL_SUCCESS);
+      return sanitizeToolResult({
+        content: [{ type: "text", text: `result contains ${SENTINEL_SUCCESS}` }],
+      });
+    });
+    const raw = JSON.stringify(out);
+    assert.equal(raw.includes(SENTINEL_SUCCESS), false, "sentinel must not reach the outward payload");
+    assert.equal(raw.includes(REDACTED_MARKER), true, "marker must replace the sentinel");
+    assert.ok(raw.includes("result contains"), "unrelated text preserved");
+    assert.equal(out.isError, undefined, "isError untouched");
+  });
+
+  test("multiple text items sanitized; non-text content and isError preserved", async () => {
+    const out = await withRedactionScope(async (scope) => {
+      scope.registerSecret(SENTINEL_SUCCESS);
+      return sanitizeToolResult({
+        content: [
+          { type: "text", text: `first ${SENTINEL_SUCCESS}` },
+          { type: "image", data: "base64-payload" },
+          { type: "text", text: `second ${SENTINEL_SUCCESS}` },
+        ],
+        isError: true,
+      });
+    });
+    const texts = (out.content as { type: string; text?: string }[]).map((c) => c.text ?? "");
+    assert.equal(texts[0].includes(SENTINEL_SUCCESS), false);
+    assert.equal(texts[0].includes(REDACTED_MARKER), true);
+    assert.equal(texts[2].includes(SENTINEL_SUCCESS), false);
+    assert.equal(texts[2].includes(REDACTED_MARKER), true);
+    const img = (out.content as { type: string; data?: string }[]).find((c) => c.type === "image")!;
+    assert.equal(img.data, "base64-payload", "non-text entry preserved verbatim");
+    assert.equal(out.isError, true, "isError preserved");
+  });
+
+  test("result without content passes through untouched", async () => {
+    const result = { isError: true };
+    const out = sanitizeToolResult(result);
+    assert.deepStrictEqual(out, { isError: true });
+  });
+
+  test("text without a secret is unchanged", async () => {
+    const out = await withRedactionScope(async () =>
+      sanitizeToolResult({ content: [{ type: "text", text: "nothing sensitive here" }] })
+    );
+    assert.equal((out.content as { type: string; text: string }[])[0].text, "nothing sensitive here");
+  });
+
+  test("static Authorization/Bearer pattern inside success text is redacted", async () => {
+    const out = await withRedactionScope(async () =>
+      sanitizeToolResult({ content: [{ type: "text", text: `auth: Authorization: Bearer ${SENTINEL_ACCESS}` }] })
+    );
+    const text = (out.content as { type: string; text: string }[])[0].text;
+    assert.equal(text.includes(SENTINEL_ACCESS), false);
+    assert.ok(text.includes(REDACTED_MARKER));
+    assert.equal(text.startsWith("auth:"), true);
+  });
+
+  test("boundary runs while the scope is still active (registry not yet cleared)", async () => {
+    // Timing proof: sanitizeToolResult MUST be applied before the finally
+    // cleanup; this test captures the outward payload inside the scope.
+    let captured: string | undefined;
+    await withRedactionScope(async (scope) => {
+      scope.registerSecret(SENTINEL_SUCCESS);
+      const handled = sanitizeToolResult({ content: [{ type: "text", text: SENTINEL_SUCCESS }] });
+      captured = (handled.content as { text: string }[])[0].text;
+    });
+    assert.equal(captured?.includes(SENTINEL_SUCCESS), false);
+    assert.equal(captured?.includes(REDACTED_MARKER), true);
+  });
+});
+
+// ── B6-FIX-1 unit: registerSensitiveValue semantics (blocker B6-C2) ──────────
+
+describe("B6-FIX-1: registerSensitiveValue semantics", () => {
+  test("no active scope => no-op, nothing retained anywhere", async () => {
+    registerSensitiveValue(SENTINEL_SUCCESS);
+    // With no scope, redactSecrets applies only static patterns — the bare
+    // literal passes through untouched, proving nothing was retained.
+    const out = redactSecrets(`plain ${SENTINEL_SUCCESS}`);
+    assert.equal(out.includes(SENTINEL_SUCCESS), true);
+    assert.equal(out.includes(REDACTED_MARKER), false);
+  });
+
+  test("active scope => value registered and redacted in the same operation", async () => {
+    const out = await withRedactionScope(async () => {
+      registerSensitiveValue(SENTINEL_SUCCESS);
+      return redactSecrets(`diag ${SENTINEL_SUCCESS}`);
+    });
+    assert.equal(out.includes(SENTINEL_SUCCESS), false);
+    assert.ok(out.includes(REDACTED_MARKER));
+  });
+
+  test("closed scope => registration ignored", async () => {
+    await withRedactionScope(async (scope) => {
+      scope.clear(); // closes the scope early; finally will still run
+      registerSensitiveValue(SENTINEL_SUCCESS);
+      const out = redactSecrets(SENTINEL_SUCCESS);
+      assert.equal(out, SENTINEL_SUCCESS, "closed scope must not register");
+    });
+  });
+
+  test("empty / whitespace values never registered", async () => {
+    await withRedactionScope(async () => {
+      registerSensitiveValue("", "   ");
+      const out = redactSecrets(`plain ${SENTINEL_SUCCESS}`);
+      assert.equal(out.includes(SENTINEL_SUCCESS), true, "empty registration must not redact everything");
+    });
+  });
+
+  test("registration never alters the value — persistence semantics untouched", async () => {
+    await withRedactionScope(async (scope) => {
+      scope.registerSecret(SENTINEL_ACCESS, SENTINEL_REFRESH);
+      const out = redactSecrets(`tokens: ${SENTINEL_ACCESS} / ${SENTINEL_REFRESH}`);
+      assert.equal(out.includes(SENTINEL_ACCESS), false);
+      assert.equal(out.includes(SENTINEL_REFRESH), false);
+      assert.equal(out.split(REDACTED_MARKER).length, 3);
+    });
+  });
+});
+
+// ── B6-FIX-1: deterministic MCP boundary (blocker B6-E1) ─────────────────────
+// Fully deterministic: no network (unknown tool → MethodNotFound), the same
+// sentinel appears in BOTH the tool name and the password argument. The raw
+// serialized MCP response (stdout) must contain the marker and never the
+// sentinel — proving the central boundary, not static regexes alone.
+
+interface MiniMessage {
+  id?: number;
+  result?: unknown;
+  error?: { code: number; message: string };
+}
+
+async function deterministicCall(
+  target: { command: string; args: string[] },
+  method: string,
+  params: unknown
+): Promise<{ stdoutRaw: string; error?: { code: number; message: string } }> {
+  const proc = spawn(target.command, target.args, { cwd: ROOT, stdio: ["pipe", "pipe", "pipe"] });
+  let stdout = "";
+  proc.stdout.on("data", (d) => (stdout += String(d)));
+  const pending = new Map<number, (v: MiniMessage) => void>();
+  const rl = readline.createInterface({ input: proc.stdout as NodeJS.ReadableStream });
+  rl.on("line", (raw) => {
+    let msg: MiniMessage;
+    try {
+      msg = JSON.parse(raw) as MiniMessage;
+    } catch {
+      return; // non-JSON lines ignored
+    }
+    if (typeof msg.id === "number") pending.get(msg.id)?.(msg);
+  });
+  const send = (msg: Record<string, unknown>) => {
+    proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", ...msg }) + "\n");
+  };
+  const resp = new Promise<MiniMessage>((resolve) => {
+    const id = 1;
+    pending.set(id, resolve);
+    send({ id, method, params });
+  });
+  send({
+    id: 0,
+    method: "initialize",
+    params: {
+      protocolVersion: "2025-03-26",
+      capabilities: {},
+      clientInfo: { name: "b6-fix1-test", version: "0.0.1" },
+    },
+  });
+  const res = await resp;
+  rl.close();
+  proc.kill();
+  return { stdoutRaw: stdout, error: (res as MiniMessage).error };
+}
+
+describe("B6-FIX-1: deterministic MCP boundary", () => {
+  const FIX1_TARGETS: Target[] = [
+    ["source (tsx)", { command: TSX, args: ["src/index.ts"] }],
+    ...(existsSync(join(ROOT, "dist/index.js"))
+      ? [["bundle (node)", { command: process.execPath, args: ["dist/index.js"] }]]
+      : []),
+  ];
+  for (const [label, target] of FIX1_TARGETS) {
+    describe(`${label}`, () => {
+      test("password-arg sentinel + unknown tool: raw MCP response never contains the literal", async () => {
+        // Causal chain (deterministic, zero network):
+        // 1) arguments.password contains the sentinel → registered at handler
+        //    entry by the closed sensitive-args list, regardless of tool name.
+        // 2) the tool name itself embeds the same sentinel → the
+        //    MethodNotFound message embeds the raw literal.
+        // 3) the McpError re-derivation + the central sanitizeToolResult
+        //    boundary strip it before any serialization.
+        const { stdoutRaw, error } = await deterministicCall(target, "tools/call", {
+          name: `crunchyroll_missing_${SENTINEL_BOUNDARY}`,
+          arguments: { password: SENTINEL_BOUNDARY },
+        });
+        assert.equal(error?.code, -32601, "unknown tool → MethodNotFound");
+        assert.equal(
+          stdoutRaw.includes(SENTINEL_BOUNDARY),
+          false,
+          "raw serialized MCP response must NOT contain the sentinel"
+        );
+        assert.equal(
+          stdoutRaw.includes(REDACTED_MARKER),
+          true,
+          "raw serialized MCP response must contain the marker"
+        );
+      });
+    });
+  }
+});

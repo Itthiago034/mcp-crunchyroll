@@ -71,6 +71,30 @@ export function getActiveScope(): RedactionContext | undefined {
 }
 
 /**
+ * Register sensitive values into the CURRENT operation scope (no scope
+ * handle required). Purely convenience: it only writes into the active
+ * AsyncLocalStorage context — it never creates a second registry or any
+ * parallel global state.
+ *
+ * Semantics (B6-FIX-1):
+ * - active scope present   → values registered (same rules as
+ *   SecretScope.registerSecret: empty/whitespace ignored, duplicates
+ *   idempotent/deterministic, closed scope ignored).
+ * - no active scope        → no-op, values are NOT retained anywhere.
+ * - closed scope           → ignored.
+ */
+export function registerSensitiveValue(...values: string[]): void {
+  const ctx = redactionScope.getStore();
+  if (!ctx) return; // no active operation scope: no-op, nothing retained
+  if (ctx.closed) return;
+  for (const v of values) {
+    if (typeof v !== "string") continue;
+    if (v.length === 0 || v.trim().length === 0) continue;
+    ctx.secrets.add(v);
+  }
+}
+
+/**
  * Open an operation-scoped redaction context, run `fn`, and clear the
  * registry unconditionally on exit (success, thrown error, rejected promise,
  * early return) — finally semantics guaranteed by try/finally around the
@@ -107,6 +131,7 @@ export async function withRedactionScope<T>(fn: (scope: SecretScope) => Promise<
  * verify cleanup without any name surviving beyond the scope.
  */
 export class SecretScope {
+  /** @internal do not reach into the context directly — use registerSecret */
   private ctx: RedactionContext;
 
   constructor(ctx: RedactionContext) {
@@ -178,6 +203,49 @@ export function redactSecrets(text: string): string {
   }
 
   return result;
+}
+
+// ── Outward MCP result sanitization (B6-FIX-1, blocker B6-C1) ───────────────
+
+/**
+ * Central sanitization of an outward MCP tool result (CallTool result shape).
+ *
+ * - When `result.content` is an array, each entry with `type === "text"` and a
+ *   string `text` has its text passed through `redactSecrets()` — using the
+ *   currently active AsyncLocalStorage scope, so registered runtime literals
+ *   are still present.
+ * - All other fields are preserved untouched: `isError`, non-text content
+ *   entries, and any unrelated metadata. No deep dump and no arbitrary JSON
+ *   serialization of non-text values — values other than the guarded
+ *   string path are left as-is.
+ * - A shallow copy of each text entry is returned (the original entry object
+ *   is not mutated in place), so shared content objects are not modified
+ *   dangerously.
+ *
+ * MUST be applied while the operation scope is still active and BEFORE the
+ * `withRedactionScope` callback returns — after `finally` runs the registry
+ * is empty and runtime literals can no longer be matched.
+ */
+export function sanitizeToolResult<T extends { content?: unknown; isError?: boolean }>(
+  result: T
+): T {
+  const content = result.content;
+  if (!Array.isArray(content) || content.length === 0) {
+    return result; // nothing textual to sanitize; shape untouched
+  }
+  const sanitizedContent = content.map((entry) => {
+    if (
+      entry !== null &&
+      typeof entry === "object" &&
+      (entry as { type?: unknown }).type === "text" &&
+      typeof (entry as { text?: unknown }).text === "string"
+    ) {
+      // Shallow copy with the redacted text; all other entry fields kept.
+      return { ...(entry as Record<string, unknown>), text: redactSecrets((entry as { text: string }).text) };
+    }
+    return entry; // non-text content passes through unchanged
+  });
+  return { ...result, content: sanitizedContent } as T;
 }
 
 // ── Error sanitization (design: preserve class/code; no deep dumps) ──────────

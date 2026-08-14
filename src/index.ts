@@ -32,7 +32,12 @@ import {
 } from "./api.js";
 
 // B6-core: operation-scoped secret redaction (internal, not an MCP surface).
-import { withRedactionScope, safeErrorWithCleanStack, redactSecrets } from "./redact.js";
+import { withRedactionScope, safeErrorWithCleanStack, redactSecrets, sanitizeToolResult } from "./redact.js";
+
+// B6-FIX-1 (blocker B6-C2): closed list of tool argument fields whose values
+// are known-sensitive. Never register every argument — query/title/series_id
+// etc. are deliberately NOT secrets.
+const SENSITIVE_ARG_KEYS = new Set(["password", "access_token", "refresh_token"]);
 
 // ── Server Setup ──────────────────────────────────────────────────────────────
 
@@ -310,6 +315,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       scope.registerSecret(String(args.password ?? ""), String(args.email ?? ""));
     }
 
+    // B6-FIX-1 (blocker B6-C2): register known-sensitive argument fields for
+    // ANY tool, regardless of name (the deterministic MethodNotFound boundary
+    // test relies on this too). Values are registered through the active
+    // AsyncLocalStorage scope — outside a scope this is a no-op.
+    for (const key of SENSITIVE_ARG_KEYS) {
+      const v = (args as Record<string, unknown>)[key];
+      if (typeof v === "string" && v.length > 0) scope.registerSecret(v);
+    }
+
     try {
       switch (name) {
         // ── Auth ──────────────────────────────────────────────────────────────
@@ -541,6 +555,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
       }
     } catch (err) {
+      // B6-FIX-1 (blocker B6-C1): every outward CallTool result — success or
+      // error — passes through the central redaction boundary BEFORE the
+      // `withRedactionScope` callback returns, so the finally cleanup still
+      // sees the full registry. The error path builds its own result below;
+      // see `return sanitizeToolResult(...)` at the end of this handler.
       // B6-core: sanitize the error (preserving class, never mutating the
       // original) and redact registered secrets + static class patterns
       // from the message and stack before it reaches the model.
@@ -552,7 +571,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const safe = safeErrorWithCleanStack(err);
       const message = safe.message;
       const isAuthError = message.includes("Not logged in") || message.includes("401");
-      return {
+      const errResult = {
         content: [
           {
             type: "text",
@@ -568,7 +587,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         ],
         isError: true,
       };
+      // B6-FIX-1: even error results cross the central boundary (the error
+      // message is already redacted, but static patterns in surrounding text
+      // and any remaining registered literal must also be covered here).
+      return sanitizeToolResult(errResult);
     }
+  }).then((result) => {
+    // B6-FIX-1 (blocker B6-C1): the single structural exit point. ALL outward
+    // CallTool content (success returns and this wrapper) is sanitized while
+    // the operation scope is still active — `finally` then clears the
+    // registry unconditionally. No success-return path can bypass this.
+    return sanitizeToolResult(result);
   });
 });
 

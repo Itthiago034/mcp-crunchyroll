@@ -12,7 +12,9 @@ import {
 
 // B6-core: redaction of upstream error bodies before they become Error
 // messages that can cross the MCP boundary.
-import { redactSecrets } from "./redact.js";
+// B6-FIX-1 (blocker B6-C2): runtime registration of token literals into the
+// active operation scope, plus redaction of upstream error bodies.
+import { redactSecrets, registerSensitiveValue } from "./redact.js";
 
 // Crunchyroll API base URLs
 const AUTH_BASE = "https://auth.crunchyroll.com";
@@ -144,6 +146,13 @@ async function request<T>(
   };
 
   if (token && !noAuth) {
+    // B6-FIX-1 (blocker B6-C2): register the token literal BEFORE it is
+    // incorporated into the header. If any later error mentions the raw
+    // token WITHOUT the `Authorization:` / `Bearer ` prefix, the runtime
+    // literal redactor still removes it — we do not rely solely on the
+    // static regexes. If no operation scope is active (no MCP call), this
+    // is a safe no-op.
+    registerSensitiveValue(token);
     headers["Authorization"] = `Bearer ${token}`;
   }
 
@@ -201,6 +210,14 @@ export async function login(email: string, password: string): Promise<{ success:
       noAuth: true,
     });
 
+    // B6-FIX-1 (blocker B6-C2): a valid TokenResponse makes both tokens
+    // known to this operation. Register them IMMEDIATELY — before any
+    // subsequent operation (persistence, diagnostics, session save) that
+    // could produce an outward error mentioning them. The values themselves
+    // are NOT altered or masked: persistence (B2/B3) must still receive the
+    // real token; the registry exists only to redact OUTPUT.
+    registerSensitiveValue(resp.access_token, resp.refresh_token);
+
     const tokens: TokenData = {
       access_token: resp.access_token,
       refresh_token: resp.refresh_token,
@@ -246,6 +263,13 @@ export async function getStatus(): Promise<{
 }
 
 async function refreshTokens(tokens: TokenData): Promise<TokenData> {
+  // B6-FIX-1 (blocker B6-C2): register the existing refresh token BEFORE the
+  // refresh request is constructed/executed, so any failure on that request
+  // mentioning the raw literal (outside the keyed `refresh_token=` form)
+  // is still covered. No B4 semantics changed: when refresh happens,
+  // classification, rotation and preservation are untouched.
+  registerSensitiveValue(tokens.refresh_token);
+
   const body = new URLSearchParams({
     grant_type: "refresh_token",
     refresh_token: tokens.refresh_token,
@@ -261,6 +285,11 @@ async function refreshTokens(tokens: TokenData): Promise<TokenData> {
     body: body.toString(),
     noAuth: true,
   });
+
+  // B6-FIX-1 (blocker B6-C2): newly received tokens are registered
+  // immediately after a refresh TokenResponse, before persistence and any
+  // later operation.
+  registerSensitiveValue(resp.access_token, resp.refresh_token);
 
   const newTokens: TokenData = {
     access_token: resp.access_token,
