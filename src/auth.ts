@@ -54,8 +54,21 @@ interface TestHooks {
   overrideStat?: (p: string) => Promise<Stats>;
   /** Override the temp filename chosen by atomicWriteJson (deterministic collision tests). */
   overrideTempName?: string;
+  /** Test-only observer called with the exact flags handed to fs.open. */
+  observeOpenFlags?: (flags: number) => void;
 }
 let testHooks: TestHooks = {};
+
+// ---------------------------------------------------------------------------
+// Test seam — not part of the production API
+// ---------------------------------------------------------------------------
+// The functions below exist exclusively so the test suite can drive the REAL
+// production paths (flag composition, ancestor validation, stat injection).
+// They are named with a `__` test-only prefix and are NOT used by any
+// production call site; proof that they never reach the published artifact is
+// asserted by the bundle-surface test in test/storage.test.ts (no `__`
+// symbol appears in dist/index.js). New hooks belong here only, never in the
+// normal export region.
 
 /** @internal test-only. Resets injected hooks between tests. */
 export function __resetTestHooks(): void {
@@ -96,6 +109,26 @@ export function __setTempNameHook(name: string): void {
     throw new Error("__setTempNameHook only accepts a bare filename");
   }
   testHooks.overrideTempName = name;
+}
+
+/**
+ * @internal test-only.
+ * Register an observer for the flags handed to fs.open by the production
+ * openExclusive()/readCredentialFile() paths. The test asserts which O_NOFOLLOW
+ * branch was actually executed instead of guessing from outcome alone.
+ */
+export function __observeOpenFlags(fn: (flags: number) => void): void {
+  testHooks.observeOpenFlags = fn;
+}
+
+/**
+ * @internal test-only.
+ * Force the production flag composition to build its flags WITHOUT O_NOFOLLOW
+ * even on runtimes that expose it — driving the REAL fallback branch that the
+ * production path takes when O_NOFOLLOW is unavailable (POSIX-lstat chain).
+ */
+export function __forceNoO_NOFOLLOW(): void {
+  testHooks.forceNoO_NOFOLLOW = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -176,6 +209,79 @@ export async function validateControlledAncestors(targetPath: string): Promise<v
 }
 
 /**
+ * Validation of an EXISTING config directory without creation or repair.
+ *
+ * Checks ~/.strider and ~/.strider/crunchyroll with lstat (never stat, never
+ * following symlinks) and confirms, for each existing component:
+ * - not a symlink;
+ * - is a directory;
+ * - no group/other bits are set (0700 contract);
+ * - owner equals the effective UID of this process, where exposed.
+ *
+ * No mkdir, no chmod — this primitive only OBSERVES.
+ *
+ * Semantics:
+ * - missing component → "absence" (return undefined, do not treat as error);
+ * - symlink        → StorageError(INSECURE_DIR);
+ * - insecure mode  → StorageError(INSECURE_DIR);
+ * - divergent owner→ StorageError(INSECURE_OWNER);
+ * - other FS error → StorageError(FILESYSTEM_ERROR);
+ *
+ * Used by the hardened READ paths (never by the write/creation paths, which
+ * enforce these properties through ensureConfigDir + assertWritablePath).
+ */
+export async function validateExistingConfigDir(): Promise<void> {
+  const components = [parentConfigDir(), getConfigDir()];
+  const lstat = testHooks.overrideLstat ?? fs.lstat;
+  const stat = testHooks.overrideStat ?? fs.stat;
+
+  for (const dir of components) {
+    let linkStat: Stats;
+    try {
+      linkStat = await lstat(dir);
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException;
+      // Missing — absence is a legitimate state on read paths; do not create.
+      if (e.code === "ENOENT") continue;
+      throw new StorageError(
+        "FILESYSTEM_ERROR",
+        `filesystem error while validating config directory ${basename(dir)}`,
+        e
+      );
+    }
+
+    if (linkStat.isSymbolicLink()) {
+      throw new StorageError(
+        "INSECURE_DIR",
+        `config directory ${basename(dir)} is a symlink; refusing to read from it`
+      );
+    }
+    if (!linkStat.isDirectory()) {
+      throw new StorageError(
+        "INSECURE_DIR",
+        `config directory ${basename(dir)} is not a directory; refusing to read from it`
+      );
+    }
+    if (linkStat.mode & GROUP_OTHER_MASK) {
+      throw new StorageError(
+        "INSECURE_DIR",
+        `config directory ${basename(dir)} has group/other permission bits set; refusing to read from it`
+      );
+    }
+    // uid check: stat (ownership is unaffected by symlink-following concerns
+    // once lstat confirmed the path is not a symlink), with test injection.
+    const s = await stat(dir);
+    const effectiveUid: number | undefined = process.getuid?.();
+    if (effectiveUid !== undefined && s.uid !== effectiveUid) {
+      throw new StorageError(
+        "INSECURE_OWNER",
+        `config directory ${basename(dir)} is owned by a different UID (${s.uid}) than this process (${effectiveUid}); refusing to read from it`
+      );
+    }
+  }
+}
+
+/**
  * Verify a directory that will hold sensitive files: mode must have no
  * group/other bits, and the owner must be the effective UID of this process
  * where the OS exposes it. Never silently fixes an insecure directory.
@@ -203,7 +309,8 @@ async function assertSecureDir(dir: string): Promise<void> {
 /**
  * Hardened directory creation/verification for ~/.strider and its subdirectory.
  * - New directories: created with DIR_MODE, followed by an explicit chmod
- *   (defense in depth; the umask may have widened the initial mode).
+ *   (defense in depth; the umask can only REMOVE bits, so the explicit
+ *   chmod(0700) normalizes the final mode to the contracted value).
  * - Existing directories: validated with lstat first (refuse symlinks), then
  *   mode + owner; an insecure directory is REFUSED, never silently repaired.
  * - Creation/verification only — reads never call this function.
@@ -246,7 +353,9 @@ export async function ensureConfigDir(): Promise<void> {
     } catch (mkdirErr) {
       throw new StorageError("FILESYSTEM_ERROR", `filesystem error while creating config directory`, mkdirErr);
     }
-    // Explicit chmod: mkdir mode may have been widened by the umask.
+    // Explicit chmod: the umask can only REMOVE bits from a requested mode
+    // (it never grants group/other bits to a freshly created DIR_MODE), so
+    // chmod(0700) normalizes the final mode to the contracted value.
     try {
       await fs.chmod(dir, DIR_MODE);
     } catch (chmodErr) {
@@ -294,7 +403,9 @@ function exclusiveOpenFlags(): number {
  * ancestor chain.
  */
 async function openExclusive(target: string): Promise<FileHandle> {
-  return fs.open(target, exclusiveOpenFlags(), FILE_MODE);
+  const flags = exclusiveOpenFlags();
+  testHooks.observeOpenFlags?.(flags);
+  return fs.open(target, flags, FILE_MODE);
 }
 
 /**
@@ -446,18 +557,18 @@ interface ReadResult {
  * downgraded to "no file".
  */
 async function readCredentialFile(filePath: string): Promise<ReadResult | null> {
-  // 1. controlled-ancestor validation; missing dir stays "absence" only when
-  //    the missing component is the dir we would read from.
+  // 1. validate the EXISTING config directories (read-only contract: no
+  //    mkdir, no chmod, no repair). Missing components are "absence"; an
+  //    existing but insecure dir is a hard StorageError.
   try {
-    await validateControlledAncestors(filePath);
+    await validateExistingConfigDir();
   } catch (err) {
-    const e = err as NodeJS.ErrnoException;
-    // If the controlled dir is simply missing, the credential is absent.
-    if (err instanceof StorageError && err.state === "INSECURE_DIR") throw err;
-    if (err instanceof StorageError && err.state === "FILESYSTEM_ERROR" && e?.code === "ENOENT") {
-      return null;
-    }
-    throw err;
+    if (err instanceof StorageError) throw err;
+    throw new StorageError(
+      "FILESYSTEM_ERROR",
+      `filesystem error while validating existing config directories`,
+      err
+    );
   }
 
   // 2. pre-open lstat of the final path: missing → absence.
@@ -494,6 +605,7 @@ async function readCredentialFile(filePath: string): Promise<ReadResult | null> 
     const flags = hasOnofollow() && !testHooks.forceNoO_NOFOLLOW
       ? (constants.O_RDONLY | (constants as { O_NOFOLLOW: number }).O_NOFOLLOW)
       : constants.O_RDONLY;
+    testHooks.observeOpenFlags?.(flags);
     handle = await fs.open(filePath, flags);
   } catch (err) {
     const e = err as NodeJS.ErrnoException;
@@ -616,11 +728,12 @@ export async function clearAuthData(): Promise<void> {
  * unreadable).
  */
 export async function hasSavedTokens(): Promise<boolean> {
-  // lstat (no symlink following) — absence check without opening or creating.
-  // The same security contract as the read path applies here: an insecure
-  // store must error, never silently become `false`.
+  // No opening, no creating. The same security contract as the read path
+  // applies here: an insecure store must error, never silently become `false`.
+  // Missing components stay "absence" (false); existing dirs are validated
+  // read-only (lstat — no symlink, is directory, mode + owner contract).
   try {
-    await validateControlledAncestors(tokenFilePath());
+    await validateExistingConfigDir();
     const stat = await fs.lstat(tokenFilePath());
     // Symlinks are caught first — lstat.isSymbolicLink() is true while
     // isFile() would also be false; the specific error matters.
