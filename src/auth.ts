@@ -12,6 +12,13 @@ export interface TokenData {
   token_type: string;
   account_id: string;
   profile_id?: string;
+  /**
+   * Names of unknown top-level fields that were tolerated on read (design
+   * GATE-B-DESIGN.md §8: "Campo desconhecido | Tolerado + unknown_fields no
+   * diagnóstico"). Never contains secret values — field names only.
+   * @internal populated by validateTokenData
+   */
+  unknown_fields?: string[];
 }
 
 export interface SessionInfo {
@@ -19,6 +26,13 @@ export interface SessionInfo {
   username?: string;
   account_id?: string;
   saved_at?: string;
+  /**
+   * Names of unknown top-level fields that were tolerated on read (design
+   * GATE-B-DESIGN.md §8: "Campo desconhecido | Tolerado + unknown_fields no
+   * diagnóstico"). Never contains secret values — field names only.
+   * @internal populated by validateSessionInfo
+   */
+  unknown_fields?: string[];
 }
 
 /** Filesystem-layer errors surfaced by the hardened storage primitives. */
@@ -40,8 +54,11 @@ export class StorageError extends Error {
 // the hardened store. Design rules (GATE-B-DESIGN.md, section 8):
 //   - expires_at is validated by MAGNITUDE only (1e12 <= v <= 1e16);
 //     a structurally valid but time-expired token is NOT corruption.
-//   - unknown fields are tolerated (no version field is required; legacy
-//     documents without version remain readable).
+//   - unknown fields are tolerated AND reported in unknown_fields
+//     (design §8: "Campo desconhecido | Tolerado + unknown_fields no
+//     diagnóstico"); field names only, never secret values.
+//   - legacy documents without version remain readable (no version field is
+//     required).
 //   - missing required field / wrong type / absurd timestamp = CORRUPT_SESSION
 //     with a diagnostic detail (no secret values echoed).
 //   - Corrupted documents are never silently treated as "not logged in".
@@ -118,6 +135,10 @@ export function validateTokenData(value: unknown): TokenData {
     }
   }
 
+  // Unknown fields: tolerated and reported by name only (design §8:
+  // "Campo desconhecido | Tolerado + unknown_fields no diagnóstico").
+  const unknown_fields = unknownFieldNames(value, KNOWN_TOKEN_FIELDS);
+
   return {
     access_token,
     refresh_token,
@@ -125,14 +146,60 @@ export function validateTokenData(value: unknown): TokenData {
     token_type,
     account_id,
     ...("profile_id" in value ? { profile_id: value["profile_id"] as string } : {}),
+    ...(unknown_fields ? { unknown_fields } : {}),
   };
 }
 
-/** Parse an ISO-8601 timestamp into a finite number, or undefined. */
-function parseIso8601(value: unknown): number | undefined {
-  if (typeof value !== "string" || value.trim().length === 0) return undefined;
-  const ms = Date.parse(value);
-  return Number.isFinite(ms) ? ms : undefined;
+/** Known top-level tokens.json fields — unknown-field detection uses this list. */
+const KNOWN_TOKEN_FIELDS = new Set([
+  "access_token",
+  "refresh_token",
+  "expires_at",
+  "token_type",
+  "account_id",
+  "profile_id",
+]);
+
+// ISO-8601 profile for saved_at (B3-FIX-1): the design says "ISO-8601
+// parseável" without a sub-profile, so the policy is the minimal set
+// compatible with the values actually produced by new Date().toISOString()
+// (YYYY-MM-DDTHH:mm:ss.sssZ). The format is enforced by a strict regex —
+// Date.parse() alone is NOT used, because it accepts runtime-dependent
+// non-ISO formats (e.g. "August 14, 2026", "Thu, 14 Aug 2026 12:00:00 GMT").
+//
+// Accepted:
+//   YYYY-MM-DDTHH:mm:ss[.fff]Z                     canonical with UTC Z
+//   YYYY-MM-DDTHH:mm:ss[.fff]±HH:MM                canonical with offset
+// Rejected (everything else, including Date.parse conveniences):
+//   date-only, time-only, non-ISO English/RFC/numeric-looking strings.
+// Offset is permitted because it is valid ISO-8601 and remains a full
+// timestamp; Z is NOT forced (the design does not say "UTC only").
+const ISO8601_RE =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
+
+/** Strict ISO-8601 timestamp validator for saved_at. */
+function isStrictIso8601Timestamp(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  if (!ISO8601_RE.test(value)) return false;
+  // Sanity ranges (calendar-plausible components, not temporal validity).
+  const year = Number(value.slice(0, 4));
+  const month = Number(value.slice(5, 7));
+  const day = Number(value.slice(8, 10));
+  const hour = Number(value.slice(11, 13));
+  const minute = Number(value.slice(14, 16));
+  const second = Number(value.slice(17, 19));
+  if (year < 1970 || year > 2999) return false;
+  if (month < 1 || month > 12) return false;
+  if (day < 1 || day > 31) return false;
+  if (hour < 0 || hour > 23) return false;
+  if (minute < 0 || minute > 59) return false;
+  if (second < 0 || second > 60) return false; // leap second tolerance
+  const rest = value.slice(19);
+  if (rest.startsWith(".")) {
+    // fractional digits then timezone: already guaranteed by the regex.
+  }
+  // Date.parse sanity: any regex-passing value must also parse finitely.
+  return Number.isFinite(Date.parse(value));
 }
 
 /**
@@ -179,13 +246,39 @@ export function validateSessionInfo(value: unknown): SessionInfo {
     if (typeof saved_at !== "string") {
       throw new StorageError("CORRUPT_SESSION", `session.json optional field saved_at has the wrong type`);
     }
-    if (parseIso8601(saved_at) === undefined) {
-      throw new StorageError("CORRUPT_SESSION", `session.json optional field saved_at is not a parseable ISO-8601 timestamp`);
+    if (!isStrictIso8601Timestamp(saved_at)) {
+      throw new StorageError("CORRUPT_SESSION", `session.json optional field saved_at is not a strict ISO-8601 timestamp (accepted profile: YYYY-MM-DDTHH:mm:ss[.fff]Z or YYYY-MM-DDTHH:mm:ss[.fff]±HH:MM)`);
     }
     out.saved_at = saved_at;
   }
 
+  // Unknown fields: tolerated and reported by name only (design §8:
+  // "Campo desconhecido | Tolerado + unknown_fields no diagnóstico").
+  out.unknown_fields = unknownFieldNames(value, KNOWN_SESSION_FIELDS);
+
   return out;
+}
+
+/** Known top-level session.json fields — unknown-field detection uses this list. */
+const KNOWN_SESSION_FIELDS = new Set([
+  "email",
+  "username",
+  "account_id",
+  "saved_at",
+]);
+
+/**
+ * Field names present in the document that are not part of the known schema.
+ * Never contains values — names only (secrets must never be echoed in the
+ * unknown_fields diagnostic).
+ */
+function unknownFieldNames(
+  doc: Record<string, unknown>,
+  known: Set<string>
+): string[] | undefined {
+  const names = Object.keys(doc).filter((key) => !known.has(key));
+  if (names.length === 0) return undefined;
+  return names;
 }
 
 /** Mode constants — kept private to avoid exposing absolute paths. */

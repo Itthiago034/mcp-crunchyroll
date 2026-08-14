@@ -288,27 +288,88 @@ describe("B3: persisted auth schema validation", { runInParallel: false }, () =>
     );
   });
 
-  test("B3: session saved_at that is not parseable ISO-8601 is rejected", () => {
+  test("B3-FIX-1: saved_at canonical ISO-8601 (UTC Z) is accepted", () => {
+    const s = validateSessionInfo(
+      makeSession({ saved_at: "2026-08-14T18:00:00.000Z" })
+    );
+    assert.equal(s.saved_at, "2026-08-14T18:00:00.000Z");
+  });
+
+  test("B3-FIX-1: saved_at ISO-8601 with explicit offset is accepted (policy: offset permitted)", () => {
+    const s = validateSessionInfo(
+      makeSession({ saved_at: "2026-08-14T18:00:00-03:00" })
+    );
+    assert.equal(s.saved_at, "2026-08-14T18:00:00-03:00");
+  });
+
+  test("B3-FIX-1: saved_at arbitrary non-ISO string → CORRUPT_SESSION", () => {
     assert.throws(
       () => validateSessionInfo(makeSession({ saved_at: "not-a-timestamp" })),
       (err: unknown) => err instanceof StorageError && err.state === "CORRUPT_SESSION"
     );
   });
 
-  // 23. unknown-fields policy: tolerated (documented design contract)
-  test("B3: unknown fields are TOLERATED (design policy) with fields intact", () => {
-    const t = validateTokenData({
+  // Date.parse() accepts these English/RFC/numeric-looking formats by
+  // runtime convenience; they are NOT strict ISO-8601 and must be rejected.
+  test("B3-FIX-1: saved_at Date.parse-compatible non-ISO English date → CORRUPT_SESSION", () => {
+    assert.ok(Number.isFinite(Date.parse("August 14, 2026")));
+    assert.throws(
+      () => validateSessionInfo(makeSession({ saved_at: "August 14, 2026" })),
+      (err: unknown) => err instanceof StorageError && err.state === "CORRUPT_SESSION"
+    );
+  });
+
+  test("B3-FIX-1: saved_at RFC-style string → CORRUPT_SESSION", () => {
+    assert.ok(Number.isFinite(Date.parse("Thu, 14 Aug 2026 12:00:00 GMT")));
+    assert.throws(
+      () =>
+        validateSessionInfo(
+          makeSession({ saved_at: "Thu, 14 Aug 2026 12:00:00 GMT" })
+        ),
+      (err: unknown) => err instanceof StorageError && err.state === "CORRUPT_SESSION"
+    );
+  });
+
+  test("B3-FIX-1: saved_at numeric-looking date string → CORRUPT_SESSION", () => {
+    assert.throws(
+      () => validateSessionInfo(makeSession({ saved_at: "08/14/2026" })),
+      (err: unknown) => err instanceof StorageError && err.state === "CORRUPT_SESSION"
+    );
+  });
+
+  test("B3-FIX-1: saved_at date-only (no time part) → CORRUPT_SESSION", () => {
+    assert.throws(
+      () => validateSessionInfo(makeSession({ saved_at: "2026-08-14" })),
+      (err: unknown) => err instanceof StorageError && err.state === "CORRUPT_SESSION"
+    );
+  });
+
+  // 23. unknown-fields policy (design §8 verbatim: "Campo desconhecido |
+  //     Tolerado + unknown_fields no diagnóstico"):
+  //     accepted + reported BY NAME in unknown_fields; the typed object
+  //     contains only known fields (discarded from the typed view).
+  test("B3-FIX-1: unknown fields are tolerated + reported in unknown_fields (names only)", () => {
+    const input = {
       ...makeTokens(),
       unknown_field: "present",
       another: 7,
       nested: { x: 1 },
-    });
+    };
+    const t = validateTokenData(input);
     assert.equal(t.access_token, "synthetic-access-token");
+    assert.deepEqual(t.unknown_fields?.sort(), ["another", "nested", "unknown_field"]);
+    // Known fields remain correctly available (same document, no drift).
+    assert.equal(t.expires_at, input.expires_at);
+    // The typed object never echoes the unknown values.
+    assert.equal("unknown_field" in t, false);
+    assert.equal("another" in t, false);
   });
 
-  test("B3: session unknown fields are tolerated", () => {
+  test("B3-FIX-1: session unknown fields tolerated + reported; no unknown value in the typed object", () => {
     const s = validateSessionInfo({ ...makeSession(), some_extra: "ok" });
     assert.equal(s.email, "user@example.com");
+    assert.deepEqual(s.unknown_fields, ["some_extra"]);
+    assert.equal("some_extra" in s, false);
   });
 
   // 24. versioning/legacy policy: no version field required (design:
@@ -319,7 +380,10 @@ describe("B3: persisted auth schema validation", { runInParallel: false }, () =>
     const legacy = makeTokens();
     assert.doesNotThrow(() => validateTokenData(legacy));
     const withVersion = { ...makeTokens(), version: 1 } as unknown as TokenData;
-    assert.doesNotThrow(() => validateTokenData(withVersion));
+    const r = validateTokenData(withVersion);
+    // version is an unknown field: tolerated and reported by name only.
+    assert.deepEqual(r.unknown_fields, ["version"]);
+    assert.equal("version" in r, false);
   });
 
   // ---------------------------------------------------------------------------
@@ -491,8 +555,11 @@ describe("B3: persisted auth schema validation", { runInParallel: false }, () =>
     });
   });
 
-  // Production: unknown fields survive the round trip (tolerance policy).
-  test("B3 production: unknown fields in the file are tolerated on load", async () => {
+  // Production: unknown fields are tolerated + reported by name on load
+  // (design §8: "Tolerado + unknown_fields no diagnóstico"). The persisted
+  // document keeps them (JSON is written as-is) but the typed object
+  // exposes only known fields.
+  test("B3-FIX-1 production: unknown fields in the file are tolerated and reported by name", async () => {
     await withFakeHome(async () => {
       await plantFile(
         process.env.HOME!,
@@ -502,6 +569,8 @@ describe("B3: persisted auth schema validation", { runInParallel: false }, () =>
       const tokens = await loadTokens();
       assert.ok(tokens);
       assert.equal(tokens.access_token, "synthetic-access-token");
+      assert.deepEqual(tokens.unknown_fields, ["legacy_note"]);
+      assert.equal("legacy_note" in tokens, false);
     });
   });
 
