@@ -24,13 +24,168 @@ export interface SessionInfo {
 /** Filesystem-layer errors surfaced by the hardened storage primitives. */
 export class StorageError extends Error {
   constructor(
-    public readonly state: "INSECURE_DIR" | "INSECURE_OWNER" | "FILESYSTEM_ERROR",
+    public readonly state: "INSECURE_DIR" | "INSECURE_OWNER" | "FILESYSTEM_ERROR" | "CORRUPT_SESSION",
     message: string,
     public readonly cause?: unknown
   ) {
     super(message);
     this.name = "StorageError";
   }
+}
+
+// ---------------------------------------------------------------------------
+// Gate B3 — persisted-data schema validation (pure functions, no I/O)
+// ---------------------------------------------------------------------------
+// Structural (atemporal) validation of the documents read from / written to
+// the hardened store. Design rules (GATE-B-DESIGN.md, section 8):
+//   - expires_at is validated by MAGNITUDE only (1e12 <= v <= 1e16);
+//     a structurally valid but time-expired token is NOT corruption.
+//   - unknown fields are tolerated (no version field is required; legacy
+//     documents without version remain readable).
+//   - missing required field / wrong type / absurd timestamp = CORRUPT_SESSION
+//     with a diagnostic detail (no secret values echoed).
+//   - Corrupted documents are never silently treated as "not logged in".
+
+/** expires_at magnitude contract (timestamp ms). */
+const EXPIRES_AT_MIN = 1e12;
+const EXPIRES_AT_MAX = 1e16;
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function requireString(
+  doc: Record<string, unknown>,
+  field: string
+): string | null {
+  const v = doc[field];
+  if (typeof v !== "string") return null;
+  if (v.trim().length === 0) return null;
+  return v;
+}
+
+/**
+ * Pure structural validator for a tokens.json document. Throws
+ * StorageError("CORRUPT_SESSION", ...) on any structural problem; returns a
+ * properly typed TokenData on success. Unknown fields are tolerated.
+ */
+export function validateTokenData(value: unknown): TokenData {
+  if (!isPlainObject(value)) {
+    throw new StorageError(
+      "CORRUPT_SESSION",
+      `tokens.json is not a JSON object (top-level type: ${value === null ? "null" : typeof value})`
+    );
+  }
+
+  const access_token = requireString(value, "access_token");
+  if (access_token === null) {
+    throw new StorageError("CORRUPT_SESSION", `tokens.json missing or invalid required field: access_token`);
+  }
+
+  const refresh_token = requireString(value, "refresh_token");
+  if (refresh_token === null) {
+    throw new StorageError("CORRUPT_SESSION", `tokens.json missing or invalid required field: refresh_token`);
+  }
+
+  const expiresRaw = value["expires_at"];
+  if (typeof expiresRaw !== "number" || !Number.isFinite(expiresRaw)) {
+    throw new StorageError(
+      "CORRUPT_SESSION",
+      `tokens.json missing or invalid required field: expires_at (got ${expiresRaw === undefined ? "nothing" : typeof expiresRaw})`
+    );
+  }
+  if (expiresRaw < EXPIRES_AT_MIN || expiresRaw > EXPIRES_AT_MAX) {
+    throw new StorageError(
+      "CORRUPT_SESSION",
+      `tokens.json expires_at is outside the contracted magnitude range (1e12..1e16): ${String(expiresRaw)}`
+    );
+  }
+
+  const token_type = requireString(value, "token_type");
+  if (token_type === null) {
+    throw new StorageError("CORRUPT_SESSION", `tokens.json missing or invalid required field: token_type`);
+  }
+
+  const account_id = requireString(value, "account_id");
+  if (account_id === null) {
+    throw new StorageError("CORRUPT_SESSION", `tokens.json missing or invalid required field: account_id`);
+  }
+
+  if ("profile_id" in value) {
+    const profile_id = value["profile_id"];
+    if (typeof profile_id !== "string" || profile_id.trim().length === 0) {
+      throw new StorageError("CORRUPT_SESSION", `tokens.json optional field profile_id has the wrong type or is empty`);
+    }
+  }
+
+  return {
+    access_token,
+    refresh_token,
+    expires_at: expiresRaw,
+    token_type,
+    account_id,
+    ...("profile_id" in value ? { profile_id: value["profile_id"] as string } : {}),
+  };
+}
+
+/** Parse an ISO-8601 timestamp into a finite number, or undefined. */
+function parseIso8601(value: unknown): number | undefined {
+  if (typeof value !== "string" || value.trim().length === 0) return undefined;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : undefined;
+}
+
+/**
+ * Pure structural validator for a session.json document. Throws
+ * StorageError("CORRUPT_SESSION", ...) on any structural problem; returns a
+ * properly typed SessionInfo on success. Unknown fields are tolerated.
+ */
+export function validateSessionInfo(value: unknown): SessionInfo {
+  if (!isPlainObject(value)) {
+    throw new StorageError(
+      "CORRUPT_SESSION",
+      `session.json is not a JSON object (top-level type: ${value === null ? "null" : typeof value})`
+    );
+  }
+
+  const out: SessionInfo = {};
+
+  if ("email" in value) {
+    const email = value["email"];
+    if (typeof email !== "string" || !email.includes("@")) {
+      throw new StorageError("CORRUPT_SESSION", `session.json optional field email has the wrong type or format (missing @)`);
+    }
+    out.email = email;
+  }
+
+  if ("username" in value) {
+    const username = value["username"];
+    if (typeof username !== "string" || username.trim().length === 0) {
+      throw new StorageError("CORRUPT_SESSION", `session.json optional field username has the wrong type or is empty`);
+    }
+    out.username = username;
+  }
+
+  if ("account_id" in value) {
+    const account_id = value["account_id"];
+    if (typeof account_id !== "string" || account_id.trim().length === 0) {
+      throw new StorageError("CORRUPT_SESSION", `session.json optional field account_id has the wrong type or is empty`);
+    }
+    out.account_id = account_id;
+  }
+
+  if ("saved_at" in value) {
+    const saved_at = value["saved_at"];
+    if (typeof saved_at !== "string") {
+      throw new StorageError("CORRUPT_SESSION", `session.json optional field saved_at has the wrong type`);
+    }
+    if (parseIso8601(saved_at) === undefined) {
+      throw new StorageError("CORRUPT_SESSION", `session.json optional field saved_at is not a parseable ISO-8601 timestamp`);
+    }
+    out.saved_at = saved_at;
+  }
+
+  return out;
 }
 
 /** Mode constants — kept private to avoid exposing absolute paths. */
@@ -672,6 +827,9 @@ async function readCredentialFile(filePath: string): Promise<ReadResult | null> 
 // ---------------------------------------------------------------------------
 
 export async function saveTokens(tokens: TokenData): Promise<void> {
+  // Gate B3: validate BEFORE serializing — writing invalid data would persist
+  // corruption even when the storage primitives themselves are sound.
+  validateTokenData(tokens);
   await ensureConfigDir();
   await assertWritablePath(tokenFilePath());
   await atomicWriteJson(tokenFilePath(), tokens);
@@ -685,14 +843,24 @@ export async function saveTokens(tokens: TokenData): Promise<void> {
 export async function loadTokens(): Promise<TokenData | null> {
   const result = await readCredentialFile(tokenFilePath());
   if (!result) return null;
+  let parsed: unknown;
   try {
-    return JSON.parse(result.data.toString("utf-8")) as TokenData;
+    parsed = JSON.parse(result.data.toString("utf-8"));
   } catch {
-    return null;
+    // JSON.truncated/malformed → explicit corruption, never silent null.
+    throw new StorageError(
+      "CORRUPT_SESSION",
+      `tokens.json is not valid JSON (malformed or truncated)`
+    );
   }
+  return validateTokenData(parsed);
 }
 
 export async function saveSessionInfo(info: SessionInfo): Promise<void> {
+  // Gate B3: validate BEFORE serializing (same rationale as saveTokens).
+  // The injected saved_at is ISO-8601 by construction, but the rest of the
+  // input is validated exactly as a persisted document would be.
+  validateSessionInfo({ ...info, saved_at: new Date().toISOString() });
   await ensureConfigDir();
   await assertWritablePath(sessionFilePath());
   await atomicWriteJson(sessionFilePath(), { ...info, saved_at: new Date().toISOString() });
@@ -704,11 +872,17 @@ export async function saveSessionInfo(info: SessionInfo): Promise<void> {
 export async function loadSessionInfo(): Promise<SessionInfo | null> {
   const result = await readCredentialFile(sessionFilePath());
   if (!result) return null;
+  let parsed: unknown;
   try {
-    return JSON.parse(result.data.toString("utf-8")) as SessionInfo;
+    parsed = JSON.parse(result.data.toString("utf-8"));
   } catch {
-    return null;
+    // JSON malformed/truncated → explicit corruption, never silent null.
+    throw new StorageError(
+      "CORRUPT_SESSION",
+      `session.json is not valid JSON (malformed or truncated)`
+    );
   }
+  return validateSessionInfo(parsed);
 }
 
 /**
