@@ -157,6 +157,7 @@ export function createBrowserSessionManager(
   let endpoint: DevToolsEndpoint | undefined;
   let removeExitListener: (() => void) | undefined;
   let stopExitResolve: (() => void) | undefined;
+  let recoveryFlight: Promise<void> | undefined;
   const stateListeners = new Set<(
     from: BrowserLifecycleState,
     to: BrowserLifecycleState,
@@ -183,19 +184,54 @@ export function createBrowserSessionManager(
     endpoint = undefined;
   };
 
-  const installExitObservation = (handle: BrowserProcessHandle) => {
-    removeExitListener?.();
-    removeExitListener = handle.onExit(() => {
-      if (stopRequested) stopExitResolve?.();
-      // Exit classification and recovery are added in Task 6.
-    });
+  const recoverFromCrash = async () => {
+    disposeActive();
+    transition("BROWSER_STARTING");
+    for (let attempt = 1; attempt <= config.maxRecoveryAttempts; attempt += 1) {
+      await seams.clock.sleep(config.backoffMs[attempt - 1] ?? config.backoffMs.at(-1) ?? 0);
+      if (stopRequested) return;
+      try {
+        await startInternal(attempt);
+        return;
+      } catch {
+        // The bounded loop owns recovery failure; no attempt escapes it.
+      }
+    }
+    disposeActive();
+    transition("STOPPED");
+    emit({ type: "recovery.exhausted" });
   };
 
-  const startInternal = async () => {
+  const handleObservedExit = (exit: BrowserProcessExit) => {
+    if (stopRequested) {
+      emit({ type: "exit.classified", classification: "MANAGER_STOP" });
+      stopExitResolve?.();
+      return;
+    }
+    if (exit.source === "adopted") return;
+    if (exit.code === 0 && exit.signal === null) {
+      emit({ type: "exit.classified", classification: "USER_CLOSED" });
+      disposeActive();
+      void clearStaleEndpoint(config.profileDir);
+      transition("STOPPED");
+      return;
+    }
+    emit({ type: "exit.classified", classification: "CRASH" });
+    if (!recoveryFlight) {
+      recoveryFlight = recoverFromCrash().finally(() => { recoveryFlight = undefined; });
+    }
+  };
+
+  const installExitObservation = (handle: BrowserProcessHandle) => {
+    removeExitListener?.();
+    removeExitListener = handle.onExit(handleObservedExit);
+  };
+
+  const startInternal = async (attempt = 1) => {
     const launchDeadline = seams.clock.now() + config.launchDeadlineMs;
     transition("BROWSER_STARTING");
     stopRequested = false;
-    emit({ type: "launch.attempt", attempt: 1 });
+    emit({ type: "launch.attempt", attempt });
     await ensureBrowserProfile(config.profileDir);
     await clearStaleEndpoint(config.profileDir);
 

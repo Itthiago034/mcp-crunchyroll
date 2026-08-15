@@ -51,21 +51,30 @@ export class FakeClock implements Clock {
       next.cancelled = true;
       this.time = next.due;
       next.listener();
-      await Promise.resolve();
-      await Promise.resolve();
+      await this.settleMicrotasks();
     }
     this.time = target;
-    await Promise.resolve();
+    await this.settleMicrotasks();
   }
 
   async drain(): Promise<void> {
     let guard = 0;
-    while (this.timers.some((timer) => !timer.cancelled)) {
+    for (;;) {
       if (guard++ > 1_000) throw new Error("FakeClock timer drain did not settle");
-      const nextDue = Math.min(...this.timers.filter((timer) => !timer.cancelled).map((timer) => timer.due));
+      await this.settleMicrotasks();
+      const active = this.timers.filter((timer) => !timer.cancelled);
+      if (active.length === 0) {
+        await this.settleMicrotasks();
+        if (!this.timers.some((timer) => !timer.cancelled)) return;
+        continue;
+      }
+      const nextDue = Math.min(...active.map((timer) => timer.due));
       await this.advance(nextDue - this.time);
     }
-    await Promise.resolve();
+  }
+
+  private async settleMicrotasks(): Promise<void> {
+    for (let index = 0; index < 20; index += 1) await Promise.resolve();
   }
 }
 
@@ -133,6 +142,9 @@ export class FakeSpawner implements ProcessSpawner {
       );
     }
     if (this.options.exitBeforeReady) {
+      void handle.emitExit(1, null);
+    }
+    if (this.options.alwaysCrash && this.launches.length > 1) {
       void handle.emitExit(1, null);
     }
     return handle;

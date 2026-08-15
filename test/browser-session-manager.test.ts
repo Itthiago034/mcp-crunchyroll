@@ -141,3 +141,73 @@ describe("BT2 session manager — start and stop", () => {
     assert.equal(typeof seams.processInspector.startTimeTicks, "function");
   });
 });
+
+describe("BT2 session manager — exit classification and process recovery", () => {
+  test("a user closing the browser (exit 0) stops WITHOUT relaunching", async () => {
+    const { manager, spawner } = wireFakes();
+    await manager.start();
+    await spawner.launches[0].emitExit(0, null);
+    assert.equal(manager.state(), "STOPPED");
+    assert.equal(spawner.launches.length, 1, "never spawn a window over the user's intent");
+  });
+
+  test("after a user close, an explicit start is required and works", async () => {
+    const { manager, spawner } = wireFakes();
+    await manager.start();
+    await spawner.launches[0].emitExit(0, null);
+    await manager.start();
+    assert.equal(spawner.launches.length, 2);
+    assert.equal(manager.state(), "BROWSER_READY");
+  });
+
+  test("a crash (non-zero exit) triggers bounded relaunch and recovers", async () => {
+    const { manager, spawner, clock } = wireFakes();
+    await manager.start();
+    await spawner.launches[0].emitExit(1, null);
+    await clock.drain();
+    assert.equal(manager.state(), "BROWSER_READY");
+    assert.equal(spawner.launches.length, 2, "exactly one recovery launch");
+  });
+
+  test("a crash by signal is also treated as a crash", async () => {
+    const { manager, spawner, clock } = wireFakes();
+    await manager.start();
+    await spawner.launches[0].emitExit(null, "SIGSEGV");
+    await clock.drain();
+    assert.equal(spawner.launches.length, 2);
+  });
+
+  test("relaunch is bounded and never loops forever", async () => {
+    const { manager, spawner, clock } = wireFakes({ alwaysCrash: true });
+    await manager.start();
+    await spawner.launches[0].emitExit(1, null);
+    await clock.drain();
+    assert.equal(spawner.launches.length, 4, "initial launch plus maxRecoveryAttempts");
+    assert.equal(manager.state(), "STOPPED");
+  });
+
+  test("relaunch exhaustion emits RECOVERY_EXHAUSTED", async () => {
+    const { manager, spawner, clock, events } = wireFakes({ alwaysCrash: true });
+    await manager.start();
+    await spawner.launches[0].emitExit(1, null);
+    await clock.drain();
+    assert.ok(events.some((event) => event.type === "recovery.exhausted"));
+  });
+
+  test("backoff follows the frozen schedule", async () => {
+    const { manager, spawner, clock } = wireFakes({ alwaysCrash: true });
+    await manager.start();
+    await spawner.launches[0].emitExit(1, null);
+    await clock.drain();
+    assert.deepEqual(clock.sleeps, [250, 500, 1000]);
+  });
+
+  test("a manager-requested stop is never classified as a crash", async () => {
+    const { manager, spawner, clock } = wireFakes();
+    await manager.start();
+    await manager.stop();
+    await clock.drain();
+    assert.equal(spawner.launches.length, 1, "stop must not trigger recovery");
+    assert.equal(manager.state(), "STOPPED");
+  });
+});
