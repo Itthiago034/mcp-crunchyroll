@@ -3,6 +3,7 @@ import { describe, test } from "node:test";
 import { WebSocketServer } from "ws";
 import { BrowserLifecycleError } from "../src/transport/browser-lifecycle-error.js";
 import { createCdpConnector } from "../src/transport/cdp-client.js";
+import { startLocalServer } from "./_local-server.js";
 
 async function withServer(
   handler: (message: Record<string, unknown>, reply: (value: unknown) => void) => void,
@@ -186,5 +187,50 @@ describe("BT2 minimal CDP client", () => {
         connection.close();
       },
     );
+  });
+});
+
+describe("BT2 local test server", () => {
+  test("binds loopback on an ephemeral port and serves the marker page", async () => {
+    const server = await startLocalServer();
+    try {
+      assert.match(server.origin, /^http:\/\/127\.0\.0\.1:\d+$/);
+      const ok = await fetch(`${server.origin}/ok`);
+      assert.equal(ok.status, 200);
+      assert.match(await ok.text(), /BT2_LOOPBACK_OK/);
+      const missing = await fetch(`${server.origin}/nope`);
+      assert.equal(missing.status, 404);
+    } finally { await server.close(); }
+  });
+
+  test("waitForRequest resolves a request already in history", async () => {
+    const server = await startLocalServer();
+    try {
+      await fetch(`${server.origin}/ok`);
+      const request = await server.waitForRequest(
+        (r) => r.method === "GET" && r.url === "/ok", 100,
+      );
+      assert.deepEqual(request, { method: "GET", url: "/ok" });
+      assert.deepEqual(Object.keys(request).sort(), ["method", "url"]);
+    } finally { await server.close(); }
+  });
+
+  test("waitForRequest resolves a future request and cleans its timer", async () => {
+    const server = await startLocalServer();
+    try {
+      const waiting = server.waitForRequest((r) => r.url === "/ok", 1_000);
+      await fetch(`${server.origin}/ok`);
+      assert.equal((await waiting).url, "/ok");
+    } finally { await server.close(); }
+  });
+
+  test("waitForRequest rejects deterministically after its bounded timeout", async () => {
+    const server = await startLocalServer();
+    try {
+      await assert.rejects(
+        () => server.waitForRequest((r) => r.url === "/never", 20),
+        /Timed out waiting for local request after 20ms/,
+      );
+    } finally { await server.close(); }
   });
 });
