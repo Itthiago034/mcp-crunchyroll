@@ -583,11 +583,60 @@ async function getValidToken(): Promise<{ token: string; account_id: string }> {
 
 // ── Search ────────────────────────────────────────────────────────────────────
 
+// ── LIVE-COMPAT-01 — discover item metadata shape ───────────────────────────
+//
+// Discover responses (search / browse) have been observed in two shapes:
+//
+//   legacy: { id, type, series_meta: { title, description, series_launch_year } }
+//   live:   { id, type, title, description, series_metadata: { series_launch_year } }
+//
+// In the live shape the title/description live at the ITEM level and only the
+// series-specific extras stay nested. Reading them exclusively from the nested
+// object drops every live item in search (the `if (meta)` guard) and degrades
+// browse titles to the raw id. Both shapes are normalized in ONE place so the
+// drift stays observable here and nowhere else.
+
+/** A discover item in either the legacy or the live metadata shape. */
+interface DiscoverItem {
+  type: string;
+  id: string;
+  title?: string;
+  description?: string;
+  series_meta?: CrunchyrollSeries;
+  movie_listing_meta?: CrunchyrollMovie;
+  series_metadata?: Partial<CrunchyrollSeries>;
+  movie_listing_metadata?: Partial<CrunchyrollMovie>;
+}
+
+/** Shape-independent view of the fields both call sites consume. */
+interface NormalizedDiscoverItem {
+  title?: string;
+  description?: string;
+  series_launch_year?: number;
+}
+
+/**
+ * Resolve title/description/series extras from whichever shape the item uses.
+ * Legacy nested metadata wins when present; otherwise the item-level fields
+ * (live shape) are used. An unknown shape yields an empty view, which callers
+ * handle exactly as they already handled missing metadata.
+ */
+function normalizeDiscoverItem(item: DiscoverItem): NormalizedDiscoverItem {
+  const legacy = item.series_meta ?? item.movie_listing_meta;
+  const live = item.series_metadata ?? item.movie_listing_metadata;
+  const extras = (legacy ?? live) as Partial<CrunchyrollSeries> | undefined;
+  return {
+    title: legacy?.title ?? item.title,
+    description: legacy?.description ?? item.description,
+    series_launch_year: extras?.series_launch_year,
+  };
+}
+
 interface SearchResult {
   items: Array<{
     type: string;
     count: number;
-    items: Array<{ type: string; id: string; series_meta?: CrunchyrollSeries; movie_listing_meta?: CrunchyrollMovie }>;
+    items: DiscoverItem[];
   }>;
 }
 
@@ -611,8 +660,8 @@ export async function searchAnime(
   const results: Array<{ type: string; id: string; title: string; description: string }> = [];
   for (const group of data.data ?? []) {
     for (const item of group.items ?? []) {
-      const meta = item.series_meta ?? item.movie_listing_meta;
-      if (meta) {
+      const meta = normalizeDiscoverItem(item);
+      if (meta.title) {
         results.push({
           type: item.type,
           id: item.id,
@@ -829,19 +878,19 @@ export async function browse(options: BrowseOptions = {}): Promise<BrowseItem[]>
     ...(options.is_dubbed !== undefined ? { is_dubbed: String(options.is_dubbed) } : {}),
   });
 
-  const data = await request<{ data: Array<{ type: string; id: string; series_meta?: CrunchyrollSeries; movie_listing_meta?: CrunchyrollMovie }> }>(
+  const data = await request<{ data: DiscoverItem[] }>(
     `${API_BASE}/content/v2/discover/browse?${params}`,
     { token }
   );
 
   return (data.data ?? []).map((item) => {
-    const meta = item.series_meta ?? item.movie_listing_meta;
+    const meta = normalizeDiscoverItem(item);
     return {
       id: item.id,
-      title: meta?.title ?? item.id,
+      title: meta.title ?? item.id,
       type: item.type,
-      description: meta?.description?.slice(0, 300) ?? "",
-      series_launch_year: (meta as CrunchyrollSeries)?.series_launch_year,
+      description: meta.description?.slice(0, 300) ?? "",
+      series_launch_year: meta.series_launch_year,
     };
   });
 }

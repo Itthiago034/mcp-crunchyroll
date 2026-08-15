@@ -1,0 +1,108 @@
+{
+  "_comment": [
+    "LIVE-COMPAT-01 regression fixture.",
+    "Structural shape of the current Crunchyroll discover responses, captured",
+    "during controlled read-only discovery and reproduced here with SYNTHETIC",
+    "content. No real titles, ids, account data, tokens or cookies.",
+    "",
+    "The defect: items carry `series_metadata` (and the movie equivalent),",
+    "while title/description live at the ITEM level. The candidate parser reads",
+    "`series_meta`/`movie_listing_meta` and expects title/description inside",
+    "that object, so live items are dropped (search) or degraded (browse).",
+    "",
+    "`legacy` reproduces the older shape the candidate was written against and",
+    "exists to prove the fix does not regress it."
+  ],
+  "live": {
+    "search": {
+      "total": 1,
+      "data": [
+        {
+          "type": "series",
+          "count": 2,
+          "items": [
+            {
+              "id": "GT00000001",
+              "type": "series",
+              "title": "Synthetic Live Series",
+              "description": "A synthetic series used only to pin the live response shape.",
+              "slug_title": "synthetic-live-series",
+              "series_metadata": {
+                "series_launch_year": 2024,
+                "episode_count": 12
+              }
+            },
+            {
+              "id": "GM00000002",
+              "type": "movie_listing",
+              "title": "Synthetic Live Movie",
+              "description": "A synthetic movie listing used only to pin the live response shape.",
+              "slug_title": "synthetic-live-movie",
+              "movie_listing_metadata": {
+                "movie_release_year": 2023
+              }
+            }
+          ]
+        }
+      ],
+      "meta": {}
+    },
+    "browse": {
+      "total": 1,
+      "data": [
+        {
+          "id": "GT00000001",
+          "type": "series",
+          "title": "Synthetic Live Series",
+          "description": "A synthetic series used only to pin the live response shape.",
+          "slug_title": "synthetic-live-series",
+          "series_metadata": {
+            "series_launch_year": 2024,
+            "episode_count": 12
+          }
+        }
+      ],
+      "meta": {}
+    }
+  },
+  "legacy": {
+    "search": {
+      "total": 1,
+      "data": [
+        {
+          "type": "series",
+          "count": 1,
+          "items": [
+            {
+              "id": "GT00000009",
+              "type": "series",
+              "series_meta": {
+                "id": "GT00000009",
+                "title": "Synthetic Legacy Series",
+                "description": "Legacy shape: title and description nested in series_meta.",
+                "series_launch_year": 2019
+              }
+            }
+          ]
+        }
+      ],
+      "meta": {}
+    },
+    "browse": {
+      "total": 1,
+      "data": [
+        {
+          "id": "GT00000009",
+          "type": "series",
+          "series_meta": {
+            "id": "GT00000009",
+            "title": "Synthetic Legacy Series",
+            "description": "Legacy shape: title and description nested in series_meta.",
+            "series_launch_year": 2019
+          }
+        }
+      ],
+      "meta": {}
+    }
+  }
+}
