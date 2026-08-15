@@ -4,11 +4,14 @@ import {
   constants,
   lstatSync,
   mkdirSync,
+  readFileSync,
   statSync,
+  unlinkSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { BrowserLifecycleError } from "./browser-lifecycle-error.js";
+import type { DevToolsEndpoint } from "./browser-lifecycle-types.js";
 
 const EXECUTABLE_CANDIDATES = [
   "chromium",
@@ -83,4 +86,44 @@ export function resolveBrowserExecutable(env: NodeJS.ProcessEnv = process.env): 
     }
   }
   throw new BrowserLifecycleError("BROWSER_EXECUTABLE_NOT_FOUND");
+}
+
+export async function readDevToolsEndpoint(
+  dir = browserProfileDir(),
+): Promise<DevToolsEndpoint> {
+  let contents: string;
+  try {
+    contents = readFileSync(join(dir, "DevToolsActivePort"), "utf8");
+  } catch {
+    throw new BrowserLifecycleError("ENDPOINT_UNAVAILABLE");
+  }
+
+  const lines = contents.split(/\r?\n/);
+  const portText = lines[0];
+  const browserPath = lines[1];
+  const port = Number(portText);
+  if (
+    !/^\d+$/.test(portText ?? "") ||
+    !Number.isInteger(port) ||
+    port < 1 ||
+    port > 65_535 ||
+    !browserPath ||
+    !browserPath.startsWith("/")
+  ) {
+    throw new BrowserLifecycleError("ENDPOINT_MALFORMED");
+  }
+
+  return Object.freeze({
+    port,
+    browserPath,
+    webSocketDebuggerUrl: `ws://127.0.0.1:${port}${browserPath}`,
+  });
+}
+
+export async function clearStaleEndpoint(dir = browserProfileDir()): Promise<void> {
+  try {
+    unlinkSync(join(dir, "DevToolsActivePort"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
 }
