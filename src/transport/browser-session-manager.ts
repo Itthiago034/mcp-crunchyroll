@@ -155,9 +155,19 @@ export function createBrowserSessionManager(
   let processHandle: BrowserProcessHandle | undefined;
   let connection: CdpConnection | undefined;
   let endpoint: DevToolsEndpoint | undefined;
+  let nextConnectionGeneration = 0;
+  let activeConnectionGeneration = 0;
+  let connectionRegistration: {
+    readonly connection: CdpConnection;
+    readonly generation: number;
+    handledClose: boolean;
+    phase: "candidate" | "ready";
+    unsubscribeClose: () => void;
+  } | undefined;
   let removeExitListener: (() => void) | undefined;
   let stopExitResolve: (() => void) | undefined;
   let recoveryFlight: Promise<void> | undefined;
+  let reconnectFlight: Promise<void> | undefined;
   const stateListeners = new Set<(
     from: BrowserLifecycleState,
     to: BrowserLifecycleState,
@@ -174,15 +184,122 @@ export function createBrowserSessionManager(
     for (const listener of stateListeners) listener(previous, next);
   };
 
+  const disposeConnection = () => {
+    const registration = connectionRegistration;
+    connectionRegistration = undefined;
+    if (registration) {
+      registration.unsubscribeClose();
+      registration.connection.close();
+      if (activeConnectionGeneration === registration.generation) {
+        activeConnectionGeneration = 0;
+      }
+    } else {
+      connection?.close();
+    }
+    connection = undefined;
+  };
+
   const disposeActive = () => {
     removeExitListener?.();
     removeExitListener = undefined;
     processHandle?.dispose();
     processHandle = undefined;
-    connection?.close();
-    connection = undefined;
+    disposeConnection();
     endpoint = undefined;
   };
+
+  async function reconnectFromDisconnect(): Promise<void> {
+    const reconnectEndpoint = endpoint;
+    if (!reconnectEndpoint) return;
+    for (let attempt = 1; attempt <= config.maxRecoveryAttempts; attempt += 1) {
+      if (stopRequested) return;
+      emit({ type: "reconnect.attempt", attempt });
+      try {
+        const candidate = await connectCandidate(reconnectEndpoint);
+        if (stopRequested) {
+          candidate.unsubscribeClose();
+          candidate.connection.close();
+          return;
+        }
+        if (candidate.handledClose) {
+          throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
+        }
+        const previous = connectionRegistration;
+        connection = candidate.connection;
+        connectionRegistration = candidate;
+        previous?.unsubscribeClose();
+        candidate.phase = "ready";
+        emit({ type: "cdp.connected" });
+        transition("BROWSER_READY");
+        return;
+      } catch {
+        await seams.clock.sleep(
+          config.backoffMs[attempt - 1] ?? config.backoffMs.at(-1) ?? 0,
+        );
+      }
+    }
+    if (stopRequested) return;
+    disposeActive();
+    transition("STOPPED");
+    emit({ type: "recovery.exhausted" });
+  }
+
+  function handleReadyConnectionClose(): void {
+    if (stopRequested || lifecycleState !== "BROWSER_READY") return;
+    emit({ type: "cdp.disconnected" });
+    transition("DEGRADED");
+    if (!reconnectFlight) {
+      reconnectFlight = reconnectFromDisconnect().finally(() => {
+        reconnectFlight = undefined;
+      });
+    }
+  }
+
+  async function connectCandidate(candidateEndpoint: DevToolsEndpoint) {
+    const candidateConnection = await seams.connector.connect(
+      candidateEndpoint.webSocketDebuggerUrl,
+    );
+    const generation = ++nextConnectionGeneration;
+    activeConnectionGeneration = generation;
+    let rejectClosed!: (error: Error) => void;
+    const closed = new Promise<never>((_resolve, reject) => { rejectClosed = reject; });
+    const registration = {
+      connection: candidateConnection,
+      generation,
+      handledClose: false,
+      phase: "candidate" as "candidate" | "ready",
+      unsubscribeClose: (() => undefined) as () => void,
+    };
+    registration.unsubscribeClose = candidateConnection.onClose(() => {
+      if (
+        registration.handledClose ||
+        registration.generation !== activeConnectionGeneration
+      ) return;
+      registration.handledClose = true;
+      if (registration.phase === "candidate") {
+        rejectClosed(new BrowserLifecycleError("BROWSER_DISCONNECTED"));
+        return;
+      }
+      handleReadyConnectionClose();
+    });
+
+    try {
+      await Promise.race([
+        candidateConnection.send("Browser.getVersion"),
+        closed,
+      ]);
+      if (registration.handledClose) {
+        throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
+      }
+      return registration;
+    } catch (error) {
+      registration.unsubscribeClose();
+      candidateConnection.close();
+      if (activeConnectionGeneration === generation) activeConnectionGeneration = 0;
+      if (error instanceof BrowserLifecycleError) throw error;
+      throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
+    }
+  }
 
   const recoverFromCrash = async () => {
     disposeActive();
@@ -252,14 +369,19 @@ export function createBrowserSessionManager(
     });
 
     try {
-      const readiness = (async () => {
-        endpoint = await waitForEndpoint(config, seams.clock, launchDeadline);
-        connection = await seams.connector.connect(endpoint.webSocketDebuggerUrl);
-        await connection.send("Browser.getVersion");
-      })();
-      await Promise.race([readiness, earlyExit]);
+      endpoint = await Promise.race([
+        waitForEndpoint(config, seams.clock, launchDeadline),
+        earlyExit,
+      ]);
+      const candidate = await Promise.race([connectCandidate(endpoint), earlyExit]);
+      if (candidate.handledClose) {
+        throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
+      }
+      connection = candidate.connection;
+      connectionRegistration = candidate;
       cancelEarlyExit?.();
       installExitObservation(spawned);
+      candidate.phase = "ready";
       emit({ type: "cdp.connected" });
       transition("BROWSER_READY");
     } catch (error) {

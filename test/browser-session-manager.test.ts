@@ -211,3 +211,100 @@ describe("BT2 session manager — exit classification and process recovery", () 
     assert.equal(manager.state(), "STOPPED");
   });
 });
+
+describe("BT2 session manager — CDP disconnect and reconnect", () => {
+  test("a close immediately after connect prevents BROWSER_READY", async () => {
+    const { manager } = wireFakes({ closeImmediatelyAfterConnect: true });
+    await assert.rejects(
+      () => manager.start(),
+      (error: unknown) => error instanceof BrowserLifecycleError,
+    );
+    assert.notEqual(manager.state(), "BROWSER_READY");
+  });
+
+  test("a close after Browser.getVersion but before readiness prevents BROWSER_READY", async () => {
+    const { manager } = wireFakes({ closeAfterHandshake: true });
+    await assert.rejects(
+      () => manager.start(),
+      (error: unknown) => error instanceof BrowserLifecycleError,
+    );
+    assert.notEqual(manager.state(), "BROWSER_READY");
+  });
+
+  test("a CDP close moves BROWSER_READY → DEGRADED immediately", async () => {
+    const { manager, connector } = wireFakes();
+    await manager.start();
+    connector.connections[0].emitClose();
+    assert.equal(manager.state(), "DEGRADED");
+  });
+
+  test("the first reconnect succeeds and does NOT spawn a second browser", async () => {
+    const { manager, connector, spawner, clock } = wireFakes();
+    await manager.start();
+    connector.connections[0].emitClose();
+    await clock.drain();
+    assert.equal(manager.state(), "BROWSER_READY");
+    assert.equal(spawner.launches.length, 1, "a dropped socket must not start a second browser");
+    assert.equal(connector.connections.length, 2, "exactly one reconnect");
+  });
+
+  test("transient reconnect failures follow the exact backoff, then succeed", async () => {
+    const { manager, connector, spawner, clock } = wireFakes({ failReconnects: 2 });
+    await manager.start();
+    connector.connections[0].emitClose();
+    await clock.drain();
+    assert.deepEqual(clock.sleeps, [250, 500]);
+    assert.equal(manager.state(), "BROWSER_READY");
+    assert.equal(spawner.launches.length, 1);
+  });
+
+  test("exhausted reconnects end in STOPPED with RECOVERY_EXHAUSTED", async () => {
+    const { manager, connector, spawner, clock, events } = wireFakes({
+      failReconnects: Infinity,
+    });
+    await manager.start();
+    connector.connections[0].emitClose();
+    await clock.drain();
+    assert.equal(manager.state(), "STOPPED");
+    assert.deepEqual(clock.sleeps, [250, 500, 1000], "bounded, no infinite loop");
+    assert.ok(events.some((event) => event.type === "recovery.exhausted"));
+    assert.equal(spawner.launches.length, 1, "never escalates into spawning a browser");
+  });
+
+  test("duplicate close paths produce one DEGRADED transition and reconnect loop", async () => {
+    const { manager, connector, clock, transitions } = wireFakes();
+    await manager.start();
+    connector.connections[0].emitClose();
+    connector.connections[0].emitHistoricalClose();
+    await clock.drain();
+    assert.equal(
+      transitions.filter(([, to]) => to === "DEGRADED").length,
+      1,
+    );
+    assert.equal(connector.connections.length, 2);
+  });
+
+  test("a stale old-generation close cannot disrupt the active replacement", async () => {
+    const { manager, connector, clock } = wireFakes();
+    await manager.start();
+    const oldConnection = connector.connections[0];
+    oldConnection.emitClose();
+    await clock.drain();
+    assert.equal(manager.state(), "BROWSER_READY");
+    oldConnection.emitHistoricalClose();
+    await clock.drain();
+    assert.equal(manager.state(), "BROWSER_READY");
+    assert.equal(connector.connections.length, 2);
+  });
+
+  test("a CDP close during manager stop starts no recovery", async () => {
+    const { manager, connector, clock } = wireFakes();
+    await manager.start();
+    const stopping = manager.stop();
+    connector.connections[0].emitClose();
+    await clock.drain();
+    await stopping;
+    assert.equal(manager.state(), "STOPPED");
+    assert.equal(connector.connections.length, 1, "no reconnect attempted during stop");
+  });
+});

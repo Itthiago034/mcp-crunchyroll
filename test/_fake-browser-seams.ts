@@ -155,12 +155,21 @@ export class FakeConnection implements CdpConnection {
   readonly calls: Array<{ method: string; params?: Record<string, unknown> }> = [];
   private readonly eventListeners = new Map<string, Set<(params: unknown) => void>>();
   private readonly closeListeners = new Set<() => void>();
+  private readonly historicalCloseListeners = new Set<() => void>();
   private closed = false;
+
+  constructor(
+    private readonly closeAfterHandshake = false,
+    private readonly allowSendAfterClose = false,
+  ) {}
 
   async send(method: string, params?: Record<string, unknown>): Promise<unknown> {
     this.calls.push({ method, ...(params ? { params } : {}) });
-    if (this.closed) throw new Error("fake connection closed");
-    if (method === "Browser.getVersion") return { product: "FakeBrowser/1.0" };
+    if (this.closed && !this.allowSendAfterClose) throw new Error("fake connection closed");
+    if (method === "Browser.getVersion") {
+      if (this.closeAfterHandshake) queueMicrotask(() => this.emitClose());
+      return { product: "FakeBrowser/1.0" };
+    }
     return {};
   }
 
@@ -175,7 +184,10 @@ export class FakeConnection implements CdpConnection {
   onClose(listener: () => void): () => void {
     let active = true;
     if (this.closed) queueMicrotask(() => { if (active) listener(); });
-    else this.closeListeners.add(listener);
+    else {
+      this.closeListeners.add(listener);
+      this.historicalCloseListeners.add(listener);
+    }
     return () => { active = false; this.closeListeners.delete(listener); };
   }
 
@@ -186,6 +198,10 @@ export class FakeConnection implements CdpConnection {
     this.closeListeners.clear();
   }
 
+  emitHistoricalClose(): void {
+    for (const listener of [...this.historicalCloseListeners]) listener();
+  }
+
   emitEvent(event: string, params: unknown): void {
     for (const listener of this.eventListeners.get(event) ?? []) listener(params);
   }
@@ -194,9 +210,23 @@ export class FakeConnection implements CdpConnection {
 export class FakeConnector {
   readonly connections: FakeConnection[] = [];
 
+  constructor(private readonly options: WireFakeOptions) {}
+
   async connect(_url: string): Promise<CdpConnection> {
-    const connection = new FakeConnection();
+    if (
+      this.connections.length > 0 &&
+      this.connections.length <= (this.options.failReconnects ?? 0)
+    ) {
+      this.connections.push(new FakeConnection());
+      throw new Error("synthetic reconnect failure");
+    }
+    const isFirst = this.connections.length === 0;
+    const connection = new FakeConnection(
+      isFirst && Boolean(this.options.closeAfterHandshake),
+      isFirst && Boolean(this.options.closeImmediatelyAfterConnect),
+    );
     this.connections.push(connection);
+    if (isFirst && this.options.closeImmediatelyAfterConnect) connection.emitClose();
     return connection;
   }
 }
@@ -226,6 +256,8 @@ export interface WireFakeOptions {
   initialPageUrl?: string;
   alwaysCrash?: boolean;
   failReconnects?: number;
+  closeImmediatelyAfterConnect?: boolean;
+  closeAfterHandshake?: boolean;
   existingOwnedBrowser?: string;
   adoptedExitsOnClose?: boolean;
 }
@@ -237,7 +269,7 @@ export function wireFakes(options: WireFakeOptions = {}) {
   chmodSync(profileDir, 0o700);
   const spawner = new FakeSpawner(profileDir, options);
   const clock = new FakeClock();
-  const connector = new FakeConnector();
+  const connector = new FakeConnector(options);
   const processInspector = new FakeProcessIdentityInspector();
   const seams: BrowserSessionSeams = { spawner, clock, connector, processInspector };
   const config: BrowserSessionConfig = {
