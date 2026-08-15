@@ -191,6 +191,31 @@ interface TokenResponse {
   profile_id?: string;
 }
 
+// B4-FIX-1 (blocker B4-C3): static separation of the login and refresh
+// structural contracts. Login REQUIRES refresh_token; refresh makes it
+// optional ONLY by property absence (non-rotation). The two types are
+// distinct at the type level so no caller can misread a non-rotated
+// refresh response through a shape that mandates refresh_token.
+interface LoginTokenResponse {
+  access_token: string;
+  refresh_token: string;
+  expires_in: number;
+  token_type: string;
+  account_id: string;
+  profile_id?: string;
+}
+
+interface RefreshTokenResponse {
+  access_token: string;
+  /** ABSENT property = non-rotation: the caller keeps the old refresh_token.
+   *  A PRESENT invalid value was already rejected by the validator. */
+  refresh_token?: string;
+  expires_in: number;
+  token_type: string;
+  account_id: string;
+  profile_id?: string;
+}
+
 // ── Gate B4 — refresh state machine (Architecture B) ─────────────────────────
 //
 // Separate login/refresh structural contracts (no global refresh_token
@@ -246,7 +271,7 @@ function finitePositiveNumber(v: unknown): v is number {
  * refresh_token is REQUIRED for login. Provider payload enters as unknown
  * and is validated structurally (no TS casts as runtime validation).
  */
-export function validateLoginTokenResponse(value: unknown): TokenResponse {
+export function validateLoginTokenResponse(value: unknown): LoginTokenResponse {
   if (!isPlainObject(value)) throw new RefreshError("MALFORMED_RESPONSE", FIXED_MESSAGES.MALFORMED_RESPONSE);
   const required: Array<[string, (v: unknown) => boolean]> = [
     ["access_token", nonEmptyString],
@@ -262,7 +287,7 @@ export function validateLoginTokenResponse(value: unknown): TokenResponse {
   if (profile_id !== undefined && !nonEmptyString(profile_id)) {
     throw new RefreshError("MALFORMED_RESPONSE", FIXED_MESSAGES.MALFORMED_RESPONSE);
   }
-  return value as unknown as TokenResponse;
+  return value as unknown as LoginTokenResponse;
 }
 
 /**
@@ -274,7 +299,7 @@ export function validateLoginTokenResponse(value: unknown): TokenResponse {
  */
 export function validateRefreshTokenResponse(value: unknown): {
   valid: true;
-  response: TokenResponse;
+  response: RefreshTokenResponse;
 } | { valid: false; rotated: false } {
   if (!isPlainObject(value)) return { valid: false, rotated: false };
   if (!nonEmptyString(value["access_token"])) return { valid: false, rotated: false };
@@ -287,8 +312,8 @@ export function validateRefreshTokenResponse(value: unknown): {
   //   absent property → valid non-rotation
   //   present + non-empty string → rotated (valid)
   //   present + anything else (null/number/array/object/empty/whitespace) → malformed
-  if (!("refresh_token" in value)) return { valid: true, response: value as unknown as TokenResponse };
-  if (nonEmptyString(value["refresh_token"])) return { valid: true, response: value as unknown as TokenResponse };
+  if (!("refresh_token" in value)) return { valid: true, response: value as unknown as RefreshTokenResponse };
+  if (nonEmptyString(value["refresh_token"])) return { valid: true, response: value as unknown as RefreshTokenResponse };
   return { valid: false, rotated: false };
 }
 
@@ -538,7 +563,11 @@ async function getValidToken(): Promise<{ token: string; account_id: string }> {
     // rotation, non-rotation preservation, single-flight and secret-free
     // shared failure. Any failure surfaces as a RefreshError whose kind
     // determines the outcome for the caller (no automatic retry).
-    return { token: (await refreshRequest(tokens)).access_token, account_id: tokens.account_id };
+    // B4-FIX-1 (blocker B4-C1): use the identity of the SAME refreshed
+    // TokenData the state machine returned — never the stale pre-refresh
+    // value, which would route the caller to the wrong account.
+    const refreshed = await refreshRequest(tokens);
+    return { token: refreshed.access_token, account_id: refreshed.account_id };
   }
 
   return { token: tokens.access_token, account_id: tokens.account_id };

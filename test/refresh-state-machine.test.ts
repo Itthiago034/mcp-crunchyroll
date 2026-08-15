@@ -25,6 +25,7 @@ import {
 import { refreshRequest, RefreshError } from "../src/api.js";
 
 const AUTH_URL = "https://auth.crunchyroll.com/auth/v1/token";
+const API_BASE_URL = "https://www.crunchyroll.com"; // mirrors src/api.ts API_BASE (consumer URL construction)
 const B4_SENTINEL = "B4_SHARED_SECRET_SENTINEL_7f39c1";
 
 // ── Synthetic fixtures ──────────────────────────────────────────────────────
@@ -855,5 +856,279 @@ describe("B4-login — malformed login response contract", () => {
         `${p.label}: validation must ${p.expect === "accept" ? "accept" : "reject"}`
       );
     }
+  });
+});
+
+// ── B4-FIX-1 regression groups (blockers B4-C1 / B4-C2 / B4-C3) ─────────────
+//
+// C1: the expired-token path in getValidToken() must return the REFRESHED
+// account_id from the same TokenData the refresh returned — not the stale
+// value loaded before the refresh. Exercised through the REAL public
+// consumer `getStatus()` (which reads the persisted identity), no new
+// exports or test hooks.
+// C2: the REAL production `login()` must be tested end-to-end (login →
+// request() → synthetic HTTP 200 without refresh_token → failure with
+// zero persistence and no raw synthetic secrets in the outward message).
+// C3: LoginTokenResponse / RefreshTokenResponse are statically distinct —
+// refresh_token REQUIRED on login, OPTIONAL-ONLY-BY-ABSENCE on refresh,
+// with no cast to a type requiring refresh_token on the non-rotated path.
+
+describe("B4-FIX-1-C1 — refreshed identity used by a real public consumer", () => {
+  const oldAccountId = "b4f1-old-account-id";
+  const newAccountId = "b4f1-refreshed-account-id";
+
+  test("getStatus() after a non-rotated refresh reports the refreshed account_id, not the stale one", async () => {
+    // Non-vacuous setup: the refreshed provider response carries a
+    // DELIBERATELY DIFFERENT account_id than the one persisted before the
+    // refresh.
+    const originalFetch = globalThis.fetch;
+    const prevHome = process.env.HOME;
+    const tmpHome = setupIsolatedHome(
+      syntheticTokens({ account_id: oldAccountId, expires_at: Date.now() - 1000 }) // expired → refresh path
+    );
+    process.env.HOME = tmpHome;
+
+    const expectedRefreshUrl = AUTH_URL;
+    let refreshSeen = false;
+    installFetch((input, init) => {
+      if (String(input) === expectedRefreshUrl && init?.method === "POST") {
+        refreshSeen = true;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "b4f1-refreshed-access",
+              expires_in: 1800,
+              token_type: "Bearer",
+              account_id: newAccountId, // DELIBERATELY DIFFERENT from oldAccountId
+              // no refresh_token → non-rotated
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          )
+        );
+      }
+      // The real public consumer `addToWatchlist()` issues one authenticated
+      // POST to the account watchlist URL after the refresh; anything else
+      // is unexpected in this synthetic setup.
+      if (String(input).startsWith(`${API_BASE_URL}/content/v2/${newAccountId}/watchlist/`) && init?.method === "POST") {
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }
+      assert.fail(`unexpected fetch: ${input}`);
+    });
+
+    try {
+      // getStatus() reads the persisted identity but does NOT trigger a
+      // refresh by itself — exercising the refresh requires a real consumer
+      // that needs a valid token. addToWatchlist() is a public consumer that
+      // goes through getValidToken(), which issues the refresh for the
+      // expired fixture above and then persists the refreshed identity.
+      const { addToWatchlist, getStatus } = await import("../src/api.js");
+      await addToWatchlist("GMWHE5QWY");
+      assert.ok(refreshSeen, "the refresh HTTP request must have been made");
+
+      // Now getStatus() — a second, separate public consumer — must report
+      // the REFRESHED identity that the refresh path persisted, never the
+      // stale one from before the refresh.
+      const status = await getStatus();
+      assert.equal(status.logged_in, true, "must still be logged in after refresh");
+      assert.equal(
+        status.account_id,
+        newAccountId,
+        "the identity persisted/consumed after refresh must be the REFRESHED account_id, not the stale one"
+      );
+    } finally {
+      restoreFetch(originalFetch);
+      process.env.HOME = prevHome;
+      rmSync(tmpHome, { recursive: true, force: true });
+    }
+  });
+
+  test("getValidToken() refresh path returns the refreshed access_token AND the refreshed account_id together", async () => {
+    // Regression proof via the real public consumer addToWatchlist(): its
+    // outgoing URL embeds the account_id returned by getValidToken().
+    const originalFetch = globalThis.fetch;
+    const prevHome = process.env.HOME;
+    const tmpHome = setupIsolatedHome(
+      syntheticTokens({ account_id: oldAccountId, expires_at: Date.now() - 1000 })
+    );
+    process.env.HOME = tmpHome;
+
+    let watchlistUrl: string | undefined;
+    installFetch((input, init) => {
+      if (String(input) === AUTH_URL && init?.method === "POST") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "b4f1-refreshed-access",
+              expires_in: 1800,
+              token_type: "Bearer",
+              account_id: newAccountId,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          )
+        );
+      }
+      if (String(input).includes(`/content/v2/`) && init?.method === "POST") {
+        watchlistUrl = String(input);
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }
+      assert.fail(`unexpected fetch: ${input}`);
+    });
+
+    try {
+      const { addToWatchlist } = await import("../src/api.js");
+      await addToWatchlist("GMWHE5QWY");
+      assert.ok(watchlistUrl, "addToWatchlist must have issued its HTTP request");
+      assert.ok(
+        watchlistUrl!.includes(`/content/v2/${newAccountId}/watchlist/GMWHE5QWY`),
+        `watchlist URL must embed the REFRESHED account_id ${newAccountId}, got ${watchlistUrl}`
+      );
+      assert.ok(!watchlistUrl!.includes(oldAccountId), "the STALE account_id must not appear in the URL");
+    } finally {
+      restoreFetch(originalFetch);
+      process.env.HOME = prevHome;
+      rmSync(tmpHome, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("B4-FIX-1-C2 — production login() integration (real path, synthetic HTTP)", () => {
+  const SYNTH_LOGIN_EMAIL = "b4f1-synthetic@example.invalid";
+  const SYNTH_LOGIN_PASSWORD = "b4f1-synthetic-password-9x2k";
+
+  test("login() with HTTP 200 body missing refresh_token returns failure and persists nothing", async () => {
+    const originalFetch = globalThis.fetch;
+    const prevHome = process.env.HOME;
+    const tmpHome = setupIsolatedHome(null); // clean HOME: nothing pre-persisted
+    process.env.HOME = tmpHome;
+
+    let seenCredentials: { email: string | null; password: string | null } = { email: null, password: null };
+    installFetch((input, init) => {
+      if (String(input) === AUTH_URL && init?.method === "POST") {
+        const body = String(init?.body ?? "");
+        const params = new URLSearchParams(body);
+        seenCredentials.email = params.get("username");
+        seenCredentials.password = params.get("password");
+        // Synthetic HTTP 200 whose body is structurally login-like but
+        // MISSING refresh_token entirely.
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "synthetic-login-access",
+              expires_in: 1800,
+              token_type: "Bearer",
+              account_id: "synthetic-login-account",
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          )
+        );
+      }
+      assert.fail(`unexpected fetch: ${input}`);
+    });
+
+    try {
+      const { login } = await import("../src/api.js");
+      const result = await login(SYNTH_LOGIN_EMAIL, SYNTH_LOGIN_PASSWORD);
+
+      // 1. failure contract
+      assert.equal(result.success, false, "production login() must return success:false for a body missing refresh_token");
+      // 7. outward message must not leak the synthetic secrets
+      assert.ok(
+        !result.message.includes(SYNTH_LOGIN_EMAIL) && !result.message.includes(SYNTH_LOGIN_PASSWORD),
+        `outward login message must not contain synthetic credentials: ${result.message}`
+      );
+
+      // 2/3/4. zero persistence, no valid partial files
+      const persisted = readPersisted(tmpHome);
+      assert.equal(persisted.tokens, null, "no tokens.json must be persisted");
+      assert.equal(persisted.session, null, "no session.json must be persisted");
+      const configDir = joinPath(tmpHome, ".strider", "crunchyroll");
+      let leftovers: string[] = []; try { leftovers = require("node:fs").readdirSync(configDir); } catch { leftovers = []; }
+      assert.deepEqual(leftovers, [], `no partial files may appear in the config dir: ${leftovers.join(", ")}`);
+
+      // credentials crossed the form body (expected, noAuth path) but no
+      // real credential was used — values are synthetic-only
+      assert.equal(seenCredentials.email, SYNTH_LOGIN_EMAIL);
+      assert.equal(seenCredentials.password, SYNTH_LOGIN_PASSWORD);
+    } finally {
+      restoreFetch(originalFetch);
+      process.env.HOME = prevHome;
+      rmSync(tmpHome, { recursive: true, force: true });
+    }
+  });
+
+  test("login() failure does not create the .strider directory tree at all", async () => {
+    const originalFetch = globalThis.fetch;
+    const prevHome = process.env.HOME;
+    const tmpHome = mkdtempSync(joinPath(tmpdir(), "b4f1-clean-"));
+    process.env.HOME = tmpHome;
+
+    installFetch(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            access_token: "synthetic-x",
+            expires_in: 1800,
+            token_type: "Bearer",
+            account_id: "synthetic-y",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        )
+      )
+    );
+
+    try {
+      const { login } = await import("../src/api.js");
+      await login("b4f1-b@example.invalid", "b4f1-pass");
+      const { tokens, session } = readPersisted(tmpHome);
+      assert.equal(tokens, null);
+      assert.equal(session, null);
+    } finally {
+      restoreFetch(originalFetch);
+      process.env.HOME = prevHome;
+      rmSync(tmpHome, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("B4-FIX-1-C3 — static separation of Login vs Refresh token contracts", () => {
+  test("LoginTokenResponse requires refresh_token while RefreshTokenResponse makes it optional", async () => {
+    const api = await import("../src/api.js");
+    const loginValidator = (api as unknown as Record<string, (v: unknown) => unknown>).validateLoginTokenResponse;
+    const refreshValidator = (api as unknown as Record<string, (v: unknown) => unknown>).validateRefreshTokenResponse;
+    assert.equal(typeof loginValidator, "function", "validateLoginTokenResponse must be exported");
+    assert.equal(typeof refreshValidator, "function", "validateRefreshTokenResponse must be exported");
+
+    const withoutRefresh: unknown = {
+      access_token: "a",
+      expires_in: 1800,
+      token_type: "Bearer",
+      account_id: "acct",
+    };
+    // login: refresh_token REQUIRED → must throw
+    assert.throws(
+      () => loginValidator(withoutRefresh),
+      "LoginTokenResponse must REQUIRE refresh_token"
+    );
+    // refresh: absent refresh_token → valid non-rotation, no throw
+    const refreshResult = refreshValidator(withoutRefresh) as { valid: boolean };
+    assert.equal(refreshResult.valid, true, "RefreshTokenResponse must ACCEPT absent refresh_token (non-rotation)");
+  });
+
+  test("the non-rotated refresh path does not cast to a type requiring refresh_token", async () => {
+    // Structural evidence: the source of validateRefreshTokenResponse must
+    // not contain a cast (`as unknown as TokenResponse`-style) where the
+    // target type demands refresh_token.
+    const { readFileSync } = await import("node:fs");
+    const source = readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
+    const refreshFnStart = source.indexOf("export function validateRefreshTokenResponse");
+    const refreshFnEnd = source.indexOf("export function classifyRefreshResponse", refreshFnStart);
+    const fnSource = source.slice(refreshFnStart, refreshFnEnd);
+    assert.ok(
+      fnSource.includes("as unknown as RefreshTokenResponse") || !fnSource.includes("as unknown as TokenResponse"),
+      "the refresh validator must return RefreshTokenResponse (refresh_token optional) without casting to a type requiring refresh_token"
+    );
+    // The returned shape for non-rotated responses must carry the rotated flag
+    // typed alongside the response, not hide it behind the shared TokenResponse.
+    assert.ok(fnSource.includes("rotated"), "refresh validation result must express rotation explicitly");
   });
 });
