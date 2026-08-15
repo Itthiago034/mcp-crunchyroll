@@ -1,0 +1,190 @@
+import assert from "node:assert/strict";
+import { describe, test } from "node:test";
+import { WebSocketServer } from "ws";
+import { BrowserLifecycleError } from "../src/transport/browser-lifecycle-error.js";
+import { createCdpConnector } from "../src/transport/cdp-client.js";
+
+async function withServer(
+  handler: (message: Record<string, unknown>, reply: (value: unknown) => void) => void,
+  run: (url: string) => Promise<void>,
+) {
+  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await new Promise<void>((resolve) => server.on("listening", resolve));
+  const { port } = server.address() as { port: number };
+  server.on("connection", (socket) => {
+    socket.on("message", (data) => {
+      handler(JSON.parse(String(data)) as Record<string, unknown>, (value) => {
+        socket.send(JSON.stringify(value));
+      });
+    });
+  });
+  try {
+    await run(`ws://127.0.0.1:${port}/devtools/browser/test`);
+  } finally {
+    for (const client of server.clients) client.terminate();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+
+describe("BT2 minimal CDP client", () => {
+  test("a command response is correlated by id", async () => {
+    await withServer(
+      (message, reply) => reply({ id: message.id, result: { product: "TestBrowser/1.0" } }),
+      async (url) => {
+        const connection = await createCdpConnector(5_000).connect(url);
+        const result = (await connection.send("Browser.getVersion")) as { product: string };
+        assert.equal(result.product, "TestBrowser/1.0");
+        connection.close();
+      },
+    );
+  });
+
+  test("concurrent commands resolve to their own responses", async () => {
+    await withServer(
+      (message, reply) => setTimeout(
+        () => reply({ id: message.id, result: { echo: message.method } }),
+        message.method === "A" ? 30 : 1,
+      ),
+      async (url) => {
+        const connection = await createCdpConnector(5_000).connect(url);
+        const [a, b] = await Promise.all([connection.send("A"), connection.send("B")]);
+        assert.deepEqual(a, { echo: "A" });
+        assert.deepEqual(b, { echo: "B" });
+        connection.close();
+      },
+    );
+  });
+
+  test("an event without an id reaches its subscriber", async () => {
+    await withServer(
+      (message, reply) => {
+        reply({
+          method: "Target.targetDestroyed",
+          params: { targetId: "t1" },
+        });
+        reply({ id: message.id, result: {} });
+      },
+      async (url) => {
+        const connection = await createCdpConnector(5_000).connect(url);
+        const seen = new Promise<unknown>((resolve) => {
+          connection.on("Target.targetDestroyed", resolve);
+        });
+        const command = connection.send("Anything");
+        assert.deepEqual(await seen, { targetId: "t1" });
+        await command;
+        connection.close();
+      },
+    );
+  });
+
+  test("a command that never answers rejects on the bounded timeout", async () => {
+    await withServer(
+      () => undefined,
+      async (url) => {
+        const connection = await createCdpConnector(50).connect(url);
+        await assert.rejects(
+          () => connection.send("Browser.getVersion"),
+          (error: unknown) =>
+            error instanceof BrowserLifecycleError && error.kind === "BROWSER_DISCONNECTED",
+        );
+        connection.close();
+      },
+    );
+  });
+
+  test("closing the socket rejects every pending command", async () => {
+    await withServer(
+      () => undefined,
+      async (url) => {
+        const connection = await createCdpConnector(5_000).connect(url);
+        const first = connection.send("Browser.getVersion");
+        const second = connection.send("Target.getTargets");
+        connection.close();
+        for (const pending of [first, second]) {
+          await assert.rejects(
+            () => pending,
+            (error: unknown) =>
+              error instanceof BrowserLifecycleError && error.kind === "BROWSER_DISCONNECTED",
+          );
+        }
+      },
+    );
+  });
+
+  test("onClose fires when the socket closes", async () => {
+    await withServer(
+      () => undefined,
+      async (url) => {
+        const connection = await createCdpConnector(5_000).connect(url);
+        const closed = new Promise<void>((resolve) => connection.onClose(resolve));
+        connection.close();
+        await closed;
+      },
+    );
+  });
+
+  test("late onClose registration receives one asynchronous sticky replay", async () => {
+    await withServer(
+      () => undefined,
+      async (url) => {
+        const connection = await createCdpConnector(5_000).connect(url);
+        connection.close();
+        await new Promise<void>((resolve) => connection.onClose(resolve));
+        let calls = 0;
+        connection.onClose(() => { calls += 1; });
+        assert.equal(calls, 0, "late replay is asynchronous");
+        await Promise.resolve();
+        assert.equal(calls, 1);
+      },
+    );
+  });
+
+  test("unsubscribe before queued sticky replay suppresses the callback", async () => {
+    await withServer(
+      () => undefined,
+      async (url) => {
+        const connection = await createCdpConnector(5_000).connect(url);
+        connection.close();
+        await new Promise<void>((resolve) => connection.onClose(resolve));
+        let calls = 0;
+        const unsubscribe = connection.onClose(() => { calls += 1; });
+        unsubscribe();
+        unsubscribe();
+        await Promise.resolve();
+        assert.equal(calls, 0);
+      },
+    );
+  });
+
+  test("duplicate close paths produce one logical close", async () => {
+    await withServer(
+      () => undefined,
+      async (url) => {
+        const connection = await createCdpConnector(5_000).connect(url);
+        let calls = 0;
+        const closed = new Promise<void>((resolve) => {
+          connection.onClose(() => {
+            calls += 1;
+            resolve();
+          });
+        });
+        connection.close();
+        connection.close();
+        await closed;
+        await Promise.resolve();
+        assert.equal(calls, 1);
+      },
+    );
+  });
+
+  test("the connection exposes no arbitrary-JS or navigation surface", async () => {
+    await withServer(
+      (message, reply) => reply({ id: message.id, result: {} }),
+      async (url) => {
+        const connection = await createCdpConnector(5_000).connect(url);
+        assert.deepEqual(Object.keys(connection).sort(), ["close", "on", "onClose", "send"]);
+        connection.close();
+      },
+    );
+  });
+});
