@@ -51,7 +51,9 @@ describe("BT1 registry — construction and lookup", () => {
 
   test("resolveCall returns the descriptor for a known operation", () => {
     const registry = createOperationRegistry([SYNTHETIC_PUBLIC]);
-    const resolved = resolveCall(registry, "SYNTHETIC_PUBLIC", {});
+    // SYNTHETIC_PUBLIC declares `query` as required, so a well-formed call
+    // supplies it; this test is about descriptor lookup, not about arguments.
+    const resolved = resolveCall(registry, "SYNTHETIC_PUBLIC", { query: "frieren" });
     assert.equal(resolved.descriptor.id, "SYNTHETIC_PUBLIC");
   });
 
@@ -77,4 +79,48 @@ describe("BT1 registry — construction and lookup", () => {
       "real descriptors enter only when their path literal leaves src/api.ts (BT6/BT7)"
     );
   });
+});
+
+describe("BT1 registry — caller arguments", () => {
+  const registry = createOperationRegistry([SYNTHETIC_PUBLIC]);
+
+  test("declared caller arguments are accepted and returned validated", () => {
+    const { descriptor, callerParams } = resolveCall(registry, "SYNTHETIC_PUBLIC", {
+      query: "frieren", n: 20,
+    });
+    assert.equal(descriptor.id, "SYNTHETIC_PUBLIC");
+    assert.deepEqual(callerParams, { query: "frieren", n: 20 });
+  });
+
+  test("a missing required caller argument is rejected", () => {
+    assert.throws(
+      () => resolveCall(registry, "SYNTHETIC_PUBLIC", { n: 5 }),
+      (e: unknown) =>
+        e instanceof TransportError && e.kind === "INVALID_ARGUMENTS" &&
+        String(e.detail).includes("query")
+    );
+  });
+
+  test("a caller argument failing its predicate is rejected", () => {
+    assert.throws(
+      () => resolveCall(registry, "SYNTHETIC_PUBLIC", { query: "frieren", n: 9999 }),
+      (e: unknown) => e instanceof TransportError && e.kind === "INVALID_ARGUMENTS"
+    );
+  });
+
+  // The safety property is structural: ONLY keys declared in callerParams are
+  // accepted. This list demonstrates that rule; it is not a blacklist.
+  for (const forbidden of [
+    "url", "path", "origin", "method", "headers", "Authorization", "authorization",
+    "bearer", "token", "cookie", "Cookie", "script", "javascript",
+  ]) {
+    test(`caller key "${forbidden}" is rejected as an unexpected argument`, () => {
+      assert.throws(
+        () => resolveCall(registry, "SYNTHETIC_PUBLIC", { query: "frieren", [forbidden]: "x" }),
+        (e: unknown) =>
+          e instanceof TransportError && e.kind === "INVALID_ARGUMENTS" &&
+          String(e.detail).includes(forbidden)
+      );
+    });
+  }
 });

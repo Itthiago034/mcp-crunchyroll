@@ -47,6 +47,24 @@ export function resolveCall(
   if (!descriptor) {
     throw new TransportError("UNKNOWN_OPERATION", `no such operation: ${String(operation)}`);
   }
+  // Allow-list, not blacklist: only declared callerParams are accepted, so a
+  // key nobody declared can never reach a backend regardless of its name.
+  for (const key of Object.keys(params)) {
+    if (!(key in descriptor.callerParams)) {
+      throw new TransportError("INVALID_ARGUMENTS", `unexpected argument: ${key}`);
+    }
+  }
+  for (const [name, spec] of Object.entries(descriptor.callerParams)) {
+    if (!(name in params)) {
+      if (spec.required) {
+        throw new TransportError("INVALID_ARGUMENTS", `missing required argument: ${name}`);
+      }
+      continue;
+    }
+    if (!spec.validate(params[name])) {
+      throw new TransportError("INVALID_ARGUMENTS", `invalid argument: ${name}`);
+    }
+  }
   return Object.freeze({ descriptor, callerParams: Object.freeze({ ...params }) });
 }
 
