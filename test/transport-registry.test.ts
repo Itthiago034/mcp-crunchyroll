@@ -188,3 +188,100 @@ describe("BT1 registry — auth-owned parameters", () => {
     );
   });
 });
+
+describe("BT1 registry — immutability of captured policy", () => {
+  test("mutating a caller ParamSpec after construction does not change policy", () => {
+    const spec = { required: true, validate: (v: unknown) => typeof v === "string" };
+    const descriptor: OperationDescriptor = {
+      id: "SYNTHETIC_MUTABLE" as OperationId,
+      method: "GET",
+      pathTemplate: "/synthetic/v1/mutable",
+      callerParams: { q: spec },
+      authDerivedParams: {},
+      scope: "PUBLIC",
+      mutation: false,
+    };
+    const registry = createOperationRegistry([descriptor]);
+    assert.throws(() => resolveCall(registry, "SYNTHETIC_MUTABLE", { q: 123 }));
+
+    (spec as { validate: (v: unknown) => boolean }).validate = () => true;
+
+    assert.throws(
+      () => resolveCall(registry, "SYNTHETIC_MUTABLE", { q: 123 }),
+      (e: unknown) => e instanceof TransportError && e.kind === "INVALID_ARGUMENTS",
+      "the registry must use its captured predicate, not the caller's mutated one"
+    );
+  });
+
+  test("adding a key to the original callerParams map does not widen the registry", () => {
+    const callerParams: Record<string, typeof nonEmptyString> = { q: nonEmptyString };
+    const descriptor: OperationDescriptor = {
+      id: "SYNTHETIC_WIDEN" as OperationId,
+      method: "GET",
+      pathTemplate: "/synthetic/v1/widen",
+      callerParams,
+      authDerivedParams: {},
+      scope: "PUBLIC",
+      mutation: false,
+    };
+    const registry = createOperationRegistry([descriptor]);
+
+    callerParams.url = nonEmptyString;
+
+    assert.throws(
+      () => resolveCall(registry, "SYNTHETIC_WIDEN", { q: "x", url: "https://evil.example" }),
+      (e: unknown) =>
+        e instanceof TransportError && e.kind === "INVALID_ARGUMENTS" &&
+        String(e.detail).includes("url")
+    );
+  });
+
+  test("mutating the original descriptor's path template does not change the registry copy", () => {
+    const descriptor: OperationDescriptor = {
+      id: "SYNTHETIC_PATH" as OperationId,
+      method: "GET",
+      pathTemplate: "/synthetic/v1/original",
+      callerParams: {},
+      authDerivedParams: {},
+      scope: "PUBLIC",
+      mutation: false,
+    };
+    const registry = createOperationRegistry([descriptor]);
+    (descriptor as { pathTemplate: string }).pathTemplate = "/synthetic/v1/hijacked";
+    assert.equal(registry.get("SYNTHETIC_PATH")?.pathTemplate, "/synthetic/v1/original");
+  });
+
+  test("mutating the original authDerivedParams map does not change the registry copy", () => {
+    const authDerivedParams: Record<string, { source: "accountId" | "profileId" }> = {
+      accountId: { source: "accountId" },
+    };
+    const descriptor: OperationDescriptor = {
+      id: "SYNTHETIC_AUTH_COPY" as OperationId,
+      method: "GET",
+      pathTemplate: "/synthetic/v1/{accountId}/items",
+      callerParams: {},
+      authDerivedParams,
+      scope: "ACCOUNT",
+      mutation: false,
+    };
+    const registry = createOperationRegistry([descriptor]);
+    delete authDerivedParams.accountId;
+    assert.throws(
+      () => resolveCall(registry, "SYNTHETIC_AUTH_COPY", { accountId: "a" }),
+      (e: unknown) => e instanceof TransportError && e.kind === "CALLER_SUPPLIED_IDENTITY"
+    );
+  });
+
+  test("the descriptor returned by the registry cannot be mutated to widen policy", () => {
+    const registry = createOperationRegistry([SYNTHETIC_PUBLIC]);
+    const got = registry.get("SYNTHETIC_PUBLIC");
+    assert.ok(got);
+    assert.throws(() => {
+      (got.callerParams as Record<string, unknown>).url = nonEmptyString;
+    }, TypeError, "the exposed callerParams map must be frozen");
+    assert.throws(
+      () => resolveCall(registry, "SYNTHETIC_PUBLIC", { query: "x", url: "https://evil.example" }),
+      (e: unknown) => e instanceof TransportError && e.kind === "INVALID_ARGUMENTS"
+    );
+  });
+});

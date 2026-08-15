@@ -3,13 +3,45 @@
 // Owns descriptor construction, lookup and the single resolution function.
 // Nothing here is wired into an MCP tool in BT1.
 
-import type { CallerParams, OperationDescriptor, ResolvedCall } from "./types.js";
+import type {
+  AuthDerivedParamSpec, CallerParams, OperationDescriptor, ParamSpec, ResolvedCall,
+} from "./types.js";
 import { TransportError } from "./transport-error.js";
 
 export interface OperationRegistry {
   get(id: string): OperationDescriptor | undefined;
   has(id: string): boolean;
   ids(): readonly string[];
+}
+
+/**
+ * Deep capture.
+ *
+ * The registry owns an immutable COPY of every descriptor, down to each param
+ * spec. Mutating the objects the caller passed in must never change registry
+ * policy afterwards. Validate predicates stay as function references by design:
+ * a function IS the policy, and cloning it is neither possible nor meaningful.
+ * Hand-written for this known shape — no recursive deep-freeze helper, no
+ * structuredClone, no proxy, no immutable-collection dependency.
+ */
+function captureDescriptor(d: OperationDescriptor): OperationDescriptor {
+  const callerParams: Record<string, ParamSpec> = {};
+  for (const [name, spec] of Object.entries(d.callerParams)) {
+    callerParams[name] = Object.freeze({ required: spec.required, validate: spec.validate });
+  }
+  const authDerivedParams: Record<string, AuthDerivedParamSpec> = {};
+  for (const [name, spec] of Object.entries(d.authDerivedParams)) {
+    authDerivedParams[name] = Object.freeze({ source: spec.source });
+  }
+  return Object.freeze({
+    id: d.id,
+    method: d.method,
+    pathTemplate: d.pathTemplate,
+    callerParams: Object.freeze(callerParams),
+    authDerivedParams: Object.freeze(authDerivedParams),
+    scope: d.scope,
+    mutation: d.mutation,
+  });
 }
 
 /**
@@ -40,7 +72,7 @@ export function createOperationRegistry(
         );
       }
     }
-    byId.set(d.id, Object.freeze({ ...d }));
+    byId.set(d.id, captureDescriptor(d));
   }
   return {
     get: (id) => byId.get(id),
