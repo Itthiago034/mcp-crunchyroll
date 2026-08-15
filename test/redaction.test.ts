@@ -647,3 +647,117 @@ describe("B6-FIX-1: deterministic MCP boundary", () => {
     });
   }
 });
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// B6-FIX-2 — success path inside the active scope (blocker B6-C1)
+// Sentinels only; never real credentials.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync } from "node:fs";
+import { join as joinPath, dirname } from "node:path";
+import { tmpdir } from "node:os";
+
+const SENTINEL_SUCCESS_BOUNDARY = "B6_SUCCESS_BOUNDARY_SENTINEL@example.invalid";
+
+// ── B6-FIX-2: deterministic MCP success-path boundary (source + bundle) ──────
+
+describe("B6-FIX-2: success path sanitized inside the active scope", () => {
+  for (const [label, target] of TARGETS) {
+    describe(`${label}`, () => {
+      test("crunchyroll_status success result never echoes the runtime sentinel (source+bundle raw stdout)", async () => {
+        // Regression probe against SHA 83256b1: on that commit sanitizeToolResult
+        // ran AFTER the withRedactionScope finally cleanup, so a runtime-
+        // registered literal (no static pattern around it) leaked into the
+        // outward success payload. This test reproduces the exact causal chain:
+        //   tools/call crunchyroll_status
+        //   → arguments.password = SENTINEL  (SENSITIVE_ARG_KEYS registers it)
+        //   → getStatus() builds the success result with session.email = SENTINEL
+        //   → central success sanitize boundary (inside the active scope)
+        //   → client receives ***REDACTED***
+        //   → finally clears the registry
+        // No real network: the local synthetic session/tokens fixtures are used.
+        const tmpHome = mkdtempSync(joinPath(tmpdir(), "b6-fix2-home-"));
+        const striderDir = joinPath(tmpHome, ".strider");
+        const configDir = joinPath(striderDir, "crunchyroll");
+        mkdirSync(configDir, { recursive: true });
+        chmodSync(striderDir, 0o700);
+        chmodSync(configDir, 0o700);
+        // Synthetic B2 contract: sensitive files = 0600.
+        // Synthetic B3 contract: sessions saved_at must be a valid ISO-8601
+        // timestamp (4-digit year profile, calendar-valid); tokens are fully
+        // synthetic and structurally valid.
+        writeFileSync(
+          joinPath(configDir, "tokens.json"),
+          JSON.stringify({
+            access_token: "b6-synthetic-access-token",
+            refresh_token: "b6-synthetic-refresh-token",
+            expires_at: Date.now() + 3600_000,
+            token_type: "Bearer",
+            account_id: "b6-synthetic-account-id",
+          })
+        );
+        writeFileSync(
+          joinPath(configDir, "session.json"),
+          JSON.stringify({
+            email: SENTINEL_SUCCESS_BOUNDARY,
+            account_id: "b6-synthetic-account-id",
+            saved_at: "2026-08-14T12:00:00Z",
+          })
+        );
+        chmodSync(joinPath(configDir, "tokens.json"), 0o600);
+        chmodSync(joinPath(configDir, "session.json"), 0o600);
+
+        // The session.json proves the pre-redaction success result WOULD
+        // contain the sentinel (session.email is exactly that value) — so an
+        // absent sentinel in the output proves redaction, not absence.
+        // Primary evidence: the REAL McpClient exchange (deterministic,
+        // no network, tool executes normally; the extra `password` arg is a
+        // pure sentinel used only to register it via SENSITIVE_ARG_KEYS).
+        // The server process runs against the isolated HOME above.
+        const client2 = new McpClient({
+          command: target.command,
+          args: target.args,
+          cwd: ROOT,
+          env: { ...process.env, HOME: tmpHome },
+        });
+        try {
+          await client2.initialize();
+          const resp = await client2.sendRequest("tools/call", {
+            name: "crunchyroll_status",
+            arguments: { password: SENTINEL_SUCCESS_BOUNDARY },
+          });
+          // JSON-RPC success: result present, error absent.
+          assert.ok(resp.result, "JSON-RPC response must be a success result");
+          assert.equal("error" in resp && resp.error, false, "result.error must be absent");
+          const content = (resp.result as { content?: { type: string; text?: string }[] }).content;
+          assert.ok(content && content.length > 0, "content must exist");
+          const rawPayload = JSON.stringify(resp);
+          // The sentinel appears as a PURE value (raw email, no static
+          // pattern prefix) — a static regex cannot hide the temporal bug.
+          assert.equal(
+            rawPayload.includes(SENTINEL_SUCCESS_BOUNDARY),
+            false,
+            "runtime sentinel must not appear in the outward success payload"
+          );
+          assert.equal(
+            rawPayload.includes(REDACTED_MARKER),
+            true,
+            "marker must replace the runtime sentinel"
+          );
+          // Safe status structure still visible.
+          const text = content.map((c) => c.text ?? "").join("\n");
+          assert.ok(
+            text.includes("logged_in") && text.includes("account_id") && text.includes("token_expires_at"),
+            "safe status structure (logged_in/account_id/token_expires_at) still visible"
+          );
+          // The email field is still present — redacted, not removed.
+          assert.ok(text.includes("email"), "email field still present (redacted value)");
+          assert.equal(text.includes(SENTINEL_SUCCESS_BOUNDARY), false, "session.email sentinel redacted");
+        } finally {
+          client2.kill();
+          rmSync(tmpHome, { recursive: true, force: true });
+        }
+      });
+    });
+  }
+});

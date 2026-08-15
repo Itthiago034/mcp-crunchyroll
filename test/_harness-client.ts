@@ -8,6 +8,9 @@ export interface McpHarnessOptions {
   args: string[];
   cwd: string;
   timeoutMs?: number;
+  // Optional environment for tests that relocate the config dir via $HOME.
+  // Unset: inherits process.env (unchanged existing behavior).
+  env?: NodeJS.ProcessEnv;
 }
 
 /**
@@ -28,6 +31,7 @@ export class McpClient {
     this.proc = spawn(this.options.command, this.options.args, {
       cwd: this.options.cwd,
       stdio: ["pipe", "pipe", "pipe"],
+      env: this.options.env ?? process.env,
     });
     const rl = readline.createInterface({ input: this.proc.stdout as NodeJS.ReadableStream });
     rl.on("line", (raw) => {

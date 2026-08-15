@@ -325,7 +325,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     try {
-      switch (name) {
+      // B6-FIX-2 (blocker B6-C1): the switch dispatch runs inside an internal
+      // async IIFE so that EVERY tool success return converges to the single
+      // `sanitizeToolResult(...)` call below — executed INSIDE the active
+      // `withRedactionScope` callback, before `finally` clears the registry.
+      // No per-tool patch: all 21 tools are covered by this one structure.
+      // McpError throws from the switch (default case) propagate untouched to
+      // the catch — ErrorCode and MethodNotFound semantics are preserved.
+      const result = await (async () => {
+        switch (name) {
         // ── Auth ──────────────────────────────────────────────────────────────
         case "crunchyroll_login": {
           const result = await login(args.email as string, args.password as string);
@@ -554,12 +562,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         default:
           throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
       }
+      })();
+      return sanitizeToolResult(result);
     } catch (err) {
-      // B6-FIX-1 (blocker B6-C1): every outward CallTool result — success or
-      // error — passes through the central redaction boundary BEFORE the
-      // `withRedactionScope` callback returns, so the finally cleanup still
-      // sees the full registry. The error path builds its own result below;
-      // see `return sanitizeToolResult(...)` at the end of this handler.
+      // B6-FIX-2 (blocker B6-C1): every outward CallTool result — success or
+      // error — passes through the central redaction boundary WHILE the
+      // `withRedactionScope` callback is still executing, so the finally
+      // cleanup still sees the full registry at redaction time. The error
+      // path builds its own result below; see `return sanitizeToolResult(...)`
+      // in the catch body.
       // B6-core: sanitize the error (preserving class, never mutating the
       // original) and redact registered secrets + static class patterns
       // from the message and stack before it reaches the model.
@@ -592,12 +603,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // and any remaining registered literal must also be covered here).
       return sanitizeToolResult(errResult);
     }
-  }).then((result) => {
-    // B6-FIX-1 (blocker B6-C1): the single structural exit point. ALL outward
-    // CallTool content (success returns and this wrapper) is sanitized while
-    // the operation scope is still active — `finally` then clears the
-    // registry unconditionally. No success-return path can bypass this.
-    return sanitizeToolResult(result);
   });
 });
 
