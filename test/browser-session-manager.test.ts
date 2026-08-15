@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { describe, test } from "node:test";
 import { BrowserLifecycleError } from "../src/transport/browser-lifecycle-error.js";
 import { createRealBrowserSessionSeams } from "../src/transport/browser-session-manager.js";
@@ -397,5 +398,165 @@ describe("BT2 session manager — managed page", () => {
       (error: unknown) =>
         error instanceof BrowserLifecycleError && error.kind === "BROWSER_UNAVAILABLE",
     );
+  });
+});
+
+describe("BT2 session manager — owned-browser reuse and orphans", () => {
+  test("all thirteen valid checks adopt with zero spawn", async () => {
+    const { manager, spawner } = wireFakes({ existingOwnedBrowser: "valid" });
+    await manager.start();
+    assert.equal(manager.state(), "BROWSER_READY");
+    assert.equal(spawner.launches.length, 0, "adoption, not launch");
+    assert.equal(manager.managedPageId(), undefined, "never adopts an orphan tab");
+  });
+
+  for (const [label, fixture] of [
+    ["stale PID", "stale-pid"],
+    ["record profile mismatch", "record-profile-mismatch"],
+    ["live cmdline profile mismatch", "cmdline-profile-mismatch"],
+    ["cmdline profile substring", "cmdline-profile-substring"],
+    ["missing --user-data-dir", "cmdline-missing-profile"],
+    ["unavailable cmdline", "cmdline-unavailable"],
+    ["duplicate --user-data-dir", "cmdline-duplicate-profile"],
+    ["canonical executable mismatch", "canonical-executable-mismatch"],
+    ["start-time mismatch", "starttime-mismatch"],
+    ["malformed endpoint", "bad-endpoint"],
+    ["failed Browser.getVersion", "handshake-fails"],
+  ] as const) {
+    test(`${label} rejects adoption, launches fresh and signals no pid`, async () => {
+      const { manager, spawner, processInspector } = wireFakes({
+        existingOwnedBrowser: fixture,
+      });
+      await manager.start();
+      assert.equal(spawner.launches.length, 1);
+      assert.equal("signalIfIdentityMatches" in processInspector, false);
+    });
+  }
+
+  test("a symlink launcher adopts when canonical executable identity matches", async () => {
+    const { manager, spawner } = wireFakes({
+      existingOwnedBrowser: "valid-symlink-executable",
+    });
+    await manager.start();
+    assert.equal(manager.state(), "BROWSER_READY");
+    assert.equal(spawner.launches.length, 0);
+  });
+
+  test("an adopted process disappearance is unknown exit and never relaunches", async () => {
+    const { manager, spawner, processInspector, clock, events } = wireFakes({
+      existingOwnedBrowser: "valid",
+    });
+    await manager.start();
+    processInspector.setStartTime(processInspector.adoptedPid, null);
+    await clock.advance(250);
+    assert.equal(manager.state(), "STOPPED");
+    assert.equal(spawner.launches.length, 0, "no silent crash-style relaunch");
+    assert.ok(events.some((event) =>
+      event.type === "exit.classified" &&
+      event.classification === "ADOPTED_EXIT_UNKNOWN"));
+  });
+
+  test("adopted stop sends Browser.close once and no OS signal API exists", async () => {
+    const { manager, connector, processInspector, spawner, clock } = wireFakes({
+      existingOwnedBrowser: "valid",
+      adoptedExitsOnClose: true,
+    });
+    await manager.start();
+    const stopping = manager.stop();
+    await clock.drain();
+    await stopping;
+    assert.equal(
+      connector.connections[0].calls.filter((call) => call.method === "Browser.close").length,
+      1,
+    );
+    assert.equal("signalIfIdentityMatches" in processInspector, false);
+    assert.equal(spawner.launches.length, 0);
+  });
+
+  test("adopted disappearance within the deadline clears metadata and preserves profile", async () => {
+    const { manager, profileDir, clock } = wireFakes({
+      existingOwnedBrowser: "valid",
+      adoptedExitsOnClose: true,
+    });
+    await manager.start();
+    const stopping = manager.stop();
+    await clock.drain();
+    await stopping;
+    assert.equal(manager.state(), "STOPPED");
+    assert.equal(existsSync(join(profileDir, ".mcp-browser-owner.json")), false);
+    assert.equal(existsSync(join(profileDir, "DevToolsActivePort")), false);
+    assert.equal(statSync(profileDir).mode & 0o777, 0o700);
+  });
+
+  test("adopted stop timeout sends no signal and preserves ownership/profile", async () => {
+    const { manager, profileDir, clock, processInspector } = wireFakes({
+      existingOwnedBrowser: "valid",
+      cdpCommandTimeoutMs: 100,
+    });
+    await manager.start();
+    const stopping = manager.stop();
+    await clock.advance(100);
+    await assert.rejects(
+      () => stopping,
+      (error: unknown) =>
+        error instanceof BrowserLifecycleError && error.kind === "BROWSER_STOP_TIMEOUT",
+    );
+    assert.equal(manager.state(), "STOPPED");
+    assert.equal(existsSync(join(profileDir, ".mcp-browser-owner.json")), true);
+    assert.equal(existsSync(join(profileDir, "DevToolsActivePort")), true);
+    assert.equal(statSync(profileDir).mode & 0o777, 0o700);
+    assert.equal("signalIfIdentityMatches" in processInspector, false);
+  });
+
+  test("explicit start after stop timeout performs complete validation again", async () => {
+    const { manager, spawner, processInspector, clock } = wireFakes({
+      existingOwnedBrowser: "valid",
+      cdpCommandTimeoutMs: 100,
+    });
+    await manager.start();
+    const firstInspectionCount = processInspector.inspectionCalls.length;
+    const stopping = manager.stop();
+    await clock.advance(100);
+    await assert.rejects(() => stopping);
+    processInspector.setStartTime(processInspector.adoptedPid, 9_999_999);
+    await manager.start();
+    assert.ok(processInspector.inspectionCalls.length > firstInspectionCount);
+    assert.equal(spawner.launches.length, 1, "invalid former owner causes fresh launch");
+  });
+
+  test("identity change during adopted stop completes conservatively without OS signal", async () => {
+    const { manager, processInspector, profileDir, clock } = wireFakes({
+      existingOwnedBrowser: "valid",
+    });
+    await manager.start();
+    const stopping = manager.stop();
+    processInspector.setStartTime(processInspector.adoptedPid, 9_999_999);
+    await clock.advance(250);
+    await stopping;
+    assert.equal(manager.state(), "STOPPED");
+    assert.equal(existsSync(join(profileDir, ".mcp-browser-owner.json")), false);
+  });
+
+  test("a successful fresh launch writes the canonical ownership record", async () => {
+    const { manager, profileDir, processInspector } = wireFakes();
+    await manager.start();
+    const path = join(profileDir, ".mcp-browser-owner.json");
+    assert.equal(statSync(path).mode & 0o777, 0o600);
+    const record = JSON.parse(readFileSync(path, "utf8")) as {
+      profile: string;
+      executable: string;
+      startTimeTicks: number;
+    };
+    assert.equal(record.profile, realpathSync(profileDir));
+    assert.equal(record.executable, processInspector.canonicalExecutable);
+    assert.equal(typeof record.startTimeTicks, "number");
+  });
+
+  test("spawned stop clears ownership record and preserves profile", async () => {
+    const { manager, profileDir } = wireFakes();
+    await manager.start();
+    await manager.stop();
+    assert.equal(existsSync(join(profileDir, ".mcp-browser-owner.json")), false);
+    assert.equal(statSync(profileDir).mode & 0o777, 0o700);
   });
 });

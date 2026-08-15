@@ -1,10 +1,20 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
 import { BrowserLifecycleError } from "../src/transport/browser-lifecycle-error.js";
 import { DEFAULT_BROWSER_SESSION_CONFIG } from "../src/transport/browser-lifecycle-types.js";
+import type { ProcessIdentityInspector } from "../src/transport/browser-lifecycle-types.js";
 import {
   browserProfileDir,
   ensureBrowserProfile,
@@ -19,6 +29,16 @@ const profileApi = browserProfile as typeof browserProfile & {
     webSocketDebuggerUrl: string;
   }>;
   clearStaleEndpoint(dir?: string): Promise<void>;
+};
+
+const ownerApi = browserProfile as typeof browserProfile & {
+  ownershipRecordPath(dir?: string): string;
+  writeOwnershipRecord(record: unknown, dir?: string): Promise<void>;
+  readOwnershipRecord(dir?: string): Promise<unknown>;
+  clearOwnershipRecord(dir?: string): Promise<void>;
+  canonicalizeProfilePath(dir: string): string;
+  canonicalizeExecutablePath(path: string): string;
+  createProcessIdentityInspector(): ProcessIdentityInspector;
 };
 
 function withProfile(fn: (dir: string) => Promise<void> | void) {
@@ -197,5 +217,83 @@ describe("BT2 DevTools endpoint discovery", () => {
     await profileApi.clearStaleEndpoint(dir);
     await assert.rejects(() => profileApi.readDevToolsEndpoint(dir));
     assert.equal(statSync(dir).mode & 0o777, 0o700, "the profile directory survives");
+  }));
+});
+
+describe("BT2 ownership record", () => {
+  const record = (overrides: Record<string, unknown> = {}) => ({
+    version: 1,
+    pid: process.pid,
+    executable: process.execPath,
+    profile: "/x",
+    startTimeTicks: 1234,
+    ...overrides,
+  });
+
+  test("the record is written 0600 inside the managed profile", withProfile(async (dir) => {
+    await ownerApi.writeOwnershipRecord(record({ profile: dir }), dir);
+    const path = ownerApi.ownershipRecordPath(dir);
+    assert.ok(path.endsWith("/.mcp-browser-owner.json"));
+    assert.equal(statSync(path).mode & 0o777, 0o600);
+  }));
+
+  test("a missing record reads as null, not an error", withProfile(async (dir) => {
+    assert.equal(await ownerApi.readOwnershipRecord(dir), null);
+  }));
+
+  test("a structurally invalid record is OWNERSHIP_INVALID", withProfile(async (dir) => {
+    writeFileSync(ownerApi.ownershipRecordPath(dir), JSON.stringify({ version: 99 }), {
+      mode: 0o600,
+    });
+    await assert.rejects(
+      () => ownerApi.readOwnershipRecord(dir),
+      (error: unknown) =>
+        error instanceof BrowserLifecycleError && error.kind === "OWNERSHIP_INVALID",
+    );
+  }));
+
+  test("a world-readable record is OWNERSHIP_INVALID", withProfile(async (dir) => {
+    await ownerApi.writeOwnershipRecord(record({ profile: dir }), dir);
+    chmodSync(ownerApi.ownershipRecordPath(dir), 0o644);
+    await assert.rejects(
+      () => ownerApi.readOwnershipRecord(dir),
+      (error: unknown) =>
+        error instanceof BrowserLifecycleError && error.kind === "OWNERSHIP_INVALID",
+    );
+  }));
+
+  test("the record contains no credential material", withProfile(async (dir) => {
+    await ownerApi.writeOwnershipRecord(record({ profile: dir }), dir);
+    const raw = readFileSync(ownerApi.ownershipRecordPath(dir), "utf8").toLowerCase();
+    for (const forbidden of ["cookie", "bearer", "token", "authorization", "password"]) {
+      assert.ok(!raw.includes(forbidden), `record must not contain ${forbidden}`);
+    }
+  }));
+
+  test("canonical profile and executable helpers use physical identity", withProfile((dir) => {
+    assert.equal(ownerApi.canonicalizeProfilePath(dir), realpathSync(dir));
+    assert.equal(ownerApi.canonicalizeExecutablePath(process.execPath), realpathSync(process.execPath));
+  }));
+
+  test("the real inspector reads this live process on Linux", () => {
+    if (process.platform !== "linux") return;
+    const inspector = ownerApi.createProcessIdentityInspector();
+    assert.equal(inspector.executable(process.pid), realpathSync(process.execPath));
+    assert.equal(typeof inspector.startTimeTicks(process.pid), "number");
+    assert.ok(inspector.argv(process.pid)?.length);
+  });
+
+  test("the real inspector fails closed for a dead pid", () => {
+    const inspector = ownerApi.createProcessIdentityInspector();
+    assert.equal(inspector.startTimeTicks(2 ** 30), null);
+    assert.equal(inspector.executable(2 ** 30), null);
+    assert.equal(inspector.argv(2 ** 30), null);
+  });
+
+  test("clearOwnershipRecord removes the record and preserves the profile", withProfile(async (dir) => {
+    await ownerApi.writeOwnershipRecord(record({ profile: dir }), dir);
+    await ownerApi.clearOwnershipRecord(dir);
+    assert.equal(await ownerApi.readOwnershipRecord(dir), null);
+    assert.equal(statSync(dir).mode & 0o777, 0o700);
   }));
 });

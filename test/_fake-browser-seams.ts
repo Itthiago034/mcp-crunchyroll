@@ -1,4 +1,12 @@
-import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  mkdirSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -127,6 +135,7 @@ export class FakeSpawner implements ProcessSpawner {
   constructor(
     private readonly profileDir: string,
     private readonly options: WireFakeOptions,
+    private readonly inspector: FakeProcessIdentityInspector,
   ) {}
 
   spawn(executable: string, args: readonly string[]): SpawnedBrowserProcessHandle {
@@ -135,6 +144,11 @@ export class FakeSpawner implements ProcessSpawner {
     );
     this.launches.push(handle);
     if (this.options.failLaunch) throw new Error("synthetic launch failure");
+    this.inspector.registerSpawn(handle.pid, this.profileDir, executable);
+    handle.onExit(() => {
+      this.inspector.setAlive(handle.pid, false);
+      this.inspector.setStartTime(handle.pid, null);
+    });
     if (!this.options.neverReady) {
       writeFileSync(
         join(this.profileDir, "DevToolsActivePort"),
@@ -162,14 +176,22 @@ export class FakeConnection implements CdpConnection {
   constructor(
     private readonly closeAfterHandshake = false,
     private readonly allowSendAfterClose = false,
+    private readonly failHandshake = false,
+    private readonly onBrowserClose?: () => void,
   ) {}
 
   async send(method: string, params?: Record<string, unknown>): Promise<unknown> {
     this.calls.push({ method, ...(params ? { params } : {}) });
     if (this.closed && !this.allowSendAfterClose) throw new Error("fake connection closed");
     if (method === "Browser.getVersion") {
+      if (this.failHandshake) throw new Error("synthetic handshake failure");
       if (this.closeAfterHandshake) queueMicrotask(() => this.emitClose());
       return { product: "FakeBrowser/1.0" };
+    }
+    if (method === "Browser.close") {
+      this.onBrowserClose?.();
+      this.emitClose();
+      return {};
     }
     if (method === "Target.createTarget") {
       return { targetId: `managed-${this.nextTargetId++}` };
@@ -214,7 +236,10 @@ export class FakeConnection implements CdpConnection {
 export class FakeConnector {
   readonly connections: FakeConnection[] = [];
 
-  constructor(private readonly options: WireFakeOptions) {}
+  constructor(
+    private readonly options: WireFakeOptions,
+    private readonly inspector: FakeProcessIdentityInspector,
+  ) {}
 
   async connect(_url: string): Promise<CdpConnection> {
     if (
@@ -228,6 +253,12 @@ export class FakeConnector {
     const connection = new FakeConnection(
       isFirst && Boolean(this.options.closeAfterHandshake),
       isFirst && Boolean(this.options.closeImmediatelyAfterConnect),
+      isFirst && this.options.existingOwnedBrowser === "handshake-fails",
+      () => {
+        if (this.options.adoptedExitsOnClose) {
+          this.inspector.setStartTime(this.inspector.adoptedPid, null);
+        }
+      },
     );
     this.connections.push(connection);
     if (isFirst && this.options.closeImmediatelyAfterConnect) connection.emitClose();
@@ -237,16 +268,51 @@ export class FakeConnector {
 
 export class FakeProcessIdentityInspector implements ProcessIdentityInspector {
   readonly adoptedPid = 30_000;
-  readonly canonicalExecutable = process.execPath;
+  readonly canonicalExecutable = realpathSync(process.execPath);
+  readonly inspectionCalls: string[] = [];
   private readonly startTimes = new Map<number, number | null>();
+  private readonly executables = new Map<number, string | null>();
+  private readonly argumentsByPid = new Map<number, readonly string[] | null>();
+  private readonly alive = new Map<number, boolean>();
 
-  constructor() { this.startTimes.set(this.adoptedPid, 1_234_567); }
-  isAlive(pid: number): boolean { return this.startTimeTicks(pid) !== null; }
-  executable(_pid: number): string | null { return this.canonicalExecutable; }
-  startTimeTicks(pid: number): number | null { return this.startTimes.get(pid) ?? 1_234_567; }
-  argv(_pid: number): readonly string[] | null { return [process.execPath]; }
-  canonicalPath(path: string): string | null { return path; }
+  constructor() {
+    this.startTimes.set(this.adoptedPid, 1_234_567);
+    this.executables.set(this.adoptedPid, this.canonicalExecutable);
+    this.argumentsByPid.set(this.adoptedPid, [process.execPath]);
+    this.alive.set(this.adoptedPid, true);
+  }
+  isAlive(pid: number): boolean {
+    this.inspectionCalls.push(`alive:${pid}`);
+    return this.alive.get(pid) ?? this.startTimes.has(pid);
+  }
+  executable(pid: number): string | null {
+    this.inspectionCalls.push(`executable:${pid}`);
+    return this.executables.get(pid) ?? null;
+  }
+  startTimeTicks(pid: number): number | null {
+    this.inspectionCalls.push(`start:${pid}`);
+    return this.startTimes.get(pid) ?? null;
+  }
+  argv(pid: number): readonly string[] | null {
+    this.inspectionCalls.push(`argv:${pid}`);
+    return this.argumentsByPid.get(pid) ?? null;
+  }
+  canonicalPath(path: string): string | null {
+    this.inspectionCalls.push(`canonical:${path}`);
+    try { return realpathSync(path); } catch { return null; }
+  }
   setStartTime(pid: number, value: number | null): void { this.startTimes.set(pid, value); }
+  setAlive(pid: number, value: boolean): void { this.alive.set(pid, value); }
+  setExecutable(pid: number, value: string | null): void { this.executables.set(pid, value); }
+  setArgv(pid: number, value: readonly string[] | null): void {
+    this.argumentsByPid.set(pid, value);
+  }
+  registerSpawn(pid: number, profileDir: string, executable: string): void {
+    this.alive.set(pid, true);
+    this.startTimes.set(pid, 2_000_000 + pid);
+    this.executables.set(pid, realpathSync(executable));
+    this.argumentsByPid.set(pid, [executable, `--user-data-dir=${realpathSync(profileDir)}`]);
+  }
 }
 
 export interface WireFakeOptions {
@@ -271,10 +337,76 @@ export function wireFakes(options: WireFakeOptions = {}) {
   const profileDir = join(base, "browser-profile");
   mkdirSync(profileDir);
   chmodSync(profileDir, 0o700);
-  const spawner = new FakeSpawner(profileDir, options);
-  const clock = new FakeClock();
-  const connector = new FakeConnector(options);
   const processInspector = new FakeProcessIdentityInspector();
+  let executablePath = process.execPath;
+  if (options.existingOwnedBrowser === "valid-symlink-executable") {
+    executablePath = join(base, "browser-launcher");
+    symlinkSync(process.execPath, executablePath);
+  }
+  const canonicalProfile = realpathSync(profileDir);
+  const canonicalExecutable = realpathSync(executablePath);
+  const existing = options.existingOwnedBrowser;
+  if (existing) {
+    const otherProfile = join(base, "other-profile");
+    mkdirSync(otherProfile);
+    chmodSync(otherProfile, 0o700);
+    let recordProfile = canonicalProfile;
+    let recordExecutable = canonicalExecutable;
+    let recordStartTime = 1_234_567;
+    processInspector.setArgv(
+      processInspector.adoptedPid,
+      [executablePath, `--user-data-dir=${canonicalProfile}`],
+    );
+    if (existing === "stale-pid") {
+      processInspector.setAlive(processInspector.adoptedPid, false);
+      processInspector.setStartTime(processInspector.adoptedPid, null);
+    } else if (existing === "record-profile-mismatch") {
+      recordProfile = realpathSync(otherProfile);
+    } else if (existing === "cmdline-profile-mismatch") {
+      processInspector.setArgv(
+        processInspector.adoptedPid,
+        [executablePath, `--user-data-dir=${realpathSync(otherProfile)}`],
+      );
+    } else if (existing === "cmdline-profile-substring") {
+      const substringProfile = `${profileDir}-suffix`;
+      mkdirSync(substringProfile);
+      chmodSync(substringProfile, 0o700);
+      processInspector.setArgv(
+        processInspector.adoptedPid,
+        [executablePath, `--user-data-dir=${realpathSync(substringProfile)}`],
+      );
+    } else if (existing === "cmdline-missing-profile") {
+      processInspector.setArgv(processInspector.adoptedPid, [executablePath]);
+    } else if (existing === "cmdline-unavailable") {
+      processInspector.setArgv(processInspector.adoptedPid, null);
+    } else if (existing === "cmdline-duplicate-profile") {
+      processInspector.setArgv(processInspector.adoptedPid, [
+        executablePath,
+        `--user-data-dir=${canonicalProfile}`,
+        `--user-data-dir=${canonicalProfile}`,
+      ]);
+    } else if (existing === "canonical-executable-mismatch") {
+      processInspector.setExecutable(processInspector.adoptedPid, "/different/browser");
+    } else if (existing === "starttime-mismatch") {
+      recordStartTime += 1;
+    }
+    writeFileSync(join(profileDir, ".mcp-browser-owner.json"), JSON.stringify({
+      version: 1,
+      pid: processInspector.adoptedPid,
+      executable: recordExecutable,
+      profile: recordProfile,
+      startTimeTicks: recordStartTime,
+    }), { mode: 0o600 });
+    writeFileSync(
+      join(profileDir, "DevToolsActivePort"),
+      existing === "bad-endpoint"
+        ? "malformed\n"
+        : "45000\n/devtools/browser/adopted\n",
+    );
+  }
+  const spawner = new FakeSpawner(profileDir, options, processInspector);
+  const clock = new FakeClock();
+  const connector = new FakeConnector(options, processInspector);
   const seams: BrowserSessionSeams = { spawner, clock, connector, processInspector };
   const config: BrowserSessionConfig = {
     launchMode: options.launchMode ?? "visible",
@@ -284,7 +416,7 @@ export function wireFakes(options: WireFakeOptions = {}) {
     cdpCommandTimeoutMs: options.cdpCommandTimeoutMs ?? 10_000,
     initialPageUrl: options.initialPageUrl ?? "about:blank",
     profileDir,
-    executablePath: process.execPath,
+    executablePath,
   };
   const manager = createBrowserSessionManager(config, seams);
   const transitions: Array<[BrowserLifecycleState, BrowserLifecycleState]> = [];

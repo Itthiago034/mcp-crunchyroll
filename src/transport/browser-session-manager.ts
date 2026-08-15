@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
-import { readFileSync, readlinkSync, realpathSync } from "node:fs";
 import type {
   AdoptedBrowserProcessHandle,
   BrowserLifecycleState,
+  BrowserOwnershipRecord,
   BrowserProcessExit,
   BrowserProcessHandle,
   BrowserSessionConfig,
@@ -13,13 +13,18 @@ import type {
   ProcessIdentityInspector,
   ProcessSpawner,
   SpawnedBrowserProcessHandle,
+  ValidatedOwnedBrowser,
 } from "./browser-lifecycle-types.js";
 import { BrowserLifecycleError } from "./browser-lifecycle-error.js";
 import { createCdpConnector } from "./cdp-client.js";
 import {
+  clearOwnershipRecord,
   clearStaleEndpoint,
+  createProcessIdentityInspector,
   ensureBrowserProfile,
+  readOwnershipRecord,
   readDevToolsEndpoint,
+  writeOwnershipRecord,
 } from "./browser-profile.js";
 
 export interface BrowserSessionSeams {
@@ -59,6 +64,14 @@ const ADOPTED_PROCESS_POLL_INTERVAL_MS = 250;
 interface ValidatedProcessIdentity {
   readonly pid: number;
   readonly startTimeTicks: number;
+}
+
+interface ConnectionRegistration {
+  readonly connection: CdpConnection;
+  readonly generation: number;
+  handledClose: boolean;
+  phase: "candidate" | "ready";
+  unsubscribeClose: () => void;
 }
 
 function createValidatedAdoptedProcessHandle(
@@ -111,9 +124,12 @@ function createValidatedAdoptedProcessHandle(
   };
 }
 
-function launchArguments(config: BrowserSessionConfig): readonly string[] {
+function launchArguments(
+  config: BrowserSessionConfig,
+  canonicalProfile = config.profileDir,
+): readonly string[] {
   const common = [
-    `--user-data-dir=${config.profileDir}`,
+    `--user-data-dir=${canonicalProfile}`,
     "--remote-debugging-port=0",
     "--no-first-run",
     "--no-default-browser-check",
@@ -157,13 +173,7 @@ export function createBrowserSessionManager(
   let endpoint: DevToolsEndpoint | undefined;
   let nextConnectionGeneration = 0;
   let activeConnectionGeneration = 0;
-  let connectionRegistration: {
-    readonly connection: CdpConnection;
-    readonly generation: number;
-    handledClose: boolean;
-    phase: "candidate" | "ready";
-    unsubscribeClose: () => void;
-  } | undefined;
+  let connectionRegistration: ConnectionRegistration | undefined;
   let removeExitListener: (() => void) | undefined;
   let stopExitResolve: (() => void) | undefined;
   let recoveryFlight: Promise<void> | undefined;
@@ -245,11 +255,7 @@ export function createBrowserSessionManager(
     return managedPageFlight;
   };
 
-  const prepareTargetObservation = async (registration: {
-    readonly connection: CdpConnection;
-    readonly generation: number;
-    handledClose: boolean;
-  }) => {
+  const prepareTargetObservation = async (registration: ConnectionRegistration) => {
     registration.connection.on("Target.targetDestroyed", (params) => {
       if (
         registration.generation !== activeConnectionGeneration ||
@@ -386,10 +392,18 @@ export function createBrowserSessionManager(
       stopExitResolve?.();
       return;
     }
-    if (exit.source === "adopted") return;
+    if (exit.source === "adopted") {
+      emit({ type: "exit.classified", classification: "ADOPTED_EXIT_UNKNOWN" });
+      disposeActive();
+      void clearOwnershipRecord(config.profileDir);
+      void clearStaleEndpoint(config.profileDir);
+      transition("STOPPED");
+      return;
+    }
     if (exit.code === 0 && exit.signal === null) {
       emit({ type: "exit.classified", classification: "USER_CLOSED" });
       disposeActive();
+      void clearOwnershipRecord(config.profileDir);
       void clearStaleEndpoint(config.profileDir);
       transition("STOPPED");
       return;
@@ -405,17 +419,132 @@ export function createBrowserSessionManager(
     removeExitListener = handle.onExit(handleObservedExit);
   };
 
+  const liveProfileMatches = (pid: number, canonicalProfile: string): boolean => {
+    const argv = seams.processInspector.argv(pid);
+    if (!argv) return false;
+    const userDataArgs = argv.filter((arg) => arg.startsWith("--user-data-dir="));
+    if (userDataArgs.length !== 1) return false;
+    const value = userDataArgs[0].slice("--user-data-dir=".length);
+    if (!value) return false;
+    return seams.processInspector.canonicalPath(value) === canonicalProfile;
+  };
+
+  const endpointIsLoopback = (candidateEndpoint: DevToolsEndpoint): boolean => {
+    try {
+      const parsed = new URL(candidateEndpoint.webSocketDebuggerUrl);
+      return (
+        parsed.protocol === "ws:" &&
+        parsed.hostname === "127.0.0.1" &&
+        Number(parsed.port) === candidateEndpoint.port &&
+        parsed.pathname === candidateEndpoint.browserPath
+      );
+    } catch {
+      return false;
+    }
+  };
+
+  async function tryAdoptOwnedBrowser(
+    canonicalProfile: string,
+    canonicalExecutable: string,
+  ): Promise<{
+    owned: ValidatedOwnedBrowser;
+    registration: ConnectionRegistration;
+  } | null> {
+    let candidate: ConnectionRegistration | undefined;
+    try {
+      // Checks 1–3: schema, exact 0600 mode, and owner uid.
+      const record = await readOwnershipRecord(config.profileDir);
+      if (!record) return null;
+      // Checks 4–5: canonical profile and executable recorded identities.
+      if (record.profile !== canonicalProfile) throw new Error("profile");
+      if (record.executable !== canonicalExecutable) throw new Error("executable");
+      // Checks 6–9: live pid, executable, start time, and exact live profile argv.
+      if (!seams.processInspector.isAlive(record.pid)) throw new Error("dead");
+      if (seams.processInspector.executable(record.pid) !== canonicalExecutable) {
+        throw new Error("live-executable");
+      }
+      if (seams.processInspector.startTimeTicks(record.pid) !== record.startTimeTicks) {
+        throw new Error("start-time");
+      }
+      if (!liveProfileMatches(record.pid, canonicalProfile)) throw new Error("argv");
+      // Checks 10–12: exact-profile endpoint, loopback invariant, and handshake.
+      const ownedEndpoint = await readDevToolsEndpoint(config.profileDir);
+      if (!endpointIsLoopback(ownedEndpoint)) throw new Error("endpoint");
+      candidate = await connectCandidate(ownedEndpoint);
+      if (candidate.handledClose) throw new Error("closed");
+      // Check 13: final identity reread, then and only then construct the handle.
+      if (seams.processInspector.startTimeTicks(record.pid) !== record.startTimeTicks) {
+        throw new Error("final-identity");
+      }
+      const adoptedProcess = createValidatedAdoptedProcessHandle(
+        { pid: record.pid, startTimeTicks: record.startTimeTicks },
+        seams.processInspector,
+        seams.clock,
+      );
+      return {
+        owned: {
+          record,
+          endpoint: ownedEndpoint,
+          connection: candidate.connection,
+          process: adoptedProcess,
+        },
+        registration: candidate,
+      };
+    } catch {
+      candidate?.unsubscribeClose();
+      candidate?.connection.close();
+      emit({ type: "ownership.rejected", reason: "validation" });
+      await clearOwnershipRecord(config.profileDir).catch(() => undefined);
+      await clearStaleEndpoint(config.profileDir).catch(() => undefined);
+      return null;
+    }
+  }
+
   const startInternal = async (attempt = 1) => {
     const launchDeadline = seams.clock.now() + config.launchDeadlineMs;
     transition("BROWSER_STARTING");
     stopRequested = false;
     emit({ type: "launch.attempt", attempt });
     await ensureBrowserProfile(config.profileDir);
+    const canonicalProfile = seams.processInspector.canonicalPath(config.profileDir);
+    const canonicalExecutable = seams.processInspector.canonicalPath(config.executablePath);
+    if (!canonicalProfile || !canonicalExecutable) {
+      transition("STOPPED");
+      throw new BrowserLifecycleError("OWNERSHIP_INVALID");
+    }
+
+    const adopted = await tryAdoptOwnedBrowser(canonicalProfile, canonicalExecutable);
+    if (adopted) {
+      endpoint = adopted.owned.endpoint;
+      connection = adopted.owned.connection;
+      connectionRegistration = adopted.registration;
+      processHandle = adopted.owned.process;
+      try {
+        installExitObservation(adopted.owned.process);
+        await prepareTargetObservation(adopted.registration);
+        if (adopted.registration.handledClose) {
+          throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
+        }
+        adopted.registration.phase = "ready";
+        emit({ type: "ownership.adopted" });
+        emit({ type: "cdp.connected" });
+        transition("BROWSER_READY");
+        return;
+      } catch {
+        disposeActive();
+        await clearOwnershipRecord(config.profileDir).catch(() => undefined);
+        await clearStaleEndpoint(config.profileDir).catch(() => undefined);
+      }
+    }
     await clearStaleEndpoint(config.profileDir);
+    await clearOwnershipRecord(config.profileDir);
 
     let spawned: SpawnedBrowserProcessHandle;
     try {
-      spawned = seams.spawner.spawn(config.executablePath, launchArguments(config));
+      spawned = seams.spawner.spawn(
+        config.executablePath,
+        launchArguments(config, canonicalProfile),
+      );
     } catch {
       transition("STOPPED");
       throw new BrowserLifecycleError("BROWSER_UNAVAILABLE");
@@ -430,6 +559,17 @@ export function createBrowserSessionManager(
     });
 
     try {
+      if (spawned.pid <= 0) throw new BrowserLifecycleError("OWNERSHIP_INVALID");
+      if (!seams.processInspector.isAlive(spawned.pid)) {
+        throw new BrowserLifecycleError("BROWSER_UNAVAILABLE");
+      }
+      if (seams.processInspector.executable(spawned.pid) !== canonicalExecutable) {
+        throw new BrowserLifecycleError("OWNERSHIP_INVALID");
+      }
+      const startTimeTicks = seams.processInspector.startTimeTicks(spawned.pid);
+      if (startTimeTicks === null || !liveProfileMatches(spawned.pid, canonicalProfile)) {
+        throw new BrowserLifecycleError("OWNERSHIP_INVALID");
+      }
       endpoint = await Promise.race([
         waitForEndpoint(config, seams.clock, launchDeadline),
         earlyExit,
@@ -438,6 +578,14 @@ export function createBrowserSessionManager(
       if (candidate.handledClose) {
         throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
       }
+      const record: BrowserOwnershipRecord = {
+        version: 1,
+        pid: spawned.pid,
+        executable: canonicalExecutable,
+        profile: canonicalProfile,
+        startTimeTicks,
+      };
+      await writeOwnershipRecord(record, config.profileDir);
       await Promise.race([prepareTargetObservation(candidate), earlyExit]);
       if (candidate.handledClose) {
         throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
@@ -453,6 +601,8 @@ export function createBrowserSessionManager(
       cancelEarlyExit?.();
       if (processHandle?.source === "spawned") processHandle.requestTermination();
       disposeActive();
+      await clearOwnershipRecord(config.profileDir).catch(() => undefined);
+      await clearStaleEndpoint(config.profileDir).catch(() => undefined);
       transition("STOPPED");
       if (error instanceof BrowserLifecycleError) throw error;
       throw new BrowserLifecycleError("BROWSER_UNAVAILABLE");
@@ -485,11 +635,35 @@ export function createBrowserSessionManager(
       }
       timeout?.cancel();
       stopExitResolve = undefined;
+      disposeActive();
+      await clearOwnershipRecord(config.profileDir);
+      await clearStaleEndpoint(config.profileDir);
+      transition("STOPPED");
+      return;
     }
 
+    const adoptedHandle = processHandle;
+    let timeout: { cancel(): void } | undefined;
+    const exited = new Promise<void>((resolve) => { stopExitResolve = resolve; });
+    const timedOut = new Promise<"timeout">((resolve) => {
+      timeout = seams.clock.setTimeout(() => resolve("timeout"), config.cdpCommandTimeoutMs);
+    });
+    void connection?.send("Browser.close").catch(() => undefined);
+    const outcome = await Promise.race([exited.then(() => "exit" as const), timedOut]);
+    timeout?.cancel();
+    stopExitResolve = undefined;
+    if (outcome === "exit") {
+      adoptedHandle.dispose();
+      disposeActive();
+      await clearOwnershipRecord(config.profileDir);
+      await clearStaleEndpoint(config.profileDir);
+      transition("STOPPED");
+      return;
+    }
+    adoptedHandle.dispose();
     disposeActive();
-    await clearStaleEndpoint(config.profileDir);
     transition("STOPPED");
+    throw new BrowserLifecycleError("BROWSER_STOP_TIMEOUT");
   };
 
   const manager: BrowserSessionManager = {
@@ -560,56 +734,11 @@ const REAL_SPAWNER: ProcessSpawner = {
   },
 };
 
-function readStartTimeTicks(pid: number): number | null {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    const closeParen = stat.lastIndexOf(")");
-    if (closeParen < 0) return null;
-    const fieldsFromState = stat.slice(closeParen + 1).trim().split(/\s+/);
-    const value = Number(fieldsFromState[19]);
-    return Number.isSafeInteger(value) && value >= 0 ? value : null;
-  } catch {
-    return null;
-  }
-}
-
-function createRealProcessIdentityInspector(): ProcessIdentityInspector {
-  return {
-    isAlive(pid) {
-      try {
-        // Signal 0 probes existence/permission without delivery to the target.
-        process.kill(pid, 0);
-        return true;
-      } catch {
-        return false;
-      }
-    },
-    executable(pid) {
-      try { return realpathSync(readlinkSync(`/proc/${pid}/exe`)); }
-      catch { return null; }
-    },
-    startTimeTicks: readStartTimeTicks,
-    argv(pid) {
-      try {
-        const parts = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0");
-        if (parts.at(-1) === "") parts.pop();
-        return parts.length > 0 && parts.every((part) => part.length > 0) ? parts : null;
-      } catch {
-        return null;
-      }
-    },
-    canonicalPath(path) {
-      try { return realpathSync(path); }
-      catch { return null; }
-    },
-  };
-}
-
 export function createRealBrowserSessionSeams(commandTimeoutMs: number): BrowserSessionSeams {
   return {
     spawner: REAL_SPAWNER,
     clock: REAL_CLOCK,
     connector: createCdpConnector(commandTimeoutMs),
-    processInspector: createRealProcessIdentityInspector(),
+    processInspector: createProcessIdentityInspector(),
   };
 }
