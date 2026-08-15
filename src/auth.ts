@@ -392,6 +392,13 @@ interface TestHooks {
   overrideTempName?: string;
   /** Test-only observer called with the exact flags handed to fs.open. */
   observeOpenFlags?: (flags: number) => void;
+  /**
+   * Test-only unlink override used by the structured logout clear path.
+   * When set, the production clear skips fs.unlink entirely and awaits this
+   * function instead — driving selective unlink failures (PARTIAL state)
+   * without touching the real filesystem beyond what the test controls.
+   */
+  overrideUnlink?: (path: string) => Promise<void>;
 }
 let testHooks: TestHooks = {};
 
@@ -465,6 +472,17 @@ export function __observeOpenFlags(fn: (flags: number) => void): void {
  */
 export function __forceNoO_NOFOLLOW(): void {
   testHooks.forceNoO_NOFOLLOW = true;
+}
+
+/**
+ * @internal test-only.
+ * Override the unlink used by clearAuthData() so the REAL production clear
+ * path can be exercised with injected per-path failures (selective PARTIAL,
+ * FILESYSTEM_ERROR classification) without reimplementing the classification
+ * logic inside the test.
+ */
+export function __setUnlinkHook(fn: (path: string) => Promise<void>): void {
+  testHooks.overrideUnlink = fn;
 }
 
 // ---------------------------------------------------------------------------
@@ -1004,6 +1022,134 @@ async function readCredentialFile(filePath: string): Promise<ReadResult | null> 
 }
 
 // ---------------------------------------------------------------------------
+// Structured logout domain (Gate B5)
+// ---------------------------------------------------------------------------
+
+/** State of a single artifact after a logout clear attempt. */
+export type AuthArtifactClearState = "REMOVED" | "ALREADY_ABSENT" | "FAILED";
+
+/**
+ * Why an artifact clear attempt failed. Uses the SAME vocabulary as
+ * StorageError so the delete path never invents a parallel classification:
+ * INSECURE_DIR covers symlink / non-regular / insecure-mode targets;
+ * INSECURE_OWNER covers divergent ownership; FILESYSTEM_ERROR covers
+ * everything else operational (EACCES, ENOTEMPTY, EBUSY, …).
+ */
+export type ClearFailureReason = "INSECURE_DIR" | "INSECURE_OWNER" | "FILESYSTEM_ERROR";
+
+/** Per-artifact clear outcome. */
+export interface AuthArtifactClearResult {
+  state: AuthArtifactClearState;
+  reason?: ClearFailureReason;
+}
+
+/** Structured logout result — domain ONLY (no presentation fields). */
+export type LogoutState = "CLEARED" | "ALREADY_ABSENT" | "PARTIAL" | "FAILED";
+
+export interface LogoutResult {
+  state: LogoutState;
+  tokens: AuthArtifactClearResult;
+  session: AuthArtifactClearResult;
+}
+
+/**
+ * Classify the pre-open filesystem state of a single artifact target, using
+ * lstat (never following symlinks). ENOENT is "absence"; everything insecure
+ * is mapped to the SAME StorageError vocabulary as the read paths so the
+ * delete boundary can refuse exactly the same conditions the read boundary
+ * refuses — an insecure target is classified FAILED instead of being
+ * "best-effort deleted" through it.
+ *
+ * - missing        → ALREADY_ABSENT (unlink skipped);
+ * - symlink        → FAILED / INSECURE_DIR (unlink skipped);
+ * - not regular    → FAILED / INSECURE_DIR (unlink skipped);
+ * - group/other    → FAILED / INSECURE_DIR (unlink skipped);
+ * - owner ≠ UID    → FAILED / INSECURE_OWNER (unlink skipped);
+ * - secure present → null — proceed to the unlink attempt.
+ * - other FS error → FAILED / FILESYSTEM_ERROR.
+ */
+async function classifyDeleteTarget(
+  filePath: string
+): Promise<AuthArtifactClearResult | null> {
+  const lstat = testHooks.overrideLstat ?? fs.lstat;
+  let s: import("fs").Stats;
+  try {
+    s = await lstat(filePath);
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException;
+    if (e.code === "ENOENT") {
+      return { state: "ALREADY_ABSENT" };
+    }
+    return { state: "FAILED", reason: "FILESYSTEM_ERROR" };
+  }
+
+  if (s.isSymbolicLink()) {
+    return { state: "FAILED", reason: "INSECURE_DIR" };
+  }
+  if (!s.isFile()) {
+    return { state: "FAILED", reason: "INSECURE_DIR" };
+  }
+  if (s.mode & GROUP_OTHER_MASK) {
+    return { state: "FAILED", reason: "INSECURE_DIR" };
+  }
+  const effectiveUid: number | undefined = process.getuid?.();
+  if (effectiveUid !== undefined && s.uid !== effectiveUid) {
+    return { state: "FAILED", reason: "INSECURE_OWNER" };
+  }
+  // Present and secure: the unlink attempt decides the final state.
+  return null;
+}
+
+/**
+ * Attempt the unlink for one artifact. ENOENT converges to "absence"
+ * (a concurrent remover or a just-deleted first artifact is harmless);
+ * any other operational error is a FILESYSTEM_ERROR failure.
+ */
+async function unlinkArtifact(filePath: string): Promise<AuthArtifactClearResult> {
+  const unlink = testHooks.overrideUnlink ?? fs.unlink;
+  try {
+    await unlink(filePath);
+    return { state: "REMOVED" };
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException;
+    if (e.code === "ENOENT") {
+      return { state: "ALREADY_ABSENT" };
+    }
+    return { state: "FAILED", reason: "FILESYSTEM_ERROR" };
+  }
+}
+
+/**
+ * Compose the global LogoutState from the two artifact results — the ONLY
+ * place the 3×3 outcome matrix lives. Owner: clearAuthData().
+ *
+ *   both REMOVED                 → CLEARED
+ *   both ALREADY_ABSENT          → ALREADY_ABSENT
+ *   one FAILED + one OK          → PARTIAL
+ *   both FAILED                  → FAILED
+ *
+ * Mixed REMOVED/ALREADY_ABSENT counts as CLEARED: the end state (nothing
+ * persisted) is identical and both branches are structurally clean.
+ */
+function composeLogoutState(
+  tokens: AuthArtifactClearResult,
+  session: AuthArtifactClearResult
+): LogoutState {
+  if (tokens.state === "REMOVED" && session.state === "REMOVED") return "CLEARED";
+  if (tokens.state === "ALREADY_ABSENT" && session.state === "ALREADY_ABSENT") {
+    return "ALREADY_ABSENT";
+  }
+  const failed = [
+    tokens.state === "FAILED" ? tokens : null,
+    session.state === "FAILED" ? session : null,
+  ].filter((x): x is AuthArtifactClearResult => x !== null);
+  if (failed.length === 2) return "FAILED";
+  if (failed.length === 1) return "PARTIAL";
+  // Remaining: (REMOVED, ALREADY_ABSENT) or (ALREADY_ABSENT, REMOVED).
+  return "CLEARED";
+}
+
+// ---------------------------------------------------------------------------
 // Public API (exports preserved — compatibility with the rest of the project)
 // ---------------------------------------------------------------------------
 
@@ -1078,12 +1224,86 @@ export async function loadSessionInfo(): Promise<SessionInfo | null> {
 }
 
 /**
- * Clear persisted auth data. Best-effort removal with idempotent absence —
- * the pre-B2 semantics, preserved for this subgate. Structured logout
- * semantics (PARTIAL, structured results) remain out of scope (B5).
+ * Clear persisted auth data with STRUCTURED, security-classified semantics
+ * (Gate B5). The result is domain-only: state + per-artifact outcomes.
+ *
+ * Contract (design Gate B5 plan, §5/§6):
+ * 1. Shared validation FIRST: the existing config directories are validated
+ *    read-only (validateExistingConfigDir — lstat, no mkdir, no chmod) EXACTLY
+ *    ONCE before any artifact is touched. A shared failure classifies BOTH
+ *    artifacts FAILED with the SAME reason → global FAILED and ZERO unlink
+ *    attempted. INSECURE_DIR/INSECURE_OWNER/FILESYSTEM_ERROR map one-to-one
+ *    to the StorageError vocabulary; any unmapped failure is FILESYSTEM_ERROR.
+ * 2. Each artifact's final target is then validated with lstat (no-follow):
+ *    missing → ALREADY_ABSENT (unlinks skipped); symlink / non-regular /
+ *    insecure-mode → FAILED / INSECURE_DIR; divergent owner → FAILED /
+ *    INSECURE_OWNER. An insecure target is NEVER unlinked through.
+ * 3. Unlink: success → REMOVED; ENOENT → ALREADY_ABSENT; anything else →
+ *    FAILED / FILESYSTEM_ERROR.
+ * 4. Non-throwing by contract: filesystem failures are classified, never
+ *    surfaced as rejected promises. Defense-in-depth try/catch retained for
+ *    the truly unexpected (the caller — e.g. the B4 invalid_grant path —
+ *    must never observe a rejection).
+ * 5. Result never carries raw Error objects, stacks, filesystem paths or
+ *    secret values — only enum states and an optional reason.
  */
-export async function clearAuthData(): Promise<void> {
-  await Promise.allSettled([fs.unlink(tokenFilePath()), fs.unlink(sessionFilePath())]);
+export async function clearAuthData(): Promise<LogoutResult> {
+  try {
+    // 1. Shared validation — called exactly once, before any unlink.
+    try {
+      await validateExistingConfigDir();
+    } catch (err) {
+      if (err instanceof StorageError) {
+        const reason: ClearFailureReason =
+          err.state === "INSECURE_DIR" ? "INSECURE_DIR" : err.state === "INSECURE_OWNER" ? "INSECURE_OWNER" : "FILESYSTEM_ERROR";
+        return {
+          state: "FAILED",
+          tokens: { state: "FAILED", reason },
+          session: { state: "FAILED", reason },
+        };
+      }
+      // Unmapped validation failure → classification stays consistent.
+      return {
+        state: "FAILED",
+        tokens: { state: "FAILED", reason: "FILESYSTEM_ERROR" },
+        session: { state: "FAILED", reason: "FILESYSTEM_ERROR" },
+      };
+    }
+
+    // 2. Per-target classification (lstat, no-follow) — an insecure target is
+    //    classified FAILED WITHOUT unlink; absence short-circuits to
+    //    ALREADY_ABSENT; only a present-and-secure target proceeds to unlink.
+    const [tokensClassification, sessionClassification] = await Promise.all([
+      classifyDeleteTarget(tokenFilePath()),
+      classifyDeleteTarget(sessionFilePath()),
+    ]);
+
+    // 3. Unlink only the artifacts whose targets are present and secure
+    //    (classification returned null — no reason to stop the unlink).
+    const unlinkTasks = [
+      tokensClassification === null
+        ? unlinkArtifact(tokenFilePath())
+        : Promise.resolve(tokensClassification as AuthArtifactClearResult),
+      sessionClassification === null
+        ? unlinkArtifact(sessionFilePath())
+        : Promise.resolve(sessionClassification as AuthArtifactClearResult),
+    ];
+
+    const [finalTokens, finalSession] = await Promise.all(unlinkTasks);
+
+    // 4. Matrix composition — the single source of the global state.
+    const state = composeLogoutState(finalTokens, finalSession);
+    return { state, tokens: finalTokens, session: finalSession };
+  } catch {
+    // 5. Non-throwing contract: the truly unexpected must never escape as a
+    //    rejection. Both artifacts are conservatively FAILED (no unlink is
+    //    known to have succeeded).
+    return {
+      state: "FAILED",
+      tokens: { state: "FAILED", reason: "FILESYSTEM_ERROR" },
+      session: { state: "FAILED", reason: "FILESYSTEM_ERROR" },
+    };
+  }
 }
 
 /**

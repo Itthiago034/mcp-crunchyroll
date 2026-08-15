@@ -8,7 +8,12 @@ import {
   clearAuthData,
   hasSavedTokens,
   isTokenExpired,
+  type LogoutResult,
 } from "./auth.js";
+
+// Gate B5: re-export the structured logout domain type so the MCP boundary
+// (src/index.ts) can reference it without widening the runtime surface.
+export type { LogoutResult };
 
 // B6-core: redaction of upstream error bodies before they become Error
 // messages that can cross the MCP boundary.
@@ -528,8 +533,11 @@ export async function login(email: string, password: string): Promise<{ success:
   }
 }
 
-export async function logout(): Promise<void> {
-  await clearAuthData();
+export async function logout(): Promise<LogoutResult> {
+  // B5: passthrough — clearAuthData() is the single source of truth for the
+  // logout domain result. logout() must NOT recalculate state, translate
+  // states, or own a second outcome matrix.
+  return clearAuthData();
 }
 
 export async function getStatus(): Promise<{

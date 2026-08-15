@@ -33,6 +33,38 @@ import {
 
 // B6-core: operation-scoped secret redaction (internal, not an MCP surface).
 import { withRedactionScope, safeErrorWithCleanStack, redactSecrets, sanitizeToolResult } from "./redact.js";
+// Gate B5: structured logout domain types from the storage layer.
+import type { LogoutResult } from "./api.js";
+
+// ── Gate B5: logout presentation at the MCP boundary ─────────────────────────
+//
+// The domain (clearAuthData) computes the LogoutResult — state, per-artifact
+// artifact states and reasons. This function is the ONLY place that turns
+// that result into a human message; messages never contain paths, raw
+// errors, stacks, or secret literals, and the CLEARED success message
+// wording is preserved verbatim from the pre-B5 contract.
+function formatLogoutResult(
+  result: LogoutResult
+): { success: boolean; state: string; tokens: { state: string; reason?: string }; session: { state: string; reason?: string }; message: string } {
+  const { state } = result;
+  let message: string;
+  if (state === "CLEARED") {
+    message = "Logged out successfully. Session tokens cleared.";
+  } else if (state === "ALREADY_ABSENT") {
+    message = "No session tokens found to clear.";
+  } else if (state === "PARTIAL") {
+    message = "Logged out partially. Some stored credentials could not be removed — check the per-artifact details for reasons.";
+  } else {
+    message = "Logout failed. No stored credentials were removed — check the per-artifact details for reasons.";
+  }
+  return {
+    success: state === "CLEARED" || state === "ALREADY_ABSENT",
+    state,
+    tokens: result.tokens,
+    session: result.session,
+    message,
+  };
+}
 
 // B6-FIX-1 (blocker B6-C2): closed list of tool argument fields whose values
 // are known-sensitive. Never register every argument — query/title/series_id
@@ -343,9 +375,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "crunchyroll_logout": {
-        await logout();
+        const logoutResult = await logout();
+        const presentation = formatLogoutResult(logoutResult);
         return {
-          content: [{ type: "text", text: "Logged out successfully. Session tokens cleared." }],
+          content: [{ type: "text", text: JSON.stringify(presentation) }],
         };
       }
 
