@@ -191,6 +191,268 @@ interface TokenResponse {
   profile_id?: string;
 }
 
+// ── Gate B4 — refresh state machine (Architecture B) ─────────────────────────
+//
+// Separate login/refresh structural contracts (no global refresh_token
+// optionality), a strict classification precedence, an internal
+// refresh-specific path with process-local single-flight, and a safe
+// internal failure contract. The generic request() is NOT redesigned.
+// Shared-failure safety is SECRET-FREE BEFORE REJECT (B6 AsyncLocalStorage
+// registry is defense-in-depth for the origin operation only — §10 of
+// GATE-B4-PLAN.md).
+
+/** B4 safe internal failure kinds. */
+export type RefreshFailureKind = "REAUTH_REQUIRED" | "TRANSIENT" | "SAFE_FAILURE" | "MALFORMED_RESPONSE";
+
+/**
+ * Safe internal failure representation for the refresh operation.
+ *
+ * Secret-free by construction: it carries only kind + optional HTTP status
+ * and a fixed generic message. It never carries raw bodies, parsed provider
+ * objects, tokens, Authorization values, passwords or form bodies.
+ */
+export class RefreshError extends Error {
+  constructor(
+    public readonly kind: RefreshFailureKind,
+    message: string,
+    public readonly httpStatus?: number
+  ) {
+    super(message);
+    this.name = "RefreshError";
+  }
+}
+
+const FIXED_MESSAGES: Record<RefreshFailureKind, string> = {
+  REAUTH_REQUIRED: "Authentication refresh rejected; reauthentication required",
+  TRANSIENT: "Authentication refresh temporarily unavailable",
+  SAFE_FAILURE: "Authentication refresh failed",
+  MALFORMED_RESPONSE: "Authentication refresh returned an invalid response",
+};
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function nonEmptyString(v: unknown): v is string {
+  return typeof v === "string" && v.trim().length > 0;
+}
+
+function finitePositiveNumber(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v) && v > 0;
+}
+
+/**
+ * Structural validation of a provider login token response.
+ * refresh_token is REQUIRED for login. Provider payload enters as unknown
+ * and is validated structurally (no TS casts as runtime validation).
+ */
+export function validateLoginTokenResponse(value: unknown): TokenResponse {
+  if (!isPlainObject(value)) throw new RefreshError("MALFORMED_RESPONSE", FIXED_MESSAGES.MALFORMED_RESPONSE);
+  const required: Array<[string, (v: unknown) => boolean]> = [
+    ["access_token", nonEmptyString],
+    ["refresh_token", nonEmptyString],
+    ["expires_in", finitePositiveNumber],
+    ["token_type", nonEmptyString],
+    ["account_id", nonEmptyString],
+  ];
+  for (const [field, check] of required) {
+    if (!check(value[field])) throw new RefreshError("MALFORMED_RESPONSE", FIXED_MESSAGES.MALFORMED_RESPONSE);
+  }
+  const profile_id = value["profile_id"];
+  if (profile_id !== undefined && !nonEmptyString(profile_id)) {
+    throw new RefreshError("MALFORMED_RESPONSE", FIXED_MESSAGES.MALFORMED_RESPONSE);
+  }
+  return value as unknown as TokenResponse;
+}
+
+/**
+ * Structural validation of a provider REFRESH token response.
+ * refresh_token is OPTIONAL ONLY for refresh: an ABSENT property means
+ * non-rotation (the caller reuses the old refresh_token). A PRESENT but
+ * invalid value (null, number, array, object, empty/whitespace string)
+ * is MALFORMED_RESPONSE with no save and no clear.
+ */
+export function validateRefreshTokenResponse(value: unknown): {
+  valid: true;
+  response: TokenResponse;
+} | { valid: false; rotated: false } {
+  if (!isPlainObject(value)) return { valid: false, rotated: false };
+  if (!nonEmptyString(value["access_token"])) return { valid: false, rotated: false };
+  if (!finitePositiveNumber(value["expires_in"])) return { valid: false, rotated: false };
+  if (!nonEmptyString(value["token_type"])) return { valid: false, rotated: false };
+  if (!nonEmptyString(value["account_id"])) return { valid: false, rotated: false };
+  const profile_id = value["profile_id"];
+  if (profile_id !== undefined && !nonEmptyString(profile_id)) return { valid: false, rotated: false };
+  // refresh_token semantics (B4 plan §12):
+  //   absent property → valid non-rotation
+  //   present + non-empty string → rotated (valid)
+  //   present + anything else (null/number/array/object/empty/whitespace) → malformed
+  if (!("refresh_token" in value)) return { valid: true, response: value as unknown as TokenResponse };
+  if (nonEmptyString(value["refresh_token"])) return { valid: true, response: value as unknown as TokenResponse };
+  return { valid: false, rotated: false };
+}
+
+/**
+ * Classify a parsed provider refresh response body per the approved
+ * precedence (B4 plan §10): semantic invalid_grant (strict ===) BEFORE any
+ * HTTP-status classification.
+ *
+ * Returns a RefreshError for every failure case, or null when the body is
+ * not classified as an error (success path must then validate the
+ * structure).
+ */
+export function classifyRefreshResponse(status: number, body: unknown): RefreshError | null {
+  // Precedence B: semantic invalid_grant — JSON object AND strict equality.
+  if (isPlainObject(body) && body["error"] === "invalid_grant") {
+    return new RefreshError("REAUTH_REQUIRED", FIXED_MESSAGES.REAUTH_REQUIRED, status);
+  }
+  if (status >= 400) {
+    // Precedence D: 429 or any 5xx → TRANSIENT.
+    if (status === 429 || status >= 500) {
+      return new RefreshError("TRANSIENT", FIXED_MESSAGES.TRANSIENT, status);
+    }
+    // Precedence C/E: everything else non-2xx → SAFE_FAILURE (401/403
+    // ambiguous and 400 non-invalid_grant both PRESERVE auth).
+    return new RefreshError("SAFE_FAILURE", FIXED_MESSAGES.SAFE_FAILURE, status);
+  }
+  return null;
+}
+
+/**
+ * Process-local, ephemeral single-flight reference for the refresh
+ * operation (B4 plan §14). Module-private; never exported; never used as
+ * global token cache; never holding secret values — it holds a Promise of
+ * validated TokenData while in flight and is cleared in finally for both
+ * success and failure paths.
+ */
+let refreshInFlight: Promise<TokenData> | undefined;
+
+/**
+ * Internal refresh-specific token path (Architecture B). Generic
+ * request() is NOT used here: refresh classification requires local
+ * inspection of the parsed response body BEFORE constructing any outward
+ * or shared error, which the generic error surface cannot provide.
+ *
+ * Security invariant: the shared in-flight failure is secret-free before
+ * reject — the provider response is parsed, classified, and reduced to a
+ * fixed-message RefreshError before anything propagates to concurrent
+ * callers. Callers never depend on the origin operation's B6 registry.
+ */
+async function refreshOperation(oldTokens: TokenData): Promise<TokenData> {
+  // B6: register the old refresh token BEFORE the request body uses it.
+  registerSensitiveValue(oldTokens.refresh_token);
+
+  const bodyParams = new URLSearchParams({
+    grant_type: "refresh_token",
+    refresh_token: oldTokens.refresh_token,
+    scope: "offline_access",
+  });
+
+  let status: number;
+  let bodyText: string;
+  try {
+    const response = await fetch(`${AUTH_BASE}/auth/v1/token`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Authorization: `Basic ${BASIC_AUTH}`,
+      },
+      body: bodyParams.toString(),
+    });
+    status = response.status;
+    bodyText = await response.text();
+  } catch {
+    // Precedence A: fetch/network throw before any response → TRANSIENT,
+    // old persisted state preserved, no save, no clear, no retry.
+    throw new RefreshError("TRANSIENT", FIXED_MESSAGES.TRANSIENT);
+  }
+
+  // Classification FIRST: the HTTP status determines the failure class even
+  // when the body cannot be parsed (an empty or non-JSON 429/5xx response
+  // must still be TRANSIENT — classification must not depend on JSON).
+  // Semantic invalid_grant (strict ===) still beats everything else, but
+  // only when the body is actually JSON.
+  let parsed: unknown = null;
+  if (bodyText) {
+    try {
+      parsed = JSON.parse(bodyText);
+    } catch {
+      parsed = null;
+    }
+  }
+
+  // Precedence B: semantic invalid_grant — requires a JSON object body.
+  let classified: RefreshError | null = null;
+  if (parsed && isPlainObject(parsed) && parsed["error"] === "invalid_grant") {
+    classified = new RefreshError("REAUTH_REQUIRED", FIXED_MESSAGES.REAUTH_REQUIRED, status);
+  } else if (status >= 400) {
+    // HTTP-status classification (independent of JSON parsability).
+    classified = classifyRefreshResponse(status, parsed);
+  }
+  if (classified) {
+    if (classified.kind === "REAUTH_REQUIRED") {
+      // Semantic invalid_grant: do not save the response, do not return the
+      // old access token, attempt local clear (best-effort, unchanged B2/B3
+      // semantics), throw, no retry.
+      try {
+        await clearAuthData();
+      } catch {
+        // clearAuthData is best-effort by design — never surface as a new error.
+      }
+    }
+    throw classified;
+  }
+
+  // HTTP 2xx: structural validation (no partial persistence). A non-JSON or
+  // structurally invalid 2xx body is MALFORMED_RESPONSE.
+  if (parsed === null) {
+    throw new RefreshError("MALFORMED_RESPONSE", FIXED_MESSAGES.MALFORMED_RESPONSE);
+  }
+  const validation = validateRefreshTokenResponse(parsed);
+  if (!validation.valid) {
+    throw new RefreshError("MALFORMED_RESPONSE", FIXED_MESSAGES.MALFORMED_RESPONSE);
+  }
+
+  const resp = validation.response;
+  // B6: register the newly received access token (and the new refresh token
+  // when rotated) before persistence.
+  const newRefresh = resp.refresh_token ?? oldTokens.refresh_token;
+  registerSensitiveValue(resp.access_token, newRefresh);
+
+  const newTokens: TokenData = {
+    access_token: resp.access_token,
+    refresh_token: newRefresh,
+    expires_at: Date.now() + resp.expires_in * 1000,
+    token_type: resp.token_type,
+    account_id: resp.account_id,
+  };
+  if (resp.profile_id) newTokens.profile_id = resp.profile_id;
+
+  await saveTokens(newTokens);
+  return newTokens;
+}
+
+/**
+ * Public refresh entry point with process-local single-flight: while one
+ * refresh is in flight, concurrent callers await the SAME Promise and
+ * share the same success or the same secret-free failure. The reference is
+ * cleared in finally after both outcomes.
+ */
+export async function refreshRequest(oldTokens: TokenData): Promise<TokenData> {
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = refreshOperation(oldTokens).finally(() => {
+    refreshInFlight = undefined;
+  });
+  return refreshInFlight;
+}
+
+// ── Auth helpers (Gate B4) ───────────────────────────────────────────────────
+
+/** Validate the raw login provider payload BEFORE registering secrets or persisting. */
+export function validatedLoginPayload(value: unknown): TokenResponse {
+  return validateLoginTokenResponse(value);
+}
+
 export async function login(email: string, password: string): Promise<{ success: boolean; message: string }> {
   try {
     const body = new URLSearchParams({
@@ -200,7 +462,11 @@ export async function login(email: string, password: string): Promise<{ success:
       scope: "offline_access",
     });
 
-    const resp = await request<TokenResponse>(`${AUTH_BASE}/auth/v1/token`, {
+    // Gate B4: the raw provider payload enters as unknown and is
+    // structurally validated BEFORE any registration or persistence.
+    // A 2xx body missing/invalidating refresh_token is a malformed login
+    // response: login fails with no token/session persistence.
+    const raw: unknown = await request<unknown>(`${AUTH_BASE}/auth/v1/token`, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -209,6 +475,7 @@ export async function login(email: string, password: string): Promise<{ success:
       body: body.toString(),
       noAuth: true,
     });
+    const resp = validateLoginTokenResponse(raw);
 
     // B6-FIX-1 (blocker B6-C2): a valid TokenResponse makes both tokens
     // known to this operation. Register them IMMEDIATELY — before any
@@ -262,54 +529,16 @@ export async function getStatus(): Promise<{
   };
 }
 
-async function refreshTokens(tokens: TokenData): Promise<TokenData> {
-  // B6-FIX-1 (blocker B6-C2): register the existing refresh token BEFORE the
-  // refresh request is constructed/executed, so any failure on that request
-  // mentioning the raw literal (outside the keyed `refresh_token=` form)
-  // is still covered. No B4 semantics changed: when refresh happens,
-  // classification, rotation and preservation are untouched.
-  registerSensitiveValue(tokens.refresh_token);
-
-  const body = new URLSearchParams({
-    grant_type: "refresh_token",
-    refresh_token: tokens.refresh_token,
-    scope: "offline_access",
-  });
-
-  const resp = await request<TokenResponse>(`${AUTH_BASE}/auth/v1/token`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      Authorization: `Basic ${BASIC_AUTH}`,
-    },
-    body: body.toString(),
-    noAuth: true,
-  });
-
-  // B6-FIX-1 (blocker B6-C2): newly received tokens are registered
-  // immediately after a refresh TokenResponse, before persistence and any
-  // later operation.
-  registerSensitiveValue(resp.access_token, resp.refresh_token);
-
-  const newTokens: TokenData = {
-    access_token: resp.access_token,
-    refresh_token: resp.refresh_token,
-    expires_at: Date.now() + resp.expires_in * 1000,
-    token_type: resp.token_type,
-    account_id: resp.account_id,
-    profile_id: resp.profile_id,
-  };
-
-  await saveTokens(newTokens);
-  return newTokens;
-}
-
 async function getValidToken(): Promise<{ token: string; account_id: string }> {
-  let tokens = await loadTokens();
+  const tokens = await loadTokens();
   if (!tokens) throw new Error("Not logged in. Use crunchyroll_login first.");
 
   if (isTokenExpired(tokens)) {
-    tokens = await refreshTokens(tokens);
+    // Gate B4: the refresh goes through the state machine — classification,
+    // rotation, non-rotation preservation, single-flight and secret-free
+    // shared failure. Any failure surfaces as a RefreshError whose kind
+    // determines the outcome for the caller (no automatic retry).
+    return { token: (await refreshRequest(tokens)).access_token, account_id: tokens.account_id };
   }
 
   return { token: tokens.access_token, account_id: tokens.account_id };
