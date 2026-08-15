@@ -25,6 +25,7 @@ const FIXTURE = JSON.parse(
 ) as {
   live: { search: unknown; browse: unknown };
   legacy: { search: unknown; browse: unknown };
+  legacyEmptyTitle: { search: unknown };
 };
 
 // ── Harness ─────────────────────────────────────────────────────────────────
@@ -148,5 +149,22 @@ describe("LIVE-COMPAT-01 — legacy shape preserved", () => {
     assert.equal(items.length, 1);
     assert.equal(items[0].title, "Synthetic Legacy Series", "legacy titles are nested in series_meta");
     assert.equal(items[0].series_launch_year, 2019, "legacy series extras stay readable");
+  });
+
+  // Pre-BT0, search included an item because a legacy metadata OBJECT existed,
+  // independently of the title value. Inclusion must not become conditional on
+  // the title being truthy.
+  test("search keeps a legacy item whose metadata title is an empty string", async () => {
+    arrange(FIXTURE.legacyEmptyTitle.search, "/content/v2/discover/search");
+
+    const results = await searchAnime("synthetic");
+
+    assert.equal(
+      results.length,
+      1,
+      "a legacy metadata object with an empty title was included before BT0 and must remain included"
+    );
+    assert.equal(results[0].id, "GTLEGACY01");
+    assert.equal(results[0].title, "", "the empty title is preserved verbatim, not substituted");
   });
 });

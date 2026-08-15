@@ -65,6 +65,34 @@
       "meta": {}
     }
   },
+  "legacyEmptyTitle": {
+    "_comment": [
+      "Pre-BT0 behaviour: search included any item that HAD a legacy metadata",
+      "object, regardless of the title value. An empty-string title did not",
+      "make the item disappear. BT0 must not change that."
+    ],
+    "search": {
+      "total": 1,
+      "data": [
+        {
+          "type": "series",
+          "count": 1,
+          "items": [
+            {
+              "id": "GTLEGACY01",
+              "type": "series",
+              "series_meta": {
+                "id": "GTLEGACY01",
+                "title": "",
+                "description": "Legacy item whose title is an empty string."
+              }
+            }
+          ]
+        }
+      ],
+      "meta": {}
+    }
+  },
   "legacy": {
     "search": {
       "total": 1,

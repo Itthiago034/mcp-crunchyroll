@@ -610,6 +610,13 @@ interface DiscoverItem {
 
 /** Shape-independent view of the fields both call sites consume. */
 interface NormalizedDiscoverItem {
+  /**
+   * Whether this item carries metadata in a shape we understand. Deliberately
+   * independent of the title VALUE: search has always included an item that
+   * had a legacy metadata object, whatever its title, and an empty-string
+   * title must not make the item disappear.
+   */
+  recognized: boolean;
   title?: string;
   description?: string;
   series_launch_year?: number;
@@ -618,14 +625,15 @@ interface NormalizedDiscoverItem {
 /**
  * Resolve title/description/series extras from whichever shape the item uses.
  * Legacy nested metadata wins when present; otherwise the item-level fields
- * (live shape) are used. An unknown shape yields an empty view, which callers
- * handle exactly as they already handled missing metadata.
+ * (live shape) are used. An unrecognized shape yields an empty view, which
+ * callers handle exactly as they already handled missing metadata.
  */
 function normalizeDiscoverItem(item: DiscoverItem): NormalizedDiscoverItem {
   const legacy = item.series_meta ?? item.movie_listing_meta;
   const live = item.series_metadata ?? item.movie_listing_metadata;
   const extras = (legacy ?? live) as Partial<CrunchyrollSeries> | undefined;
   return {
+    recognized: legacy !== undefined || item.title !== undefined,
     title: legacy?.title ?? item.title,
     description: legacy?.description ?? item.description,
     series_launch_year: extras?.series_launch_year,
@@ -661,11 +669,11 @@ export async function searchAnime(
   for (const group of data.data ?? []) {
     for (const item of group.items ?? []) {
       const meta = normalizeDiscoverItem(item);
-      if (meta.title) {
+      if (meta.recognized) {
         results.push({
           type: item.type,
           id: item.id,
-          title: meta.title,
+          title: meta.title ?? "",
           description: meta.description?.slice(0, 300) ?? "",
         });
       }
