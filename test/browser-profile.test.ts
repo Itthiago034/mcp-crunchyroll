@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
+import { chmodSync, mkdtempSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, test } from "node:test";
 import { BrowserLifecycleError } from "../src/transport/browser-lifecycle-error.js";
 import { DEFAULT_BROWSER_SESSION_CONFIG } from "../src/transport/browser-lifecycle-types.js";
+import {
+  browserProfileDir,
+  ensureBrowserProfile,
+  resolveBrowserExecutable,
+} from "../src/transport/browser-profile.js";
 
 describe("BT2 lifecycle foundation", () => {
   test("lifecycle errors carry a kind and a fixed secret-free message", () => {
@@ -44,5 +52,71 @@ describe("BT2 lifecycle foundation", () => {
     assert.throws(() => {
       (config as { launchMode: string }).launchMode = "headless";
     }, TypeError);
+  });
+});
+
+describe("BT2 dedicated browser profile", () => {
+  test("the profile lives under the project's hardened state root", () => {
+    const dir = browserProfileDir();
+    assert.ok(dir.endsWith("/.strider/crunchyroll/browser-profile"), dir);
+    assert.ok(!dir.startsWith(tmpdir()), "never a shared temp location");
+  });
+
+  test("a new profile directory is created 0700", async () => {
+    const base = mkdtempSync(join(tmpdir(), "bt2-profile-"));
+    const dir = join(base, "browser-profile");
+    try {
+      await ensureBrowserProfile(dir);
+      assert.equal(statSync(dir).mode & 0o777, 0o700);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  test("an existing profile with group/other bits is REFUSED, not repaired", async () => {
+    const base = mkdtempSync(join(tmpdir(), "bt2-profile-"));
+    const dir = join(base, "browser-profile");
+    mkdirSync(dir);
+    chmodSync(dir, 0o755);
+    try {
+      await assert.rejects(
+        () => ensureBrowserProfile(dir),
+        (error: unknown) =>
+          error instanceof BrowserLifecycleError && error.kind === "PROFILE_INSECURE",
+      );
+      assert.equal(statSync(dir).mode & 0o777, 0o755, "never silently chmod-ed");
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  test("ensureBrowserProfile is idempotent across manager restarts", async () => {
+    const base = mkdtempSync(join(tmpdir(), "bt2-profile-"));
+    const dir = join(base, "browser-profile");
+    try {
+      await ensureBrowserProfile(dir);
+      await ensureBrowserProfile(dir);
+      assert.equal(statSync(dir).mode & 0o777, 0o700);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  test("the executable override must be an existing executable file", () => {
+    assert.throws(
+      () => resolveBrowserExecutable({ CRUNCHYROLL_BROWSER_EXECUTABLE: "/nonexistent/browser" }),
+      (error: unknown) =>
+        error instanceof BrowserLifecycleError &&
+        error.kind === "BROWSER_EXECUTABLE_NOT_FOUND",
+    );
+  });
+
+  test("a relative executable override is refused", () => {
+    assert.throws(
+      () => resolveBrowserExecutable({ CRUNCHYROLL_BROWSER_EXECUTABLE: "chromium" }),
+      (error: unknown) =>
+        error instanceof BrowserLifecycleError &&
+        error.kind === "BROWSER_EXECUTABLE_NOT_FOUND",
+    );
   });
 });
