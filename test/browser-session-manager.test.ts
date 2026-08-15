@@ -308,3 +308,94 @@ describe("BT2 session manager — CDP disconnect and reconnect", () => {
     assert.equal(connector.connections.length, 1, "no reconnect attempted during stop");
   });
 });
+
+describe("BT2 session manager — managed page", () => {
+  const createCalls = (connection: {
+    calls: Array<{ method: string; params?: Record<string, unknown> }>;
+  }) => connection.calls.filter((call) => call.method === "Target.createTarget");
+
+  test("no managed page exists until it is requested", async () => {
+    const { manager } = wireFakes();
+    await manager.start();
+    assert.equal(manager.managedPageId(), undefined, "lazy: MCP startup must not open a page");
+  });
+
+  test("ensureManagedPage creates one page and is idempotent", async () => {
+    const { manager, connector } = wireFakes();
+    await manager.start();
+    const first = await manager.ensureManagedPage();
+    const second = await manager.ensureManagedPage();
+    assert.equal(first, second);
+    assert.equal(createCalls(connector.connections[0]).length, 1);
+  });
+
+  test("the page is created at the configured origin and takes no argument", async () => {
+    const { manager, connector } = wireFakes({ initialPageUrl: "http://127.0.0.1:9/ok" });
+    await manager.start();
+    await manager.ensureManagedPage();
+    const create = createCalls(connector.connections[0])[0];
+    assert.equal(create.params?.url, "http://127.0.0.1:9/ok");
+    assert.equal(manager.ensureManagedPage.length, 0, "no caller-supplied URL parameter exists");
+  });
+
+  test("a destroyed page is AUTOMATICALLY recreated exactly once", async () => {
+    const { manager, connector, clock } = wireFakes();
+    await manager.start();
+    const first = await manager.ensureManagedPage();
+    connector.connections[0].emitEvent("Target.targetDestroyed", { targetId: first });
+    await clock.drain();
+    assert.equal(createCalls(connector.connections[0]).length, 2, "auto-recreated");
+    const second = manager.managedPageId();
+    assert.ok(second);
+    assert.notEqual(second, first);
+  });
+
+  test("duplicate destroy events recreate only one page", async () => {
+    const { manager, connector, clock } = wireFakes();
+    await manager.start();
+    const first = await manager.ensureManagedPage();
+    connector.connections[0].emitEvent("Target.targetDestroyed", { targetId: first });
+    connector.connections[0].emitEvent("Target.targetDestroyed", { targetId: first });
+    await clock.drain();
+    assert.equal(createCalls(connector.connections[0]).length, 2, "single-flight recreation");
+  });
+
+  test("a destroy event for an unrelated target is ignored", async () => {
+    const { manager, connector, clock } = wireFakes();
+    await manager.start();
+    const first = await manager.ensureManagedPage();
+    connector.connections[0].emitEvent("Target.targetDestroyed", { targetId: "someone-else" });
+    await clock.drain();
+    assert.equal(manager.managedPageId(), first);
+    assert.equal(createCalls(connector.connections[0]).length, 1);
+  });
+
+  test("the page is NOT recreated during stop", async () => {
+    const { manager, connector, clock } = wireFakes();
+    await manager.start();
+    const first = await manager.ensureManagedPage();
+    const stopping = manager.stop();
+    connector.connections[0].emitEvent("Target.targetDestroyed", { targetId: first });
+    await clock.drain();
+    await stopping;
+    assert.equal(createCalls(connector.connections[0]).length, 1, "no recreation during shutdown");
+    assert.equal(manager.managedPageId(), undefined);
+  });
+
+  test("stopping invalidates the managed page reference", async () => {
+    const { manager } = wireFakes();
+    await manager.start();
+    await manager.ensureManagedPage();
+    await manager.stop();
+    assert.equal(manager.managedPageId(), undefined);
+  });
+
+  test("ensureManagedPage fails when the browser is not ready", async () => {
+    const { manager } = wireFakes();
+    await assert.rejects(
+      () => manager.ensureManagedPage(),
+      (error: unknown) =>
+        error instanceof BrowserLifecycleError && error.kind === "BROWSER_UNAVAILABLE",
+    );
+  });
+});

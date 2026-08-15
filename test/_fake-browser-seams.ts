@@ -157,6 +157,7 @@ export class FakeConnection implements CdpConnection {
   private readonly closeListeners = new Set<() => void>();
   private readonly historicalCloseListeners = new Set<() => void>();
   private closed = false;
+  private nextTargetId = 1;
 
   constructor(
     private readonly closeAfterHandshake = false,
@@ -169,6 +170,9 @@ export class FakeConnection implements CdpConnection {
     if (method === "Browser.getVersion") {
       if (this.closeAfterHandshake) queueMicrotask(() => this.emitClose());
       return { product: "FakeBrowser/1.0" };
+    }
+    if (method === "Target.createTarget") {
+      return { targetId: `managed-${this.nextTargetId++}` };
     }
     return {};
   }

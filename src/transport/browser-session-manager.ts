@@ -168,6 +168,8 @@ export function createBrowserSessionManager(
   let stopExitResolve: (() => void) | undefined;
   let recoveryFlight: Promise<void> | undefined;
   let reconnectFlight: Promise<void> | undefined;
+  let managedTargetId: string | undefined;
+  let managedPageFlight: Promise<string> | undefined;
   const stateListeners = new Set<(
     from: BrowserLifecycleState,
     to: BrowserLifecycleState,
@@ -206,6 +208,61 @@ export function createBrowserSessionManager(
     processHandle = undefined;
     disposeConnection();
     endpoint = undefined;
+    managedTargetId = undefined;
+    managedPageFlight = undefined;
+  };
+
+  const createManagedPage = async (recreated: boolean): Promise<string> => {
+    const active = connectionRegistration;
+    if (
+      lifecycleState !== "BROWSER_READY" ||
+      stopRequested ||
+      !active ||
+      active.generation !== activeConnectionGeneration
+    ) {
+      throw new BrowserLifecycleError("BROWSER_UNAVAILABLE");
+    }
+    const result = (await active.connection.send("Target.createTarget", {
+      url: config.initialPageUrl,
+    })) as { targetId?: unknown };
+    if (
+      active.generation !== activeConnectionGeneration ||
+      typeof result.targetId !== "string" ||
+      result.targetId.length === 0
+    ) {
+      throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
+    }
+    managedTargetId = result.targetId;
+    if (recreated) emit({ type: "page.recreated" });
+    return result.targetId;
+  };
+
+  const beginManagedPageCreation = (recreated: boolean): Promise<string> => {
+    if (managedPageFlight) return managedPageFlight;
+    managedPageFlight = createManagedPage(recreated).finally(() => {
+      managedPageFlight = undefined;
+    });
+    return managedPageFlight;
+  };
+
+  const prepareTargetObservation = async (registration: {
+    readonly connection: CdpConnection;
+    readonly generation: number;
+    handledClose: boolean;
+  }) => {
+    registration.connection.on("Target.targetDestroyed", (params) => {
+      if (
+        registration.generation !== activeConnectionGeneration ||
+        typeof params !== "object" ||
+        params === null ||
+        (params as { targetId?: unknown }).targetId !== managedTargetId
+      ) return;
+      managedTargetId = undefined;
+      if (lifecycleState === "BROWSER_READY" && !stopRequested && !managedPageFlight) {
+        void beginManagedPageCreation(true).catch(() => undefined);
+      }
+    });
+    await registration.connection.send("Target.setDiscoverTargets", { discover: true });
   };
 
   async function reconnectFromDisconnect(): Promise<void> {
@@ -221,6 +278,10 @@ export function createBrowserSessionManager(
           candidate.connection.close();
           return;
         }
+        if (candidate.handledClose) {
+          throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
+        }
+        await prepareTargetObservation(candidate);
         if (candidate.handledClose) {
           throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
         }
@@ -377,6 +438,10 @@ export function createBrowserSessionManager(
       if (candidate.handledClose) {
         throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
       }
+      await Promise.race([prepareTargetObservation(candidate), earlyExit]);
+      if (candidate.handledClose) {
+        throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
+      }
       connection = candidate.connection;
       connectionRegistration = candidate;
       cancelEarlyExit?.();
@@ -396,6 +461,7 @@ export function createBrowserSessionManager(
 
   const stopInternal = async () => {
     stopRequested = true;
+    managedTargetId = undefined;
     if (!processHandle) {
       disposeActive();
       transition("STOPPED");
@@ -443,9 +509,13 @@ export function createBrowserSessionManager(
       await manager.stop();
       await manager.start();
     },
-    managedPageId: () => undefined,
+    managedPageId: () => managedTargetId,
     async ensureManagedPage() {
-      throw new BrowserLifecycleError("BROWSER_UNAVAILABLE");
+      if (lifecycleState !== "BROWSER_READY" || stopRequested) {
+        throw new BrowserLifecycleError("BROWSER_UNAVAILABLE");
+      }
+      if (managedTargetId) return managedTargetId;
+      return beginManagedPageCreation(false);
     },
     onStateChange(listener) { stateListeners.add(listener); },
     onLifecycleEvent(listener) { lifecycleListeners.add(listener); },
