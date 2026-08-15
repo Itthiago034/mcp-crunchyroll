@@ -25,6 +25,21 @@ export function createOperationRegistry(
     if (byId.has(d.id)) {
       throw new TransportError("INVALID_ARGUMENTS", `duplicate operation id: ${d.id}`);
     }
+    const overlap = Object.keys(d.callerParams).filter((k) => k in d.authDerivedParams);
+    if (overlap.length > 0) {
+      throw new TransportError(
+        "INVALID_ARGUMENTS",
+        `operation ${d.id} declares overlapping caller/auth-derived params: ${overlap.join(", ")}`
+      );
+    }
+    for (const name of Object.keys(d.authDerivedParams)) {
+      if (!d.pathTemplate.includes(`{${name}}`)) {
+        throw new TransportError(
+          "INVALID_ARGUMENTS",
+          `operation ${d.id} declares auth-derived param ${name} absent from its path template`
+        );
+      }
+    }
     byId.set(d.id, Object.freeze({ ...d }));
   }
   return {
@@ -50,6 +65,11 @@ export function resolveCall(
   // Allow-list, not blacklist: only declared callerParams are accepted, so a
   // key nobody declared can never reach a backend regardless of its name.
   for (const key of Object.keys(params)) {
+    // Identity first: a caller passing accountId deserves the precise reason,
+    // not a generic "unexpected argument".
+    if (key in descriptor.authDerivedParams) {
+      throw new TransportError("CALLER_SUPPLIED_IDENTITY", `auth-derived parameter: ${key}`);
+    }
     if (!(key in descriptor.callerParams)) {
       throw new TransportError("INVALID_ARGUMENTS", `unexpected argument: ${key}`);
     }

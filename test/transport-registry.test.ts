@@ -124,3 +124,67 @@ describe("BT1 registry — caller arguments", () => {
     });
   }
 });
+
+describe("BT1 registry — auth-owned parameters", () => {
+  const registry = createOperationRegistry([SYNTHETIC_ACCOUNT]);
+
+  test("caller-supplied accountId is rejected as CALLER_SUPPLIED_IDENTITY", () => {
+    assert.throws(
+      () => resolveCall(registry, "SYNTHETIC_ACCOUNT", { n: 20, accountId: "acct-1" }),
+      (e: unknown) =>
+        e instanceof TransportError && e.kind === "CALLER_SUPPLIED_IDENTITY" &&
+        String(e.detail).includes("accountId")
+    );
+  });
+
+  test("caller-supplied profileId is rejected as CALLER_SUPPLIED_IDENTITY", () => {
+    const withProfile = createOperationRegistry([{
+      ...SYNTHETIC_ACCOUNT,
+      id: "SYNTHETIC_PROFILE" as OperationId,
+      pathTemplate: "/synthetic/v1/{accountId}/{profileId}/items",
+      authDerivedParams: {
+        accountId: { source: "accountId" }, profileId: { source: "profileId" },
+      },
+    }]);
+    assert.throws(
+      () => resolveCall(withProfile, "SYNTHETIC_PROFILE", { profileId: "p-1" }),
+      (e: unknown) =>
+        e instanceof TransportError && e.kind === "CALLER_SUPPLIED_IDENTITY" &&
+        String(e.detail).includes("profileId")
+    );
+  });
+
+  test("identity rejection is not masked as a generic unknown argument", () => {
+    try {
+      resolveCall(registry, "SYNTHETIC_ACCOUNT", { accountId: "acct-1" });
+      assert.fail("expected a TransportError");
+    } catch (e) {
+      assert.ok(e instanceof TransportError);
+      assert.equal(e.kind, "CALLER_SUPPLIED_IDENTITY");
+    }
+  });
+
+  test("callerParams and authDerivedParams overlap is rejected at definition time", () => {
+    assert.throws(
+      () => createOperationRegistry([{
+        ...SYNTHETIC_ACCOUNT,
+        id: "SYNTHETIC_OVERLAP" as OperationId,
+        callerParams: { accountId: nonEmptyString },
+      }]),
+      (e: unknown) =>
+        e instanceof TransportError && e.kind === "INVALID_ARGUMENTS" &&
+        String(e.detail).includes("accountId")
+    );
+  });
+
+  test("an auth-derived param absent from the path template is rejected at definition time", () => {
+    assert.throws(
+      () => createOperationRegistry([{
+        ...SYNTHETIC_ACCOUNT,
+        id: "SYNTHETIC_BAD_PATH" as OperationId,
+        pathTemplate: "/synthetic/v1/items",
+      }]),
+      (e: unknown) => e instanceof TransportError && e.kind === "INVALID_ARGUMENTS"
+    );
+  });
+});
