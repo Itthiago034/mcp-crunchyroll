@@ -65,6 +65,42 @@
       "meta": {}
     }
   },
+  "unknownShape": {
+    "_comment": [
+      "An item carrying an item-level title but NONE of the four recognized",
+      "metadata shapes (series_meta, movie_listing_meta, series_metadata,",
+      "movie_listing_metadata). Before BT0 search excluded it, because no",
+      "metadata object existed. Recognition must key on metadata presence, not",
+      "on the title, so this item must stay excluded."
+    ],
+    "search": {
+      "total": 1,
+      "data": [
+        {
+          "type": "series",
+          "count": 2,
+          "items": [
+            {
+              "id": "UNKNOWN01",
+              "type": "some_future_or_unknown_type",
+              "title": "Synthetic Unknown Item",
+              "description": "Must not be treated as series/movie discover metadata."
+            },
+            {
+              "id": "GT00000001",
+              "type": "series",
+              "title": "Synthetic Live Series",
+              "description": "A recognized live item, present so the test proves exclusion is selective.",
+              "series_metadata": {
+                "series_launch_year": 2024
+              }
+            }
+          ]
+        }
+      ],
+      "meta": {}
+    }
+  },
   "legacyEmptyTitle": {
     "_comment": [
       "Pre-BT0 behaviour: search included any item that HAD a legacy metadata",

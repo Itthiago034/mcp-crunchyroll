@@ -611,10 +611,11 @@ interface DiscoverItem {
 /** Shape-independent view of the fields both call sites consume. */
 interface NormalizedDiscoverItem {
   /**
-   * Whether this item carries metadata in a shape we understand. Deliberately
-   * independent of the title VALUE: search has always included an item that
-   * had a legacy metadata object, whatever its title, and an empty-string
-   * title must not make the item disappear.
+   * Whether this item carries metadata in one of the four shapes we
+   * understand. Deliberately independent of the title entirely: the title is
+   * DATA carried by a recognized item, never the discriminator that makes an
+   * item recognized. So an empty-string title must not make an item disappear,
+   * and an item-level title alone must not make an unknown shape appear.
    */
   recognized: boolean;
   title?: string;
@@ -633,7 +634,7 @@ function normalizeDiscoverItem(item: DiscoverItem): NormalizedDiscoverItem {
   const live = item.series_metadata ?? item.movie_listing_metadata;
   const extras = (legacy ?? live) as Partial<CrunchyrollSeries> | undefined;
   return {
-    recognized: legacy !== undefined || item.title !== undefined,
+    recognized: legacy !== undefined || live !== undefined,
     title: legacy?.title ?? item.title,
     description: legacy?.description ?? item.description,
     series_launch_year: extras?.series_launch_year,

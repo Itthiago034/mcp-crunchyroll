@@ -26,6 +26,7 @@ const FIXTURE = JSON.parse(
   live: { search: unknown; browse: unknown };
   legacy: { search: unknown; browse: unknown };
   legacyEmptyTitle: { search: unknown };
+  unknownShape: { search: unknown };
 };
 
 // ── Harness ─────────────────────────────────────────────────────────────────
@@ -166,5 +167,28 @@ describe("LIVE-COMPAT-01 — legacy shape preserved", () => {
     );
     assert.equal(results[0].id, "GTLEGACY01");
     assert.equal(results[0].title, "", "the empty title is preserved verbatim, not substituted");
+  });
+});
+
+// Recognition must key on the four known metadata shapes. A title is data
+// carried BY a recognized item, never the discriminator that makes an item
+// recognized — accepting title-only items would widen the input contract
+// beyond what BT0 is authorized to parse.
+describe("LIVE-COMPAT-01 — unrecognized shapes stay excluded", () => {
+  test("search excludes an item carrying only an item-level title and no metadata", async () => {
+    arrange(FIXTURE.unknownShape.search, "/content/v2/discover/search");
+
+    const results = await searchAnime("synthetic");
+
+    const ids = results.map((r) => r.id);
+    assert.ok(
+      !ids.includes("UNKNOWN01"),
+      `an item with no recognized metadata shape must not be returned; got ids ${JSON.stringify(ids)}`
+    );
+    assert.deepEqual(
+      ids,
+      ["GT00000001"],
+      "only the item carrying a recognized metadata shape survives"
+    );
   });
 });
