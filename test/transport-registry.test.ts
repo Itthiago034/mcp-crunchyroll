@@ -309,8 +309,7 @@ describe("BT5-FIX1 registry — scope and auth are orthogonal", () => {
     assert.throws(
       () =>
         createOperationRegistry([
-          { ...base, id: "SYNTH_ACCOUNT_NONE" as OperationId, scope: "ACCOUNT",
-  auth: "BEARER", auth: "NONE" },
+          { ...base, id: "SYNTH_ACCOUNT_NONE" as OperationId, scope: "ACCOUNT", auth: "NONE" },
         ]),
       (e: unknown) => e instanceof TransportError && e.kind === "INVALID_ARGUMENTS"
     );
@@ -325,7 +324,6 @@ describe("BT5-FIX1 registry — scope and auth are orthogonal", () => {
               ...base,
               id: "SYNTH_BAD_AUTH" as OperationId,
               scope: "PUBLIC",
-  auth: "NONE",
               auth: auth as never,
             },
           ]),
@@ -337,10 +335,8 @@ describe("BT5-FIX1 registry — scope and auth are orthogonal", () => {
 
   test("the three meaningful combinations are accepted", () => {
     const registry = createOperationRegistry([
-      { ...base, id: "SYNTH_PUBLIC_NONE" as OperationId, scope: "PUBLIC",
-  auth: "NONE", auth: "NONE" },
-      { ...base, id: "SYNTH_PUBLIC_BEARER" as OperationId, scope: "PUBLIC",
-  auth: "NONE", auth: "BEARER" },
+      { ...base, id: "SYNTH_PUBLIC_NONE" as OperationId, scope: "PUBLIC", auth: "NONE" },
+      { ...base, id: "SYNTH_PUBLIC_BEARER" as OperationId, scope: "PUBLIC", auth: "BEARER" },
       {
         ...base,
         id: "SYNTH_ACCOUNT_BEARER" as OperationId,
@@ -367,5 +363,146 @@ describe("BT5-FIX1 registry — scope and auth are orthogonal", () => {
     const registry = createOperationRegistry([mutable]);
     (mutable as { auth: string }).auth = "NONE";
     assert.equal(registry.get("SYNTH_CAPTURE")!.auth, "BEARER", "registry policy is a copy");
+  });
+});
+
+// ── BT5-FIX2: scope and authDerivedParams must agree ───────────────────────
+//
+// BT5-FIX1 separated "whose data" from "needs material" but left the two
+// fields able to contradict each other. A PUBLIC descriptor carrying an
+// identity parameter would consume accountId/profileId while claiming to
+// address nobody's account; an ACCOUNT descriptor with no identity parameter
+// is the old overload wearing a new label. The registry owns this policy, so
+// the registry refuses both.
+
+describe("BT5-FIX2 registry — scope agrees with the identity it resolves", () => {
+  const base = {
+    method: "GET" as const,
+    callerParams: {},
+    mutation: false as const,
+  };
+  const IDENTITY = { accountId: { source: "accountId" as const } };
+
+  test("PUBLIC + NONE may not declare an identity parameter", () => {
+    assert.throws(
+      () =>
+        createOperationRegistry([
+          {
+            ...base,
+            id: "SYNTH_PUBLIC_NONE_ID" as OperationId,
+            pathTemplate: "/synthetic/v1/{accountId}/thing",
+            authDerivedParams: IDENTITY,
+            scope: "PUBLIC",
+            auth: "NONE",
+          },
+        ]),
+      (e: unknown) => e instanceof TransportError && e.kind === "INVALID_ARGUMENTS"
+    );
+  });
+
+  test("PUBLIC + BEARER may not declare an identity parameter either", () => {
+    assert.throws(
+      () =>
+        createOperationRegistry([
+          {
+            ...base,
+            id: "SYNTH_PUBLIC_BEARER_ID" as OperationId,
+            pathTemplate: "/synthetic/v1/{accountId}/thing",
+            authDerivedParams: IDENTITY,
+            scope: "PUBLIC",
+            auth: "BEARER",
+          },
+        ]),
+      (e: unknown) => e instanceof TransportError && e.kind === "INVALID_ARGUMENTS"
+    );
+  });
+
+  test("ACCOUNT + BEARER with no identity parameter is the old overload, and is refused", () => {
+    assert.throws(
+      () =>
+        createOperationRegistry([
+          {
+            ...base,
+            id: "SYNTH_ACCOUNT_NO_ID" as OperationId,
+            pathTemplate: "/synthetic/v1/thing",
+            authDerivedParams: {},
+            scope: "ACCOUNT",
+            auth: "BEARER",
+          },
+        ]),
+      (e: unknown) => e instanceof TransportError && e.kind === "INVALID_ARGUMENTS"
+    );
+  });
+
+  test("the three valid shapes are still accepted, and only those", () => {
+    const registry = createOperationRegistry([
+      {
+        ...base,
+        id: "OK_PUBLIC_NONE" as OperationId,
+        pathTemplate: "/synthetic/v1/open",
+        authDerivedParams: {},
+        scope: "PUBLIC",
+        auth: "NONE",
+      },
+      {
+        ...base,
+        id: "OK_PUBLIC_BEARER" as OperationId,
+        pathTemplate: "/synthetic/v1/catalog",
+        authDerivedParams: {},
+        scope: "PUBLIC",
+        auth: "BEARER",
+      },
+      {
+        ...base,
+        id: "OK_ACCOUNT_BEARER" as OperationId,
+        pathTemplate: "/synthetic/v1/{accountId}/items",
+        authDerivedParams: IDENTITY,
+        scope: "ACCOUNT",
+        auth: "BEARER",
+      },
+    ]);
+    assert.deepEqual(
+      [...registry.ids()].sort(),
+      ["OK_ACCOUNT_BEARER", "OK_PUBLIC_BEARER", "OK_PUBLIC_NONE"]
+    );
+  });
+
+  test("the production table satisfies the invariant it enforces", () => {
+    for (const d of PRODUCTION_OPERATIONS) {
+      const identityCount = Object.keys(d.authDerivedParams).length;
+      if (d.scope === "PUBLIC") {
+        assert.equal(identityCount, 0, `${d.id}: PUBLIC must resolve no identity`);
+      } else {
+        assert.equal(d.auth, "BEARER", `${d.id}: ACCOUNT must require material`);
+        assert.ok(identityCount > 0, `${d.id}: ACCOUNT must resolve identity`);
+      }
+    }
+    // And GET_CATEGORIES specifically is unchanged by this FIX.
+    const [categories] = PRODUCTION_OPERATIONS;
+    assert.equal(categories.scope, "PUBLIC");
+    assert.equal(categories.auth, "BEARER");
+    assert.deepEqual(Object.keys(categories.authDerivedParams), []);
+    assert.equal(categories.mutation, false);
+  });
+
+  test("a caller still cannot supply an identity, whatever the scope", () => {
+    const registry = createOperationRegistry([
+      {
+        ...base,
+        id: "OK_ACCOUNT_BEARER_2" as OperationId,
+        pathTemplate: "/synthetic/v1/{accountId}/items",
+        authDerivedParams: IDENTITY,
+        scope: "ACCOUNT",
+        auth: "BEARER",
+      },
+    ]);
+    for (const key of ["accountId", "profileId"]) {
+      assert.throws(
+        () => resolveCall(registry, "OK_ACCOUNT_BEARER_2", { [key]: "injected" }),
+        (e: unknown) =>
+          e instanceof TransportError &&
+          (e.kind === "CALLER_SUPPLIED_IDENTITY" || e.kind === "INVALID_ARGUMENTS")
+      );
+    }
   });
 });

@@ -76,6 +76,33 @@ export function createOperationRegistry(
         `operation ${String(d.id)} is account-scoped but declares no auth material`
       );
     }
+    // BT5-FIX2. The scope must AGREE with the identity the descriptor actually
+    // resolves, or the label means nothing:
+    //
+    //   PUBLIC  claims "this addresses nobody's account", so resolving an
+    //           accountId or profileId contradicts it — and `bind()` resolves
+    //           whatever a descriptor declares, independently of scope, so an
+    //           unchecked PUBLIC descriptor really would consume identity while
+    //           claiming not to;
+    //   ACCOUNT claims "this addresses someone's account", so a descriptor with
+    //           no identity parameter is the pre-FIX1 overload — ACCOUNT used
+    //           only to obtain a bearer — wearing a new label.
+    //
+    // A genuinely account-scoped endpoint with no identity parameter would need
+    // an explicit decision, not a quietly weakened invariant here.
+    const identityCount = Object.keys(d.authDerivedParams).length;
+    if (d.scope === "PUBLIC" && identityCount > 0) {
+      throw new TransportError(
+        "INVALID_ARGUMENTS",
+        `operation ${String(d.id)} is public but resolves authenticated identity`
+      );
+    }
+    if (d.scope === "ACCOUNT" && identityCount === 0) {
+      throw new TransportError(
+        "INVALID_ARGUMENTS",
+        `operation ${String(d.id)} is account-scoped but resolves no identity`
+      );
+    }
     if (byId.has(d.id)) {
       throw new TransportError("INVALID_ARGUMENTS", `duplicate operation id: ${d.id}`);
     }
