@@ -16,8 +16,10 @@ The epoch is a fresh process-local 128-bit value from Node's `randomBytes(16)`.
 The generation is a monotonically increasing safe integer local to that epoch.
 The authority holds one private current auth record or is unavailable. An
 `AuthContext` is a frozen, non-enumerable, non-rehydratable capability handle
-registered by object identity inside that authority. It exposes no token,
-cookie, account ID, profile ID, epoch, or generation field to ordinary callers.
+registered by object identity in an issuance-only `WeakSet`. The `WeakSet`
+associates no secret-bearing record with that handle. The handle exposes no
+token, cookie, account ID, profile ID, epoch, or generation field to ordinary
+callers.
 
 For an account-scoped transport call, BT5 will later keep `ResolvedCall`
 unchanged and ask the authority to produce an `AuthorizedCall` wrapper. The
@@ -192,10 +194,36 @@ export interface AuthRevisionView {
 ```
 
 The authority creates a frozen, null-prototype handle with no enumerable
-properties and records it in a private `WeakMap<AuthContext, ActiveAuthRecord>`.
-The brand and constructor are not exported. Runtime acceptance additionally
-requires WeakMap membership and identity with the authority's current handle;
-TypeScript branding alone is not trusted.
+properties and records only its issuance in a private
+`WeakSet<AuthContext>`. The brand and constructor are not exported. The
+secret-bearing `ActiveAuthRecord` is owned only by the current `AuthorityState`;
+there is no handle-to-record lookup table. TypeScript branding alone is not
+trusted.
+
+Conceptually:
+
+```ts
+class AuthContextAuthority {
+  private readonly issuedContexts = new WeakSet<AuthContext>();
+  private state: AuthorityState;
+}
+```
+
+Issuance creates the frozen handle, adds it to `issuedContexts`, then places the
+same handle into the new current `ActiveAuthRecord`. Runtime acceptance requires
+this complete conjunction:
+
+```ts
+issuedContexts.has(context) &&
+state.kind === "READY" &&
+state.record.context === context &&
+state.record.abortController.signal.aborted === false &&
+recordRemainsUsable(state.record)
+```
+
+A forged or cross-authority handle fails the issuance check. A previously
+issued stale handle passes issuance but fails current-record identity. No stale
+secret-bearing record is retrieved or retained through capability bookkeeping.
 
 The handle contains no raw access token, refresh token, cookie, Authorization
 value, password, email, account ID, profile ID, expiration, epoch, or generation
@@ -223,8 +251,8 @@ may differ without changing the contract.
   never mutated after installation.
 - Mutable: **no**. Mutation creates a new record, handle, and generation.
 - Snapshot: **yes**, of one revision, but no public fields are copied out.
-- Handle/capability: **yes**; object identity plus private authority membership
-  is required.
+- Handle/capability: **yes**; object identity, issuance-only WeakSet membership,
+  current-record identity, non-aborted signal, and usability are all required.
 - Raw secrets in AuthContext: **no**. The authority's private record owns the
   access token. Refresh tokens remain with the refresh producer/storage;
   cookies remain outside BT3.
@@ -240,11 +268,13 @@ may differ without changing the contract.
 - Production diagnostics: availability, generation, and fixed reason only.
   Full epoch and account/profile identifiers are prohibited from routine logs.
 - Caller construction: **no**, statically by private brand and dynamically by
-  WeakMap/current-handle validation.
+  issuance/current-handle validation.
 - Caller modification: **no**; frozen and opaque.
 - Indefinite backend retention: **forbidden by contract**. A backend receives a
-  handle only for one execution and must not store it; old retention is also
-  mechanically harmless because currentness checks reject it.
+  handle only for one execution and must not store it. If nevertheless retained,
+  an old handle is rejected by currentness checks and the authority's WeakSet
+  keeps no associated historical record or secret material. The handle can keep
+  only itself alive through issuance bookkeeping.
 - Coexisting generations: handles can remain in memory concurrently, but only
   the authority's current handle is usable. All older handles are stale.
 
@@ -278,11 +308,11 @@ Generation does **not** increment for:
 - storage reads, diagnostics, or public status checks;
 - a failed compare-and-swap commit.
 
-If an increment is required at `Number.MAX_SAFE_INTEGER`, the authority first
-aborts and drops the current record, enters unavailable/exhausted state at the
-same numeric value, and returns `AUTH_CONTEXT_UNAVAILABLE`. It never wraps,
-reuses zero, or silently resets. Recovery requires process restart, which
-creates a different epoch.
+If an increment is required at `Number.MAX_SAFE_INTEGER`, the authority builds
+an unavailable/exhausted state at the same numeric value, publishes it, and
+only then aborts the prior READY controller if one exists. It returns
+`AUTH_CONTEXT_UNAVAILABLE`. It never wraps, reuses zero, or silently resets.
+Recovery requires process restart, which creates a different epoch.
 
 Equality of `{epoch, generation}` proves only that two revision views name the
 same authority revision. It does not prove a handle was issued by the
@@ -328,6 +358,11 @@ in a new `src/transport/auth-context.ts` module.
 - A future BT5 backend can use only a context-bound guarded execution port; it
   cannot install or invalidate material.
 
+The authority's issuance `WeakSet` records only which opaque objects it issued.
+It is not an owner or index of historical auth state. The current
+`AuthorityState` is the sole authority-owned root for a secret-bearing
+`ActiveAuthRecord`.
+
 This separation ensures that browser existence is not mistaken for
 authentication and that transport code cannot mutate auth merely because it
 executes requests.
@@ -347,7 +382,16 @@ The complete later-stage flow is frozen as follows:
    or throws `AUTH_CONTEXT_UNAVAILABLE`.
 5. `bind` resolves only the descriptor's declared `accountId`/`profileId`
    sources from the same private active record. It writes them to a separate
-   frozen `authDerivedParams` map, never to `callerParams`.
+   frozen `authDerivedParams` map, never to `callerParams`. The authenticated
+   wrapper defines both `context` and `authDerivedParams` as non-enumerable,
+   read-only own properties before freezing the wrapper; nominal internal access
+   works, while generic object/JSON serialization does not emit them.
+   Those values remain sensitive auth identity: they must not be logged,
+   included in error details, traced, or generically serialized. Before future
+   BT5 code renders either value into a URL/path/request or passes it to code
+   that can surface request material, it must register the value with the
+   current redaction scope through `registerSensitiveValue`, unless a later
+   externally approved gate proves an equally strong closed mechanism.
 6. Immediately before the backend's first external side effect, it calls the
    authority's guarded-use method. The authority validates current capability
    identity, non-aborted state, and usable expiration.
@@ -402,8 +446,10 @@ Four options were evaluated:
 
 `ResolvedCall` therefore remains byte-for-byte and semantically unchanged in
 BT3. `AuthorizedCall` is a separate immutable wrapper produced only by the
-authority from an already-resolved account-scoped call. A public call has an
-explicit `PUBLIC` wrapper rather than an optional context field.
+authority from an already-resolved account-scoped call. Its context and
+auth-derived map are non-enumerable; generic serialization yields only its safe
+call/kind structure. A public call has an explicit `PUBLIC` wrapper rather than
+an optional context field.
 
 BT3 itself defines and tests the wrapper/authority behavior but does not modify
 the live dispatcher or `TransportBackend`; that wiring is BT5 cutover work.
@@ -411,18 +457,19 @@ the live dispatcher or `TransportBackend`; that wiring is BT5 cutover work.
 ## 15. Stale-context semantics
 
 A context is **STALE** when it was issued by this authority but is not the
-current handle, its record has been aborted, or its revision no longer equals
-the authority's current revision. An unrecognized/forged handle is also rejected
-as stale at the internal boundary so its origin is not disclosed. Staleness is
-permanent.
+handle in the current READY record, the current record's signal is aborted, or
+its revision no longer equals the authority's current revision. An
+unrecognized/forged handle is also rejected as stale at the internal boundary
+so its origin is not disclosed. Staleness is permanent. Validation never looks
+up a historical record through the handle.
 
 Required examples:
 
 - A call binds generation 4; refresh installs generation 5 before execution.
   The generation-4 pre-dispatch check throws `AUTH_CONTEXT_STALE`. No generation
   5 token or identity is substituted.
-- Logout begins while an operation is executing. Logout synchronously
-  invalidates first, advances generation, and aborts the old signal before it
+- Logout begins while an operation is executing. Logout synchronously publishes
+  UNAVAILABLE at the next generation, then aborts the old signal before it
   awaits filesystem deletion. The transport attempts cancellation; even if an
   underlying request cannot be unsent, its result fails the post-check and is
   discarded.
@@ -436,8 +483,8 @@ Required examples:
   Generation remains stable. Acquisition still fails closed if the material is
   expired under the configured validity rule.
 - A refresh response unexpectedly changes account or profile identity. The
-  replacement is not installed as continuity. The current context is aborted,
-  generation advances once into unavailable state, and
+  replacement is not installed as continuity. Unavailable state at the next
+  generation is published, the prior context is then aborted, and
   `AUTH_IDENTITY_CHANGED` is returned to the trusted producer.
 
 An operation already sent under generation G may be impossible to retract at
@@ -477,14 +524,38 @@ duplicate login state machine; BT4 owns future login orchestration.
   current `READY` record and installs that exact handle in an `AuthorizedCall`.
 - **Generation increment/state mutation:** the single synchronous assignment
   that swaps the immutable authority state after calculating the next safe
-  generation. The old controller is aborted immediately before publication in
-  the same event-loop turn; no `await` occurs between abort and assignment.
-- **Context invalidation:** abort plus state assignment at the start of
-  `invalidate`, before any storage/network/browser await.
+  generation. This state assignment is the linearization point.
+- **Context invalidation:** publication of the next `UNAVAILABLE` state at the
+  start of `invalidate`, before old-generation notification and before any
+  storage/network/browser await.
 - **External execution:** the last synchronous currentness check immediately
   before invoking the guarded backend callback.
 - **Result acceptance:** the synchronous currentness check after callback
   settlement and immediately before returning its result.
+
+Every successful replacement or invalidation uses this fixed order:
+
+1. capture the old current record/controller, if one exists;
+2. validate and completely build the next immutable state;
+3. assign `this.state = nextState` — the state/generation linearization point;
+4. call `oldController.abort()` if an old READY controller exists;
+5. only after publication and abort may asynchronous cleanup begin.
+
+There is no `await` and no intentionally invoked user callback between steps 3
+and 4. `AbortController.abort()` may synchronously run listeners, so publication
+must precede it. A listener that reenters during replacement observes the new
+READY generation/context. A listener that reenters during invalidation observes
+the new UNAVAILABLE revision. In both cases the old handle already fails current
+record identity.
+
+`AbortSignal` is cancellation/invalidation notification only. It is not state
+publication, a generation linearization point, proof of currentness, or
+authority ownership. Currentness comes only from the already-published
+`AuthorityState` plus current context identity and usability checks.
+
+An accepted explicit invalidation while already UNAVAILABLE may publish the
+next UNAVAILABLE generation as an ordering barrier. There is no old READY
+controller, so nothing is created merely to abort it.
 
 ### 16.3 Async preparation and CAS
 
@@ -493,7 +564,12 @@ or refresh outside the authority, then calls
 `commitAuthenticatedMaterial(expectedRevision, candidate)` synchronously. The
 commit succeeds only if current revision equals `expectedRevision`; otherwise
 it throws `AUTH_CONTEXT_STALE`. It never overwrites a logout, another refresh,
-or a newer login.
+or a newer login. A CAS mismatch performs no state mutation, generation
+increment, or controller abort. A successful replacement publishes the next
+state and only then aborts the prior controller. `EXHAUSTED` is terminal: a CAS
+commit rejects `AUTH_CONTEXT_UNAVAILABLE` even if its expected numeric revision
+equals the maximum revision, so publishing EXHAUSTED at the existing maximum
+cannot reopen the authority.
 
 BT3 performs no automatic storage bootstrap. A process starts unavailable at
 generation 0. If a later BT4 gate authorizes bootstrap from existing hardened
@@ -512,8 +588,8 @@ implicit trust path exists in BT3.
 - Logout vs resolution: whichever synchronous linearization point occurs first
   wins. A pre-logout bind becomes stale before execution; a post-logout bind is
   unavailable.
-- Logout vs execution: abort and the post-check prevent a result from being
-  accepted after invalidation.
+- Logout vs execution: UNAVAILABLE publication, subsequent abort notification,
+  and the post-check prevent a result from being accepted after invalidation.
 - Process shutdown invokes authority invalidation synchronously before other
   teardown awaits; no context survives as current.
 
@@ -549,13 +625,22 @@ never makes `BrowserSessionManager` an auth store.
 - Cookies are not copied or typed by BT3. A future BT4 design must decide their
   acquisition and storage boundary before they can participate.
 - The opaque context contains neither values nor references directly accessible
-  to consumers. The private WeakMap association is the capability.
+  to consumers. An issuance-only `WeakSet<AuthContext>` records that this
+  authority created the object; it contains no token, identity, revision,
+  execution view, controller, or record association.
 - Guarded execution exposes the access token only for the duration of one
   callback and registers it with the active redaction scope first. Consumers
   are forbidden to retain it.
-- On replacement/invalidation the controller is aborted, the current record is
-  dropped, and old handles become unusable. Records may remain reachable until
-  in-flight callbacks and garbage collection release them.
+- On replacement/invalidation the next state is published first, making the old
+  handle stale; the old controller is then aborted. The authority's current
+  state becomes the sole owner of the new secret-bearing record and its
+  issuance bookkeeping provides no lookup path to the old record.
+- A retained stale AuthContext can keep only the opaque handle itself reachable
+  through the retaining ordinary reference. It cannot, merely by remaining an
+  issued handle, keep its historical secret-bearing record reachable through an
+  authority lookup table. Old material may still be reachable through a
+  legitimate in-flight guarded callback, another ordinary JavaScript reference,
+  or runtime/garbage-collector behavior.
 - No zeroization, deterministic erasure, or garbage-collection deadline is
   claimed. Node/JavaScript cannot guarantee those properties for strings.
 
@@ -581,6 +666,20 @@ epoch is not routinely logged or returned; tests may inspect an injected
 symbolic epoch. A stale error uses only a fixed message. The authority must
 construct shared failures secret-free before rejecting, rather than relying on
 the originating operation's redaction scope.
+
+`AuthorizedCall.authDerivedParams.accountId` and `.profileId` remain sensitive
+auth identity even though they are not credentials. They may not enter log
+messages, Error messages/details, tracing attributes, generic debug
+serialization, or tool-visible failure text. The wrapper's non-enumerable
+context/auth-derived properties mechanically keep them out of generic
+serialization. They may enter public tool output only where that identity field
+is already an explicit part of the unchanged 21-tool contract; BT3 adds no such
+output. Before future BT5 rendering places
+either symbolic value into a URL/path/request or passes it to code that may
+surface request material, the value must be registered through the existing
+`registerSensitiveValue` mechanism in the current redaction scope, unless an
+equally strong closed mechanism receives separate external approval. No new
+redaction dependency is required.
 
 ## 20. Error model
 
@@ -615,8 +714,9 @@ boundary.
 6. Secret missing or expired after binding: authority invalidates as required
    and refuses execution.
 7. Ambiguous authority ownership or context from a different authority:
-   rejected stale by WeakMap/current-object check.
-8. Mutation generation overflow: abort, unavailable/exhausted, no wrap.
+   rejected stale by issuance WeakSet plus current-object check.
+8. Mutation generation overflow: publish unavailable/exhausted, abort any prior
+   READY controller, and never wrap.
 9. Cancellation cannot retract a sent request: its result is discarded after
    failed post-check.
 10. No fallback to arbitrary cookie, stale bearer, legacy global, environment
@@ -628,19 +728,19 @@ boundary.
 |---|---|---|---|---|
 | T1 — caller injects bearer | access credential and request authority | supplies `Authorization`, `bearer`, `token`, or another undeclared key | existing registry accepts only declared caller keys; authority is not caller-reachable; backend material comes only from guarded private record | every injection rejected before backend; backend call count zero |
 | T2 — caller injects account/profile | authenticated resource boundary | supplies `accountId`, `profileId`, or generation | registry classifies auth-derived overlap as `CALLER_SUPPLIED_IDENTITY`; binder resolves only declared sources from current private record | injected identity/generation rejected; derived values equal synthetic authority record |
-| T3 — stale request uses refreshed credentials | generation-consistent operation | call bound at G is silently supplied G+1 material | opaque handle maps to exact record; pre-check requires current object; no current-record substitution | bind G, install G+1, execute G → `AUTH_CONTEXT_STALE`; G+1 token never observed by callback |
-| T4 — logout races pending operation | logout invalidation | operation resolves or awaits while logout clears disk | synchronous invalidate/abort before async clear; pre/post checks; stale result discarded | barriers place logout before dispatch and during callback; both reject/abort deterministically |
-| T5 — old context survives account switch | account/profile confidentiality and authorization | retained handle is reused after explicit new login/account switch | every install creates new handle/generation and aborts old; WeakMap/current identity check | install account A then explicit account B; A handle permanently stale |
+| T3 — stale request uses refreshed credentials | generation-consistent operation | call bound at G is silently supplied G+1 material | issuance check plus identity with the one current READY record; no historical lookup or current-record substitution | bind G, install G+1, execute G → `AUTH_CONTEXT_STALE`; G+1 token never observed by callback |
+| T4 — logout races pending operation | logout invalidation | operation resolves or awaits while logout clears disk, or an abort listener reenters synchronously | publish UNAVAILABLE first, then abort old controller, then async clear; pre/post checks discard stale result | barriers place logout before dispatch and during callback; abort listener observes only new UNAVAILABLE revision |
+| T5 — old context survives account switch | account/profile confidentiality and authorization | retained handle is reused after explicit new login/account switch | every install publishes new handle/generation before aborting old; issuance/current identity check rejects old | install account A then explicit account B; reentrant listener sees B and A handle is permanently stale |
 | T6 — browser restart preserves auth trust incorrectly | separation of browser and auth state | lifecycle code assumes browser existence means authenticated continuity | no lifecycle-to-auth implicit mapping; only trusted BT4 writer can invalidate/install; browser manager has no auth fields | all BT2 events leave generation unchanged; explicit producer invalidation changes it |
-| T7 — logs leak token/cookie | credential secrecy | error, debug object, or success payload contains raw material | fixed errors, non-enumerable opaque handle, no cookie type, register token before callback, existing central sanitizer | sentinel absent from errors/results/log fixture under success, failure, and concurrency |
-| T8 — backend retains context indefinitely | capability lifetime | backend stores handle/token and tries later use | execution-only port, no mutator port, old handle becomes stale and callback view is short-lived; retention prohibited and tested | fake retains handle, mutation occurs, later use rejects; fake cannot access writer methods |
+| T7 — logs leak token/cookie or sensitive auth identity | credential and identity confidentiality | error, trace, debug object, URL failure, or success payload contains raw material/account/profile ID | fixed errors, non-enumerable opaque handle, closed auth-derived map, register token and future-rendered auth identity before use, existing central sanitizer | token/account/profile sentinels absent from errors, logs, diagnostics, serialized wrappers, and tool-visible failures |
+| T8 — stale handle pins secret-bearing record | old credential lifetime | capability bookkeeping associates a retained stale handle with its historical `ActiveAuthRecord` | issuance-only `WeakSet<AuthContext>` plus sole current-state ownership of the secret record; no handle-to-record association | structural scan rejects secret-bearing handle registry; retained old handle is stale and cannot retrieve old material; current execution uses only current record |
 | T9 — generation reset causes false equality | revision identity | numeric generation repeats after process restart | fresh 128-bit process epoch; equality uses pair and capability identity | two deterministic epochs both at generation 1 are unequal and mutually rejected |
 | T10 — corrupted persisted auth becomes trusted | credential integrity | malformed/insecure token state is treated as ready | existing hardened validation produces no candidate; authority accepts only validated closed candidate; unavailable on load failure | malformed, missing, insecure, expired candidates produce no context |
 | T11 — late refresh overwrites logout | invalidation ordering | async refresh begins at G, logout advances, refresh completes | commit CAS requires captured exact revision | resolve refresh candidate, invalidate, commit → stale and unavailable remains |
 | T12 — result accepted after invalidation | response integrity | remote request resolves after logout/refresh | shared abort signal plus mandatory post-callback currentness check | deferred callback resolves after invalidation; result discarded as stale |
-| T13 — context forgery/cross-authority use | authority ownership | internal or caller code creates lookalike or uses another authority's handle | private brand plus authority-local WeakMap/current object identity | frozen lookalike and context from authority B both rejected by authority A |
+| T13 — context forgery/cross-authority use | authority ownership | internal or caller code creates lookalike or uses another authority's handle | private brand plus authority-local issuance WeakSet and current object identity | frozen lookalike and context from authority B both rejected by authority A |
 | T14 — refresh changes identity silently | account/profile authorization | provider response changes account/profile while called “refresh” | refresh-mode commit requires exact identity equality, invalidates on mismatch | account change, profile addition/removal/change all yield `AUTH_IDENTITY_CHANGED` and stale old handle |
-| T15 — generation wrap | revision uniqueness | enough mutations exceed safe-integer precision | explicit max check, abort, exhausted-unavailable, no wrap | injected max generation cannot install/invalidate into reused value |
+| T15 — generation wrap | revision uniqueness | enough mutations exceed safe-integer precision | explicit max check, publish exhausted-unavailable before abort, no wrap | injected max generation cannot install/invalidate into reused value; reentrant abort listener sees EXHAUSTED |
 
 The attacker model includes an untrusted MCP caller and accidental races or
 misuse by internal transport code. It does not claim protection against an
@@ -653,15 +753,15 @@ memory or monkey-patch modules.
 |---|---|
 | BT3-I1 | MCP caller input can never construct, select, modify, serialize-and-rehydrate, or supply an accepted AuthContext. |
 | BT3-I2 | MCP caller input can never set epoch, authGeneration, Authorization, bearer, cookie, account ID, or profile ID. |
-| BT3-I3 | Exactly one process-local AuthContextAuthority owns the current transport-auth record. |
+| BT3-I3 | Exactly one process-local AuthContextAuthority owns mutable transport-auth state, and its current `AuthorityState` is the sole authority-owned reference to the secret-bearing `ActiveAuthRecord`. |
 | BT3-I4 | Every accepted state mutation publishes one immutable record or unavailable state at one monotonically increasing generation within the same epoch. |
 | BT3-I5 | Generation never wraps or resets within an epoch; process restart always creates a different epoch. |
 | BT3-I6 | An operation bound to revision G is either executed with G's exact material or rejected; it is never executed with another revision's material. |
-| BT3-I7 | Replacement/invalidation aborts and permanently stales every prior-generation handle before later asynchronous cleanup. |
+| BT3-I7 | Replacement/invalidation completely builds and publishes the next `AuthorityState` before abort-notifying the prior controller; reentrant listeners therefore observe only the new READY/UNAVAILABLE state. |
 | BT3-I8 | Backend results are accepted only after a post-execution currentness check for the same handle. |
 | BT3-I9 | AuthContext exposes no raw secret or sensitive identity field and has no usable serialized representation. |
 | BT3-I10 | Access material is exposed only inside guarded execution after registration with the current redaction scope; refresh tokens and cookies are never exposed by BT3. |
-| BT3-I11 | Auth-derived parameters are resolved from the same private record as the bound context and remain separate from `callerParams`. |
+| BT3-I11 | Auth-derived parameters are resolved from the same private record as the bound context, remain separate from `callerParams`, remain sensitive identity, and are registered for redaction before future rendering/use that may surface request material. |
 | BT3-I12 | Unexpected account/profile change during refresh continuity invalidates the old context and cannot become current through that refresh commit. |
 | BT3-I13 | Invalid, insecure, absent, corrupt, expired, or ambiguous material never produces a READY context. |
 | BT3-I14 | Browser lifecycle and CDP connection generation never implicitly mutate or stand in for authGeneration. |
@@ -669,6 +769,7 @@ memory or monkey-patch modules.
 | BT3-I16 | Public MCP remains exactly 21 tools with unchanged names, schemas, descriptions, and reachability. |
 | BT3-I17 | No BT3 error, log, diagnostic, or result carries raw auth material or sensitive identity. |
 | BT3-I18 | BT3 performs no login, logout persistence migration, live network access, browser launch, cookie/bearer extraction, or CDP capability expansion. |
+| BT3-I19 | Capability issuance bookkeeping is an issuance-only `WeakSet<AuthContext>` and never associates a stale AuthContext with a historical secret-bearing record, access token, execution view, identity, revision, or controller. |
 
 ## 24. Test strategy
 
@@ -681,10 +782,15 @@ all races explicit. Required cases:
 - initial epoch is injected and generation is 0/unavailable;
 - first install creates generation 1; repeated acquire remains generation 1;
 - every replacement and invalidation increments exactly once;
-- failed validation and failed CAS do not publish or increment;
-- max-safe generation becomes exhausted/unavailable without wrap;
+- failed validation and failed CAS do not publish, increment, or abort;
+- max-safe generation publishes terminal exhausted/unavailable before abort,
+  never wraps, and cannot be reopened by a same-maximum expected revision;
 - two process epochs with equal numeric generation are unequal;
-- stale, forged, cross-authority, and serialized lookalike handles reject.
+- stale, forged, cross-authority, and serialized lookalike handles reject;
+- a structural/source assertion requires an issuance-only
+  `WeakSet<AuthContext>` and rejects every handle-keyed association with
+  `ActiveAuthRecord`, `accessToken`, `AuthExecutionView`, identity, revision, or
+  another secret-bearing object. No GC-timing test is used.
 
 ### Material and identity
 
@@ -707,6 +813,12 @@ all races explicit. Required cases:
 - mutation after bind but before guarded use rejects stale;
 - logout/invalidation during a deferred callback aborts its signal and discards
   the eventual result;
+- invalidation reentrancy: an old signal listener synchronously reenters during
+  `abort()` and observes the already-published UNAVAILABLE/new revision; the old
+  handle is stale, acquisition cannot return G, and no old record is current;
+- replacement reentrancy: an old signal listener synchronously reenters during
+  `abort()` and observes the already-published G+1 READY state/handle; G is stale
+  and no G+1 secret is substituted into G;
 - a late async candidate cannot overwrite logout or a newer commit;
 - multiple pending operations for one generation all receive abort and fail
   their post-check;
@@ -716,13 +828,19 @@ all races explicit. Required cases:
 ### Boundaries and redaction
 
 - `AuthorizedCall` preserves the original `ResolvedCall` object and places
-  identity only in a frozen separate map;
+  identity only in a frozen separate map whose wrapper property, like the
+  context property, is non-enumerable;
 - public calls carry no context; account calls require one;
 - caller bearer/account/profile/generation injection remains rejected before
   fake backend invocation;
 - callback token sentinel is registered/redacted on success and failure;
+- symbolic `SENSITIVE_ACCOUNT_SENTINEL` and `SENSITIVE_PROFILE_SENTINEL` values
+  are absent from logs, errors, diagnostics, generic `AuthorizedCall`
+  serialization, and tool-visible failures, and are registered before future
+  URL/path/request rendering that may surface them;
 - fixed errors contain no token, identity, epoch, cause, or provider body;
-- fake backend retention cannot make an old handle usable;
+- fake backend retention cannot make an old handle usable or retrieve historical
+  material, while current execution uses only the current record;
 - source scan/type assertions show no refresh token, cookie, writer method, or
   BrowserSessionManager reference in the consumer port.
 
@@ -762,8 +880,9 @@ No task below is executed by this design gate.
   cross-epoch inequality, fixed messages, and overflow behavior.
 - **EXPECTED FAILURE CLASS:** module/type resolution RED, followed by behavioral
   assertions for missing capability checks.
-- **IMPLEMENTATION:** minimal private brand/WeakMap scaffolding, epoch factory,
-  error class, unavailable initial state.
+- **IMPLEMENTATION:** minimal private brand plus issuance-only
+  `WeakSet<AuthContext>` scaffolding, epoch factory, error class, and unavailable
+  initial state. No handle-to-record/secret association is permitted.
 - **GREEN:** focused context primitive tests.
 - **REGRESSION:** typecheck, build, full test, diff check.
 - **COMMIT MESSAGE:** `BT3: define opaque auth context revisions`.
@@ -775,14 +894,16 @@ No task below is executed by this design gate.
   `test/auth-context.test.ts`.
 - **PURPOSE:** implement one immutable current record, closed material
   validation, generation mutation, explicit establish-vs-refresh identity
-  semantics, and abort-on-invalidate.
+  semantics, and publish-before-abort invalidation.
 - **RED:** initial unavailable, install/increment, stable acquire, refresh
   replacement, logout invalidation, identity-change, expiration, and max tests
   fail behaviorally.
 - **EXPECTED FAILURE CLASS:** missing authority transitions and fail-closed
   validation.
-- **IMPLEMENTATION:** synchronous atomic state replacement and private record;
-  no network/storage/browser wiring.
+- **IMPLEMENTATION:** synchronously build and publish the next immutable state,
+  then abort the old controller with no await/user callback between those two
+  steps; the current state alone owns the secret-bearing record. No
+  network/storage/browser wiring.
 - **GREEN:** lifecycle/identity table passes.
 - **REGRESSION:** Task 1 plus full/typecheck/build/diff.
 - **COMMIT MESSAGE:** `BT3: own auth context lifecycle and generation`.
@@ -796,11 +917,13 @@ No task below is executed by this design gate.
   AbortSignal, and scoped secret exposure.
 - **RED:** deferred refresh-vs-logout, mutation-before-dispatch,
   mutation-during-execution, concurrent pending operations, late completion,
-  and stale-result tests fail behaviorally.
+  invalidation/replacement abort-listener reentrancy, and stale-result tests fail
+  behaviorally.
 - **EXPECTED FAILURE CLASS:** stale operations incorrectly invoke/return or late
   candidate overwrites current state.
 - **IMPLEMENTATION:** synchronous CAS commit and `runCurrent` guarded callback;
-  register access token before callback.
+  publish before abort, register access token before callback, and retain both
+  pre/post currentness checks. CAS mismatch does not mutate or abort.
 - **GREEN:** deterministic barrier tests prove no cross-generation execution.
 - **REGRESSION:** redaction concurrency, full/typecheck/build/diff.
 - **COMMIT MESSAGE:** `BT3: reject stale auth work across async boundaries`.
@@ -811,12 +934,17 @@ No task below is executed by this design gate.
 - **FILES:** modify `src/transport/auth-context.ts` and
   `test/auth-context.test.ts` only.
 - **PURPOSE:** add the discriminated public/authenticated execution wrappers and
-  resolve declared `accountId`/`profileId` from the same current record.
+  resolve declared `accountId`/`profileId` from the same current record while
+  preserving them as sensitive auth identity.
 - **RED:** account binding, missing profile, public wrapper, frozen-map,
-  caller-injection, and bind-vs-mutation tests fail.
+  caller-injection, bind-vs-mutation, no-log/no-error, generic serialization,
+  and redaction-before-future-render tests fail using symbolic identity
+  sentinels.
 - **EXPECTED FAILURE CLASS:** missing wrapper/binder; no backend product change.
 - **IMPLEMENTATION:** `bind(ResolvedCall)` with descriptor-scope checks and
-  separate auth-derived map. Do not edit dispatcher/backend yet.
+  separate frozen auth-derived map; define context/auth-derived wrapper
+  properties as read-only and non-enumerable before freezing. Do not edit
+  dispatcher/backend yet.
 - **GREEN:** wrapper and existing registry tests pass.
 - **REGRESSION:** BT1 transport suites plus full/typecheck/build/diff.
 - **COMMIT MESSAGE:** `BT3: bind resolved calls to current auth identity`.
@@ -835,8 +963,11 @@ No task below is executed by this design gate.
 - **EXPECTED FAILURE CLASS:** RED or GREEN observation-first security closure.
 - **IMPLEMENTATION:** only a minimal fix for an observed BT3 omission; no public
   wiring.
-- **GREEN:** focused suite, full suite, typecheck, build, 21-tool source/bundle
-  harness, forbidden-file diff, and no-network inspection.
+- **GREEN:** structural scan proves `WeakSet<AuthContext>` issuance and no
+  secret-bearing handle registry; retained stale handles retrieve no material;
+  identity redaction boundary, focused suite, full suite, typecheck, build,
+  21-tool source/bundle harness, forbidden-file diff, and no-network inspection
+  all pass.
 - **REGRESSION:** all existing auth/transport/BT2 tests.
 - **COMMIT MESSAGE:** `BT3: verify auth context boundary remains internal`.
 - **DEPENDENCIES:** Tasks 1–4.
@@ -939,6 +1070,12 @@ material and cannot silently retry a mutation after stale rejection. Public
 operations bypass auth explicitly; account operations cannot proceed without
 an `AuthorizedCall`.
 
+The account/profile values in the wrapper remain sensitive auth identity. BT5
+may use them only for the closed descriptor rendering it owns; it must not log,
+trace, generically serialize, or include them in Error/tool-visible failure
+text, and must register them with the active redaction scope before rendering or
+request use that may surface them.
+
 Actual dispatcher/backend cutover, endpoint rendering, retry policy, and
 operation registration remain BT5 work. BT3 provides the mechanical contract
 but does not wire it.
@@ -966,7 +1103,7 @@ independent gate.
 ## 30. Dependency statement
 
 BT3 requires no new runtime or development dependency. Node 18 built-ins cover
-`randomBytes`, `AbortController`, `WeakMap`, object freezing, and promises.
+`randomBytes`, `AbortController`, `WeakSet`, object freezing, and promises.
 Existing `AsyncLocalStorage` redaction is reused.
 
 The frozen package has runtime dependencies only on
@@ -1023,6 +1160,8 @@ There are **zero blocking open questions** for the BT3 abstraction.
 - [ ] AuthContext is opaque, immutable, authority-issued, and contains no
   caller-visible secret or identity fields.
 - [ ] Authority has exactly one immutable current record or is unavailable.
+- [ ] Issuance uses `WeakSet<AuthContext>` only; capability bookkeeping has no
+  handle-to-secret-record association.
 - [ ] Epoch plus monotonic safe-integer generation prevents cross-process false
   equality and in-process reuse.
 - [ ] Overflow fails unavailable without wrap.
@@ -1030,6 +1169,8 @@ There are **zero blocking open questions** for the BT3 abstraction.
 - [ ] Caller parameters and auth-derived values remain mechanically separate.
 - [ ] Pre-use check, AbortSignal, and post-use check close the documented await
   races without claiming remote rollback.
+- [ ] Every mutation publishes the next state before old-controller abort, so a
+  synchronous reentrant listener observes only the new state.
 - [ ] Refresh identity mismatch invalidates rather than silently switching.
 - [ ] Logout invalidates before asynchronous persistence work.
 - [ ] Browser lifecycle never becomes auth authority or auth generation.
@@ -1041,6 +1182,9 @@ There are **zero blocking open questions** for the BT3 abstraction.
 - [ ] Refresh tokens, cookies, passwords, Authorization values, and sensitive
   identity never enter AuthContext, logs, or fixed errors.
 - [ ] Existing redaction scope registers access material before use.
+- [ ] Account/profile auth-derived values remain sensitive, are never
+  logged/serialized into diagnostics, and are registered before future request
+  rendering that may surface them.
 - [ ] Invalid storage/material, stale context, identity change, missing profile,
   and ambiguous authority all fail closed.
 - [ ] No zeroization or network rollback claim is made.
@@ -1057,7 +1201,7 @@ There are **zero blocking open questions** for the BT3 abstraction.
 ### Required self-review answers
 
 1. **Can caller input construct AuthContext?** NO; private brand plus
-   authority-local WeakMap/current identity.
+   authority-local issuance WeakSet/current identity.
 2. **Can caller input set authGeneration?** NO; only synchronous authority
    transitions increment it.
 3. **Can an old generation silently execute with new credentials?** NO; old
@@ -1071,9 +1215,9 @@ There are **zero blocking open questions** for the BT3 abstraction.
 7. **Does token refresh change authGeneration?** A successful material
    replacement always increments once; transient failure with unchanged usable
    material does not; invalid-grant/identity anomaly invalidates and increments.
-8. **Does logout invalidate all outstanding contexts?** YES; synchronous abort
-   and unavailable publication precede filesystem awaits, and post-checks reject
-   late results.
+8. **Does logout invalidate all outstanding contexts?** YES; synchronous
+   UNAVAILABLE publication precedes old-controller abort, both precede
+   filesystem awaits, and post-checks reject late results.
 9. **Can raw auth secrets enter logs?** NO by contract, fixed errors, scoped
    registration, and boundary tests.
 10. **Does BT3 modify the 21-tool contract?** NO.
