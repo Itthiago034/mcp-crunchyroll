@@ -661,3 +661,53 @@ sleeps. No browser was opened and no live login was performed for this fix.
 
 BT4-N2, BT4-N3, BT4-N4 and BT4-N5 are unchanged and still open. BT4-R1 is
 repaired and awaiting external re-review. Nothing here is declared closed.
+
+---
+
+# Part IV — BT4-N5 design resolution (acceptance matrix)
+
+Append-only. The full argument is in `CRUNCHYROLL-BT4-N5-ONBOARDING-ERRATA.md`;
+this part records the decision and the matrix. No source, test, fixture or
+package file changed for it.
+
+**Decision: OPTION B — Supported Human Onboarding of the Dedicated Profile**,
+as an operational contract. Public schemas: unchanged. Source: unchanged.
+
+## 25. Acceptance matrix
+
+| | Scenario | Result | Basis |
+|---|---|---|---|
+| **A** | fresh dedicated profile + managed **cold** login | **BLOCKED BY PROVIDER BOT MITIGATION** — two runs, 301 s and 300 s, `accepted:false`, nothing installed, nothing persisted | live runs 1 and 2 (§16b). Preserved as failures |
+| **B** | fresh/dedicated profile + **human onboarding**, no CDP | **HUMAN LOGIN PASS** — challenge cleared and login completed by the operator in the same dedicated profile | live A/B, arm A (§16b) |
+| **C** | human-onboarded dedicated profile → managed BT2/BT4 | **E1 session continuity** — the profile carried the session across the handoff; *inferred* from the mint, never from reading cookies or storage | run 3 (§16b) |
+| **D** | managed BT4 observes a real mint in that profile | **E2 PASS** — `LOGIN_REQUIRED` → `PROFILE_READY` in 3 s via response-stage observation → `establishFromObservedMaterial` → BT3 CAS; store stayed empty | run 3 (§16b) |
+| **E** | page looks authenticated, no material observed | **NOT READY** — readiness derives only from authority availability | `test/auth-orchestrator.test.ts`: "T: a running, connected browser with no auth is still LOGIN_REQUIRED"; "a timeout returns LOGIN_REQUIRED with no retry loop" |
+| **F** | session expired or invalidated | **`LOGIN_REQUIRED` / `REAUTH_REQUIRED`**, never inferred from UI or cookie — `REAUTH_REQUIRED` only on an explicit `invalid_grant` signal | orchestrator REAUTH family; producer expiry rule (§5, Part I) |
+| **G** | logout | authority invalidated per BT4-R1; a persistent profile does **not** re-authenticate the authority — only an explicit login observing a **new** mint can | BT4-R1 family, incl. "an observation from a login cancelled by a COMPLETED logout installs nothing" and "a logout whose cleanup FAILED still blocks reinstallation" |
+
+Row A is not amended by rows B–D. The cold managed-window path remains
+implemented and remains the default; it is no longer an acceptance requirement.
+
+## 26. Verification for this part
+
+Documentation only, so the contractual checks are the verification:
+
+| Check | Result |
+|---|---|
+| Source / test / fixture / package files changed | **none** — `git diff --stat 59f5650..HEAD` touches only Markdown |
+| Public schemas | unchanged; `test/fixtures/baseline-tools.json` untouched |
+| `src/transport/auth-context.ts` | untouched |
+| BT4-R1 FIX1 | intact, unmodified |
+| `PRODUCTION_OPERATIONS` | still `Object.freeze([])` |
+| Live E2 | **not repeated** — documentation does not require re-proving a runtime result |
+| Browser opened for this part | none |
+
+## 27. Status after Part IV
+
+BT4-R1: closed (external review PASS). BT4-N2, BT4-N3, BT4-N4: open,
+non-blocking. BT4-N6: **new**, open — `README.md` still documents the retired
+credential contract and is outside the frozen file map, so it was not edited;
+correcting it is submitted as a separate decision. BT4-N5: **design resolution
+candidate**, submitted for external review.
+
+BT4 is not declared closed.
