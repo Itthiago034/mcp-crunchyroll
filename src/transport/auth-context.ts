@@ -178,6 +178,42 @@ export type AuthInvalidationCause =
   | "AUTH_MATERIAL_LOST"
   | "PROCESS_SHUTDOWN";
 
+// ── Runtime closure of the two enums (external review BT3-R1) ───────────────
+//
+// A TypeScript union does not exist at runtime. An internal JavaScript caller —
+// or a compiled consumer that lost its types — can pass anything, and an
+// unknown mode must never fall through implicitly as ESTABLISH.
+
+const AUTH_COMMIT_MODES: readonly string[] = Object.freeze(["ESTABLISH", "REFRESH"]);
+
+const AUTH_INVALIDATION_CAUSES: readonly string[] = Object.freeze([
+  "LOGOUT",
+  "INVALID_GRANT",
+  "AUTH_MATERIAL_LOST",
+  "PROCESS_SHUTDOWN",
+]);
+
+function isAuthCommitMode(value: unknown): value is AuthCommitMode {
+  return typeof value === "string" && AUTH_COMMIT_MODES.includes(value);
+}
+
+function isAuthInvalidationCause(value: unknown): value is AuthInvalidationCause {
+  return typeof value === "string" && AUTH_INVALIDATION_CAUSES.includes(value);
+}
+
+/**
+ * The five authorized fields, read out of the producer's object exactly once
+ * each. Their types are `unknown` on purpose: a getter may answer with anything
+ * at all, and only the validated result of THIS object is ever used afterwards.
+ */
+interface RawMaterialSnapshot {
+  readonly accessToken: unknown;
+  readonly tokenType: unknown;
+  readonly expiresAt: unknown;
+  readonly accountId: unknown;
+  readonly profileId: unknown;
+}
+
 /**
  * Test-only view. Safe revision/identity metadata as permitted by design §9.2:
  * it deliberately has NO accessToken field, so no test can come to depend on
@@ -389,34 +425,69 @@ export class AuthContextAuthority {
     mode: AuthCommitMode,
     candidate: Readonly<AuthMaterialCandidate>
   ): AuthContext {
-    // EXHAUSTED is terminal: an authority that ran out of generations can never
-    // be reopened, only restarted into a different epoch (design §16.3). This
-    // is checked BEFORE the CAS, so an expected revision that numerically
-    // equals the published maximum still gets UNAVAILABLE rather than a
-    // misleading staleness verdict.
-    if (this.state.kind === "UNAVAILABLE" && this.state.reason === "EXHAUSTED") {
+    // ── A. EXHAUSTED is terminal ──────────────────────────────────────────
+    // An authority that ran out of generations can never be reopened, only
+    // restarted into a different epoch (design §16.3). Checked BEFORE the CAS,
+    // so an expected revision that numerically equals the published maximum
+    // still gets UNAVAILABLE rather than a misleading staleness verdict.
+    this.assertNotExhausted();
+
+    // The expected revision is a producer-supplied object too, so its two
+    // fields are read exactly once here. A getter cannot answer differently
+    // across the two compare-and-swap checks below.
+    const expectedRevision = freezeRevision(
+      (expected as { epoch: string }).epoch,
+      (expected as { generation: number }).generation
+    );
+
+    // ── B. the compare-and-swap gate ──────────────────────────────────────
+    // A mismatch performs NO state mutation, no generation increment and no
+    // controller abort (FIX1 §8), and is checked before the candidate is
+    // touched at all, so a doomed candidate is never even read.
+    this.assertCurrentRevisionIs(expectedRevision);
+
+    // ── C. runtime mode allowlist (BT3-R1) ────────────────────────────────
+    // Before any candidate access: an unknown mode must not reach the producer
+    // object, and must never fall through implicitly as ESTABLISH.
+    if (!isAuthCommitMode(mode)) {
       throw new AuthContextError("AUTH_CONTEXT_UNAVAILABLE");
     }
 
-    // The compare-and-swap gate. A mismatch performs NO state mutation, no
-    // generation increment and no controller abort (FIX1 §8) — it is checked
-    // before candidate validation so a doomed candidate is never even examined.
-    if (!revisionsEqual(expected, this.currentRevision())) {
-      throw new AuthContextError("AUTH_CONTEXT_STALE");
-    }
+    // ── D. snapshot: each authorized field read AT MOST ONCE ──────────────
+    // Every read is a call into producer-controlled code — a getter or a Proxy
+    // trap — which may synchronously reenter this authority. Reading a field
+    // twice would let it answer validation with one value and construction with
+    // another. No spread, no Object.assign, no enumeration: exactly these five
+    // closed fields, so an unknown property cannot ride in either.
+    const snapshot: RawMaterialSnapshot = Object.freeze({
+      accessToken: candidate.accessToken,
+      tokenType: candidate.tokenType,
+      expiresAt: candidate.expiresAt,
+      accountId: candidate.accountId,
+      profileId: candidate.profileId,
+    });
 
+    // ── E. validate ONLY the snapshot ─────────────────────────────────────
     // A trusted producer is not treated as infallible: every string and the
-    // expiration are validated again here (design §27). A rejected candidate is
-    // NOT a transition — no publication, no increment, no abort (design §10).
-    this.validateCandidate(candidate);
+    // expiration are validated again (design §27). A rejected candidate is NOT
+    // a transition — no publication, no increment, no abort (design §10).
+    const material = this.validateSnapshot(snapshot);
 
+    // ── F. the final compare-and-swap, after all untrusted reads ──────────
+    // Reading the candidate may have logged the user out, committed a newer
+    // generation or exhausted the authority. This is the last boundary: from
+    // here to publication, no producer-controlled code runs at all.
+    this.assertNotExhausted();
+    this.assertCurrentRevisionIs(expectedRevision);
+
+    // ── G. commit decision and publication, from local values only ────────
     if (mode === "REFRESH") {
       if (this.state.kind !== "READY") {
         // Nothing to continue: a refresh cannot bootstrap an identity.
         throw new AuthContextError("AUTH_CONTEXT_UNAVAILABLE");
       }
       const current = this.state.record;
-      if (current.accountId !== candidate.accountId || current.profileId !== candidate.profileId) {
+      if (current.accountId !== material.accountId || current.profileId !== material.profileId) {
         // Fail closed (design §15, §21.4): the candidate is never installed as
         // continuity. The old context is invalidated at the next generation
         // FIRST, and only then is the anomaly reported to the producer.
@@ -444,11 +515,11 @@ export class AuthContextAuthority {
     const context = this.issueContext();
     const record: ActiveAuthRecord = Object.freeze({
       revision,
-      accountId: candidate.accountId,
-      profileId: candidate.profileId,
-      accessToken: candidate.accessToken,
-      tokenType: candidate.tokenType,
-      expiresAt: candidate.expiresAt,
+      accountId: material.accountId,
+      profileId: material.profileId,
+      accessToken: material.accessToken,
+      tokenType: material.tokenType,
+      expiresAt: material.expiresAt,
       abortController: new AbortController(),
       context,
     });
@@ -472,9 +543,12 @@ export class AuthContextAuthority {
    * is an ordering barrier for concurrent mutation attempts (design §10).
    */
   invalidate(cause: AuthInvalidationCause): AuthRevisionView {
-    if (this.state.kind === "UNAVAILABLE" && this.state.reason === "EXHAUSTED") {
+    // Runtime allowlist first (BT3-R1): an unrecognised cause must not widen
+    // the diagnostic enum, and must not invalidate anything on its way out.
+    if (!isAuthInvalidationCause(cause)) {
       throw new AuthContextError("AUTH_CONTEXT_UNAVAILABLE");
     }
+    this.assertNotExhausted();
     this.lastCause = cause;
     const { exhausted, revision } = this.publishUnavailable("INVALIDATED");
     if (exhausted) {
@@ -687,22 +761,57 @@ export class AuthContextAuthority {
     return record.expiresAt > this.now();
   }
 
-  /** Closed validation. Rejection carries the fixed unavailable message only. */
-  private validateCandidate(candidate: Readonly<AuthMaterialCandidate>): void {
-    const usable =
-      candidate !== null &&
-      typeof candidate === "object" &&
-      isUsableString(candidate.accessToken) &&
-      isUsableString(candidate.tokenType) &&
-      isUsableString(candidate.accountId) &&
-      (candidate.profileId === undefined || isUsableString(candidate.profileId)) &&
-      typeof candidate.expiresAt === "number" &&
-      Number.isFinite(candidate.expiresAt) &&
-      candidate.expiresAt > this.now();
-
-    if (!usable) {
+  /** EXHAUSTED is terminal in every direction (design §16.3). */
+  private assertNotExhausted(): void {
+    if (this.state.kind === "UNAVAILABLE" && this.state.reason === "EXHAUSTED") {
       throw new AuthContextError("AUTH_CONTEXT_UNAVAILABLE");
     }
+  }
+
+  /** The single compare-and-swap rule, applied identically at B and at F. */
+  private assertCurrentRevisionIs(expected: AuthRevisionView): void {
+    if (!revisionsEqual(expected, this.currentRevision())) {
+      throw new AuthContextError("AUTH_CONTEXT_STALE");
+    }
+  }
+
+  /**
+   * Closed validation of the local snapshot — never of the producer's object,
+   * which is not read again after the snapshot is taken. Rejection carries the
+   * fixed unavailable message only.
+   *
+   * Guards are sequential rather than one boolean chain so that each field is
+   * narrowed exactly once, and so the returned material is a frozen object of
+   * validated primitives rather than a re-reference to anything producer-owned.
+   */
+  private validateSnapshot(snapshot: RawMaterialSnapshot): Readonly<AuthMaterialCandidate> {
+    const { accessToken, tokenType, expiresAt, accountId, profileId } = snapshot;
+
+    if (!isUsableString(accessToken)) throw new AuthContextError("AUTH_CONTEXT_UNAVAILABLE");
+    if (!isUsableString(tokenType)) throw new AuthContextError("AUTH_CONTEXT_UNAVAILABLE");
+    if (!isUsableString(accountId)) throw new AuthContextError("AUTH_CONTEXT_UNAVAILABLE");
+
+    let profile: string | undefined;
+    if (profileId !== undefined) {
+      if (!isUsableString(profileId)) throw new AuthContextError("AUTH_CONTEXT_UNAVAILABLE");
+      profile = profileId;
+    }
+
+    if (
+      typeof expiresAt !== "number" ||
+      !Number.isFinite(expiresAt) ||
+      expiresAt <= this.now()
+    ) {
+      throw new AuthContextError("AUTH_CONTEXT_UNAVAILABLE");
+    }
+
+    return Object.freeze({
+      accessToken,
+      tokenType,
+      expiresAt,
+      accountId,
+      profileId: profile,
+    });
   }
 
   /**

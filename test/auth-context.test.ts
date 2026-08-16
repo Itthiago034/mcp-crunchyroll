@@ -1612,6 +1612,334 @@ describe("BT3 closure — no failure path leaks material or identity", () => {
   });
 });
 
+// ── External review FIX1 — BT3-R1 ───────────────────────────────────────────
+//
+// AuthMaterialCandidate is an ordinary JavaScript object at runtime. Its
+// properties may be getters or Proxy traps, so every read is a call into
+// producer-controlled code that can synchronously reenter the authority. The
+// authority must therefore read each authorized field AT MOST ONCE, validate
+// only that snapshot, and re-check the revision afterwards — the snapshot reads
+// are the last untrusted boundary before publication.
+
+const AUTHORIZED_CANDIDATE_FIELDS = [
+  "accessToken",
+  "tokenType",
+  "expiresAt",
+  "accountId",
+  "profileId",
+] as const;
+
+type CandidateField = (typeof AUTHORIZED_CANDIDATE_FIELDS)[number];
+type ReadCounts = Record<CandidateField, number>;
+
+const NO_READS: ReadCounts = {
+  accessToken: 0,
+  tokenType: 0,
+  expiresAt: 0,
+  accountId: 0,
+  profileId: 0,
+};
+
+const ONE_READ_EACH: ReadCounts = {
+  accessToken: 1,
+  tokenType: 1,
+  expiresAt: 1,
+  accountId: 1,
+  profileId: 1,
+};
+
+/**
+ * A candidate whose authorized fields are getters with deterministic counters,
+ * and optional hooks that reenter the authority or change their answer between
+ * reads. No timing, no sleeps — the barrier is the property read itself.
+ */
+function probeCandidate(
+  values: Partial<Record<CandidateField, unknown>> = {},
+  hooks: Partial<Record<CandidateField, (readCount: number) => unknown>> = {}
+): { candidate: never; reads: ReadCounts } {
+  const answers: Record<CandidateField, unknown> = {
+    accessToken: TOKEN_SENTINEL,
+    tokenType: "Bearer",
+    expiresAt: T0 + ONE_HOUR,
+    accountId: SENSITIVE_ACCOUNT_SENTINEL,
+    profileId: undefined,
+    ...values,
+  };
+  const reads: ReadCounts = { ...NO_READS };
+  const candidate: Record<string, unknown> = {};
+  for (const field of AUTHORIZED_CANDIDATE_FIELDS) {
+    Object.defineProperty(candidate, field, {
+      enumerable: true,
+      configurable: true,
+      get(): unknown {
+        reads[field] += 1;
+        const hook = hooks[field];
+        return hook ? hook(reads[field]) : answers[field];
+      },
+    });
+  }
+  return { candidate: candidate as never, reads };
+}
+
+describe("BT3-R1 — a reentrant candidate cannot publish over a newer transition", () => {
+  test("R1-A: a getter that invalidates mid-commit cannot republish READY", () => {
+    const a = authority();
+    establish(a);
+    const expected = a.currentRevision();
+
+    const probe = probeCandidate(
+      { accessToken: TOKEN_SENTINEL_B },
+      {
+        // The producer object logs the user out while the authority is reading it.
+        accessToken: () => {
+          a.invalidate("LOGOUT");
+          return TOKEN_SENTINEL_B;
+        },
+      }
+    );
+
+    assert.throws(() => a.commitAuthenticatedMaterial(expected, "ESTABLISH", probe.candidate), isStale);
+
+    assert.equal(a.diagnostics().availability, "UNAVAILABLE", "the logout must stand");
+    assert.equal(a.diagnostics().reason, "INVALIDATED");
+    assert.equal(a.diagnostics().cause, "LOGOUT");
+    assert.equal(a.currentRevision().generation, 2, "the stale commit adds no generation");
+    assert.throws(() => a.acquire(), AuthContextError);
+  });
+
+  test("R1-A: the same holds for a refresh-mode commit", () => {
+    const a = authority();
+    establish(a);
+    const expected = a.currentRevision();
+
+    const probe = probeCandidate(
+      {},
+      {
+        accountId: () => {
+          a.invalidate("INVALID_GRANT");
+          return SENSITIVE_ACCOUNT_SENTINEL;
+        },
+      }
+    );
+
+    assert.throws(() => a.commitAuthenticatedMaterial(expected, "REFRESH", probe.candidate), isStale);
+    assert.equal(a.diagnostics().availability, "UNAVAILABLE");
+    assert.equal(a.currentRevision().generation, 2);
+  });
+
+  test("R1-D: a getter that commits a newer generation cannot be overwritten", async () => {
+    const a = authority();
+    establish(a);
+    const expected = a.currentRevision();
+
+    const probe = probeCandidate(
+      { accessToken: TOKEN_SENTINEL_B },
+      {
+        accessToken: () => {
+          // A concurrent, legitimate refresh lands first.
+          a.commitAuthenticatedMaterial(a.currentRevision(), "REFRESH", candidate({
+            accessToken: "SYNTHETIC-ACCESS-TOKEN-SENTINEL-NEWER",
+          }));
+          return TOKEN_SENTINEL_B;
+        },
+      }
+    );
+
+    assert.throws(() => a.commitAuthenticatedMaterial(expected, "REFRESH", probe.candidate), isStale);
+
+    assert.equal(a.currentRevision().generation, 2, "the newer commit survives, alone");
+    const observed = await runGuarded(a, a.acquire(), async (view) => view.accessToken);
+    assert.equal(observed, "SYNTHETIC-ACCESS-TOKEN-SENTINEL-NEWER");
+  });
+
+  test("R1-B: every authorized field is read exactly once per ESTABLISH commit", () => {
+    const a = authority();
+    const probe = probeCandidate({ profileId: SENSITIVE_PROFILE_SENTINEL });
+    a.commitAuthenticatedMaterial(a.currentRevision(), "ESTABLISH", probe.candidate);
+    assert.deepEqual(probe.reads, ONE_READ_EACH);
+  });
+
+  test("R1-B: every authorized field is read exactly once per REFRESH commit", () => {
+    const a = authority();
+    establish(a, { profileId: SENSITIVE_PROFILE_SENTINEL });
+    const probe = probeCandidate({
+      accessToken: TOKEN_SENTINEL_B,
+      profileId: SENSITIVE_PROFILE_SENTINEL,
+    });
+    a.commitAuthenticatedMaterial(a.currentRevision(), "REFRESH", probe.candidate);
+    assert.deepEqual(probe.reads, ONE_READ_EACH);
+  });
+
+  test("R1-B: a rejected candidate is also read at most once per field", () => {
+    const a = authority();
+    const probe = probeCandidate({ accessToken: "" });
+    assert.throws(
+      () => a.commitAuthenticatedMaterial(a.currentRevision(), "ESTABLISH", probe.candidate),
+      (e: unknown) => e instanceof AuthContextError && e.kind === "AUTH_CONTEXT_UNAVAILABLE"
+    );
+    for (const field of AUTHORIZED_CANDIDATE_FIELDS) {
+      assert.ok(probe.reads[field] <= 1, `${field} was read ${probe.reads[field]} times`);
+    }
+  });
+
+  test("R1-C: a changing getter cannot smuggle an unvalidated second value", async () => {
+    const a = authority();
+    const probe = probeCandidate(
+      {},
+      {
+        accessToken: (readCount) => (readCount === 1 ? TOKEN_SENTINEL : "POISONED-SECOND-READ"),
+        accountId: (readCount) =>
+          readCount === 1 ? SENSITIVE_ACCOUNT_SENTINEL : SENSITIVE_ACCOUNT_SENTINEL_B,
+        tokenType: (readCount) => (readCount === 1 ? "Bearer" : "POISONED"),
+      }
+    );
+
+    const context = a.commitAuthenticatedMaterial(a.currentRevision(), "ESTABLISH", probe.candidate);
+
+    // The installed record must correspond exactly to the single validated read.
+    assert.equal(a.inspectForTest().accountId, SENSITIVE_ACCOUNT_SENTINEL);
+    assert.equal(a.inspectForTest().tokenType, "Bearer");
+    const observed = await runGuarded(a, context, async (view) => view.accessToken);
+    assert.equal(observed, TOKEN_SENTINEL);
+  });
+
+  test("R1-proxy: the single-read property survives a Proxy get trap", () => {
+    const seen: string[] = [];
+    const target = {
+      accessToken: TOKEN_SENTINEL,
+      tokenType: "Bearer",
+      expiresAt: T0 + ONE_HOUR,
+      accountId: SENSITIVE_ACCOUNT_SENTINEL,
+      profileId: SENSITIVE_PROFILE_SENTINEL,
+      // Fields the authority must never touch, let alone copy.
+      refreshToken: "SYNTHETIC-REFRESH-TOKEN-MUST-NOT-BE-READ",
+      cookie: "session=MUST-NOT-BE-READ",
+      password: "MUST-NOT-BE-READ",
+    };
+    const proxied = new Proxy(target, {
+      get(object, property, receiver): unknown {
+        if (typeof property === "string") seen.push(property);
+        return Reflect.get(object, property, receiver);
+      },
+    });
+
+    const a = authority();
+    a.commitAuthenticatedMaterial(a.currentRevision(), "ESTABLISH", proxied as never);
+
+    assert.equal(seen.length, 5, `expected five reads, saw: ${seen.join(", ")}`);
+    assert.deepEqual([...seen].sort(), [...AUTHORIZED_CANDIDATE_FIELDS].sort());
+    for (const forbidden of ["refreshToken", "cookie", "password"]) {
+      assert.equal(seen.includes(forbidden), false, `${forbidden} must never be read`);
+    }
+    // And nothing unauthorized reached the private record.
+    assert.equal(JSON.stringify(a.inspectForTest()).includes("MUST-NOT-BE-READ"), false);
+  });
+});
+
+describe("BT3-R1 — the closed enums are enforced at runtime, not only in types", () => {
+  const invalidModes: Array<[string, unknown]> = [
+    ["an unknown mode", "UNKNOWN_MODE"],
+    ["a lowercase mode", "establish"],
+    ["an empty mode", ""],
+    ["undefined", undefined],
+    ["null", null],
+    ["a number", 1],
+    ["an object", { mode: "ESTABLISH" }],
+  ];
+
+  for (const [name, mode] of invalidModes) {
+    test(`R1-E: ${name} is rejected without touching the candidate`, () => {
+      const a = authority();
+      establish(a);
+      const signal = signalOf(a);
+      const probe = probeCandidate({ accessToken: TOKEN_SENTINEL_B });
+
+      assert.throws(
+        () => a.commitAuthenticatedMaterial(a.currentRevision(), mode as never, probe.candidate),
+        (e: unknown) => e instanceof AuthContextError && e.kind === "AUTH_CONTEXT_UNAVAILABLE"
+      );
+
+      assert.deepEqual(probe.reads, NO_READS, "mode must be validated before any candidate read");
+      assert.equal(a.currentRevision().generation, 1, "no generation change");
+      assert.equal(a.diagnostics().availability, "READY", "state unchanged");
+      assert.equal(signal.aborted, false, "no abort");
+    });
+  }
+
+  const invalidCauses: Array<[string, unknown]> = [
+    ["an unknown cause", "UNKNOWN_CAUSE"],
+    ["a lowercase cause", "logout"],
+    ["an empty cause", ""],
+    ["undefined", undefined],
+    ["null", null],
+    ["a number", 42],
+  ];
+
+  for (const [name, cause] of invalidCauses) {
+    test(`R1-F: ${name} is rejected and invalidates nothing`, () => {
+      const a = authority();
+      establish(a);
+      const signal = signalOf(a);
+
+      assert.throws(
+        () => a.invalidate(cause as never),
+        (e: unknown) => e instanceof AuthContextError && e.kind === "AUTH_CONTEXT_UNAVAILABLE"
+      );
+
+      assert.equal(a.currentRevision().generation, 1, "no generation change");
+      assert.equal(a.diagnostics().availability, "READY", "availability unchanged");
+      assert.equal(a.diagnostics().cause, undefined, "lastCause must not be widened");
+      assert.equal(signal.aborted, false, "the current controller must not be aborted");
+    });
+  }
+
+  test("R1-E/F: the closed enums still accept every legitimate value", () => {
+    for (const mode of ["ESTABLISH", "REFRESH"] as const) {
+      const a = authority();
+      establish(a);
+      a.commitAuthenticatedMaterial(a.currentRevision(), mode, candidate({ accessToken: TOKEN_SENTINEL_B }) );
+      assert.equal(a.currentRevision().generation, 2);
+    }
+    for (const cause of ["LOGOUT", "INVALID_GRANT", "AUTH_MATERIAL_LOST", "PROCESS_SHUTDOWN"] as const) {
+      const a = authority();
+      establish(a);
+      assert.equal(a.invalidate(cause).generation, 2);
+      assert.equal(a.diagnostics().cause, cause);
+    }
+  });
+
+  test("R1-E/F: a rejection carries no identity, token or epoch", () => {
+    const a = authority();
+    establish(a, { profileId: SENSITIVE_PROFILE_SENTINEL });
+    const collected: string[] = [];
+    for (const attempt of [
+      () => a.commitAuthenticatedMaterial(a.currentRevision(), "NOPE" as never, candidate() as never),
+      () => a.invalidate("NOPE" as never),
+    ]) {
+      try {
+        attempt();
+        assert.fail("expected a fail-closed rejection");
+      } catch (error) {
+        const e = error as Error;
+        collected.push(`${e.name} ${e.message} ${JSON.stringify(e)} ${e.stack ?? ""}`);
+      }
+    }
+    const everything = collected.join("\n");
+    for (const sentinel of [
+      SENSITIVE_ACCOUNT_SENTINEL,
+      SENSITIVE_PROFILE_SENTINEL,
+      TOKEN_SENTINEL,
+      EPOCH_A,
+    ]) {
+      assert.equal(everything.includes(sentinel), false, `leaked ${sentinel}`);
+    }
+    assert.equal(collected.length, 2);
+    for (const message of collected) {
+      assert.match(message, /Authentication context is unavailable/);
+    }
+  });
+});
+
 describe("BT3 opacity — a caller cannot construct an AuthContext", () => {
   test("the module exports no context constructor, brand or issuance helper", () => {
     const exported = Object.keys(authContextModule);

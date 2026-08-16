@@ -177,3 +177,97 @@ fix`. The nine carried-forward npm advisories remain a separate gate.
 
 BT3 implementation candidate complete and ready for external review. Approval of
 this report authorizes nothing beyond it: BT4 and BT5 remain closed.
+
+---
+
+## External Review FIX1 — BT3-R1
+
+One surgical fix commit on top of the Task 5 candidate `a66672d`. The Task 1–5
+history above is unchanged and remains the record of how the module was built.
+
+### The finding
+
+`AuthMaterialCandidate` is an ordinary JavaScript object at runtime, so its
+properties may be getters or Proxy traps — every read is a call into
+producer-controlled code that can synchronously reenter the authority. The
+committed implementation read each field two to four times (validation, refresh
+continuity, record construction) with no revision re-check afterwards.
+`AuthCommitMode` and `AuthInvalidationCause` were TypeScript unions only, with
+no runtime enforcement.
+
+### Reproduced before the fix
+
+A candidate whose `accessToken` getter calls `invalidate("LOGOUT")` and then
+returns a syntactically valid token, committed with the revision captured
+before the call:
+
+| Observation | Pre-fix | Post-fix |
+|---|---|---|
+| commit outcome | **committed, no rejection** | `Authentication context is stale` |
+| authority afterwards | **READY at generation 3** — the logout was overwritten | UNAVAILABLE at generation 2 — the logout stands |
+| reads per field | `accessToken` 2, `tokenType` 2, `expiresAt` 4, `accountId` 2, `profileId` 2 | 1, 1, 1, 1, 1 |
+| `commitAuthenticatedMaterial(rev, "UNKNOWN_MODE", …)` | **accepted**, fell through as ESTABLISH, generation 1 | rejected `AUTH_CONTEXT_UNAVAILABLE`, no mutation |
+| `invalidate("UNKNOWN_CAUSE")` | **accepted**, widened `lastCause`, generation 2 | rejected `AUTH_CONTEXT_UNAVAILABLE`, no mutation |
+
+21 of the 23 new assertions were RED before the correction.
+
+### The correction
+
+`commitAuthenticatedMaterial` now runs a fixed seven-step order:
+
+- **A** terminal EXHAUSTED check;
+- **B** compare-and-swap against the expected revision — whose own two fields
+  are also read exactly once, since it is producer-supplied too;
+- **C** runtime `AuthCommitMode` allowlist, before the candidate is touched at
+  all;
+- **D** snapshot: the five authorized fields read **at most once each**, by
+  explicit property access — no spread, no `Object.assign`, no enumeration, no
+  serialization, and no unknown field copied;
+- **E** validation of the local snapshot only, returning frozen validated
+  primitives;
+- **F** a second EXHAUSTED check and a second compare-and-swap against the same
+  captured expected revision;
+- **G** refresh continuity and publication, from local values only.
+
+Step F is the last untrusted-object boundary: between it and the state
+assignment nothing reads the producer's object and no producer-controlled code
+is invoked. A stale commit therefore installs nothing, increments nothing,
+aborts nothing and overwrites nothing.
+
+`invalidate` validates its cause against a runtime allowlist first, so an
+unrecognised cause cannot widen `lastCause`, mutate state, increment the
+generation or abort the current controller. Neither rejection introduces a
+fourth error kind — both use the existing `AUTH_CONTEXT_UNAVAILABLE`.
+
+### New tests
+
+23 added, all deterministic and barrier-based (no timing, no sleeps): R1-A
+reentrant invalidation in both ESTABLISH and REFRESH mode; R1-B read-once
+accounting for successful ESTABLISH, successful REFRESH and rejected candidates;
+R1-C a getter that changes its answer between reads; R1-D a getter that commits
+a newer generation; R1-E seven invalid runtime modes; R1-F six invalid runtime
+causes; a legitimate-value regression for both enums; a secret-free rejection
+sweep; and an adversarial Proxy test proving the fix does not depend on ordinary
+property descriptors — exactly five `get` traps fire, and `refreshToken`,
+`cookie` and `password` on the same object are never read.
+
+### Results
+
+| Check | Result |
+|---|---|
+| Focused BT3 suite | 161 tests, 161 pass, 0 fail, 0 skip, exit 0 |
+| Full suite | 549 tests, 549 pass, 0 fail, 0 skip, exit 0 |
+| Typecheck / build | exit 0 / exit 0 |
+| Network-isolated full suite | 549 pass, 0 fail, egress blocked (`ENOTFOUND`, `ENETUNREACH`) |
+| Public MCP | 21 tools, source and bundle schemas unchanged |
+| `PRODUCTION_OPERATIONS` | empty and frozen |
+| Public reachability of `auth-context.ts` | none; bundle carries no marker |
+| Dependencies / lockfile | unchanged |
+| Changed paths | `src/transport/auth-context.ts`, `test/auth-context.test.ts`, this report |
+
+Everything preserved from the accepted candidate: issuance-only
+`WeakSet<AuthContext>`, no handle-to-record mapping, publish-before-abort,
+reentrant listeners observing the new state, CAS mismatch mutating nothing,
+terminal EXHAUSTED, pre-check usability with currentness-only post-check, no
+replay, identity-change invalidation, and bind-time redaction of sensitive
+identity. `src/redact.ts` was not touched.
