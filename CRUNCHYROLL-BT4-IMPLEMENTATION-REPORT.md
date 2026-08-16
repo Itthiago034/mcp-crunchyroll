@@ -307,7 +307,7 @@ account fetch BT4 does not own).
 | Check | Result |
 |---|---|
 | Full suite | **727 tests, 727 pass, 0 fail, 0 skipped** |
-| Network-isolated suite (`bwrap --unshare-net`, `BT2_NET_ISOLATED=1`) | **727/727**, identical; DNS `ENOTFOUND`, TCP `ENETUNREACH` verified from inside the namespace |
+| Network-isolated suite (`bwrap --unshare-net`, `BT2_NET_ISOLATED=1`) | **727/727**, identical; every outbound connection fails `ENETUNREACH` from inside the namespace (see the correction below) |
 | Typecheck / build | exit 0 / exit 0 |
 | BT3 suite (`auth-context`) | 168/168 |
 | BT2 suites (session manager, cdp, profile, integration) | unchanged and green |
@@ -318,6 +318,20 @@ account fetch BT4 does not own).
 | BT3 reader (`asReader`/`bind`/`runCurrent`) | unused in production |
 | Dependencies / engine floor | unchanged |
 | Live Crunchyroll access, real credentials | none |
+
+**Correction to an earlier isolation claim.** Part I §7 and the BT3 report both
+state that the isolated run shows "DNS `ENOTFOUND`". Probed explicitly this
+time, that is not what the sandbox does: `--unshare-net` removes the network,
+but name resolution still answers through the resolver socket the bind mount
+keeps, so `www.crunchyroll.com` and `example.com` both resolve inside the
+namespace. The `ENOTFOUND` seen earlier came from `auth.crunchyroll.com`, which
+is NXDOMAIN globally — a property of that host, not of the sandbox.
+
+The isolation guarantee is unaffected and is the one that matters: every
+outbound connection attempt inside the namespace fails with `ENETUNREACH`,
+including a real `fetch("https://www.crunchyroll.com/")`. A suite that passes
+identically under that condition performs no live Crunchyroll access. The
+evidence log records the probe verbatim.
 
 The BT3 report's one open item — the frozen harness test driving
 `crunchyroll_login` with `audit-test@example.invalid`, which reached
@@ -375,6 +389,14 @@ or `src/redact.ts` change, no push, no merge, no `main` change.
   no navigation, so a subsequent attempt reuses that page instead of returning
   it to the login surface. Harmless — the human can navigate — but it is a real
   edge of the "open the fixed login surface" promise.
+- **BT4-N4** (pre-existing, observed): the B6 error boundary re-derives an
+  `McpError` as `new McpError(err.code, redactSecrets(err.message))`, and the
+  SDK constructor prepends `MCP error <code>: ` again, so every `McpError`
+  message reaches the client double-prefixed. The new login refusal inherits
+  this; `MethodNotFound` has always had it. Cosmetic only — the code, the class
+  and the redaction are correct — and deliberately not repaired here, because
+  the fix touches a security-hardened boundary for a presentation defect at the
+  end of the macrophase.
 - **Interactive smoke: PENDING.** The automated suite is complete, offline and
   network-isolated. The interactive login smoke requires a human to type
   credentials into the browser (errata §15) and has not been run. Formal
