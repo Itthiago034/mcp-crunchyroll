@@ -86,9 +86,9 @@ const server = new Server(
 // writer port crosses into the producer, so no other module can install
 // material, invalidate, mint a context or reach the reader side.
 //
-// The BT3 reader stays unused: `asReader()`, `bind()` and `runCurrent()` are
-// not called here. BT5 routes content through the dispatcher instead, with the
-// bearer taken from a snapshot of this same authority.
+// BT5 derives the BT3 reader HERE, exactly once, and hands the port to the
+// transport backend — the only module that calls `bind()`/`runCurrent()`. The
+// authority object itself still never leaves this section.
 
 const authAuthority = createAuthContextAuthority();
 const authProducer = createAuthProducer(createDefaultAuthProducerPorts(authAuthority.asWriter()));
