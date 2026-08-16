@@ -64,12 +64,19 @@ function harness(json: unknown) {
 // ── The table ───────────────────────────────────────────────────────────────
 
 describe("BT6 — the production table after the catalog migration", () => {
-  test("holds exactly GET_CATEGORIES plus the seven public catalog reads", () => {
-    assert.deepEqual([...PRODUCTION_OPERATIONS.map((d) => String(d.id))].sort(), EXPECTED_TABLE);
+  // RETIRED AT BT7: "exactly the catalog set" was the BT6 shape. BT7 adds the
+  // account reads, and test/bt7-account.test.ts owns the exact table from here.
+  // What this file keeps asserting is that BT6's own eight are all present and
+  // unchanged.
+  test("still contains every BT6 catalog read", () => {
+    const ids = PRODUCTION_OPERATIONS.map((d) => String(d.id));
+    for (const id of EXPECTED_TABLE) assert.ok(ids.includes(id), `${id} disappeared`);
   });
 
-  test("every migrated operation is a public, non-mutating, bearer-carrying read", () => {
-    for (const d of PRODUCTION_OPERATIONS) {
+  test("every BT6 catalog operation is still a public, non-mutating, bearer-carrying read", () => {
+    // Narrowed at BT7: account reads are legitimately ACCOUNT-scoped now, so
+    // this checks the catalog family rather than the whole table.
+    for (const d of PRODUCTION_OPERATIONS.filter((x) => EXPECTED_TABLE.includes(String(x.id)))) {
       assert.equal(d.method, "GET", `${d.id}`);
       assert.equal(d.scope, "PUBLIC", `${d.id}`);
       assert.equal(d.auth, "BEARER", `${d.id}`);
@@ -78,14 +85,10 @@ describe("BT6 — the production table after the catalog migration", () => {
     }
   });
 
-  test("no account-scoped or mutating operation slipped in", () => {
+  test("no mutation and no deferred operation slipped in", () => {
+    // RETIRED AT BT7 for the six account READS, which are now legitimately
+    // migrated. Mutations and the deferred subscription must still be absent.
     for (const forbidden of [
-      "GET_SIMILAR",
-      "GET_RECOMMENDATIONS",
-      "GET_WATCHLIST",
-      "GET_HISTORY",
-      "GET_PLAYHEADS",
-      "GET_CONTINUE_WATCHING",
       "GET_SUBSCRIPTION",
       "ADD_TO_WATCHLIST",
       "REMOVE_FROM_WATCHLIST",
@@ -142,11 +145,14 @@ describe("BT6 — transport knowledge moved, not copied", () => {
     }
   });
 
-  test("the account operations still own their paths in api.ts — BT6 moved nothing of theirs", () => {
+  test("BT6 moved nothing that was not its own", () => {
+    // RETIRED AT BT7: BT7 moved the account READS. What remains true is that
+    // BT6 did not touch the mutations or the deferred operation.
     const api = readFileSync(join(SRC, "api.ts"), "utf-8");
-    assert.match(api, /similar_to/);
-    assert.match(api, /recommendations/);
-    assert.match(api, /watchlist/);
+    assert.match(api, /export async function addToWatchlist\b/);
+    assert.match(api, /export async function removeFromWatchlist\b/);
+    assert.match(api, /export async function updatePlayhead\b/);
+    assert.match(api, /export async function getSubscription\b/);
   });
 
   test("the LIVE-COMPAT-01 normalizer exists exactly once", () => {
@@ -360,13 +366,9 @@ describe("BT6 — every migrated tool routes to the browser transport", () => {
 // ── The account boundary does not move ──────────────────────────────────────
 
 describe("BT6 — account reads and mutations stay refused", () => {
+  // RETIRED AT BT7 for the six account reads. The representatives are now the
+  // deferred operation and the BT8 mutations.
   for (const [tool, args] of [
-    ["crunchyroll_get_similar", { series_id: "S1" }],
-    ["crunchyroll_get_recommendations", {}],
-    ["crunchyroll_get_watchlist", {}],
-    ["crunchyroll_get_history", {}],
-    ["crunchyroll_continue_watching", {}],
-    ["crunchyroll_get_playheads", { content_ids: ["A"] }],
     ["crunchyroll_get_subscription", {}],
     ["crunchyroll_add_to_watchlist", { content_id: "A" }],
     ["crunchyroll_remove_from_watchlist", { content_id: "A" }],
@@ -382,11 +384,12 @@ describe("BT6 — account reads and mutations stay refused", () => {
     });
   }
 
-  test("GET_SIMILAR is absent because its path carries an account id", () => {
-    // Recorded as evidence for the classification, from the legacy source.
-    const api = readFileSync(join(SRC, "api.ts"), "utf-8");
-    const similar = api.slice(api.indexOf("export async function getSimilar"));
-    assert.match(similar.slice(0, 600), /account_id/, "the path interpolates account_id");
-    assert.match(similar.slice(0, 600), /similar_to/);
+  test("GET_SIMILAR was excluded from BT6 because its path carries an account id", () => {
+    // The classification that sent it to BT7. The evidence now lives in the
+    // descriptor: an ACCOUNT scope with accountId as an auth-derived path param.
+    const similar = PRODUCTION_OPERATIONS.find((d) => String(d.id) === "GET_SIMILAR")!;
+    assert.equal(similar.scope, "ACCOUNT");
+    assert.deepEqual(Object.keys(similar.authDerivedParams), ["accountId"]);
+    assert.match(similar.pathTemplate, /\{accountId\}\/similar_to\//);
   });
 });

@@ -7,7 +7,7 @@ import type {
   AuthDerivedParamSpec, CallerParams, OperationDescriptor, OperationId, ParamSpec, ResolvedCall,
 } from "./types.js";
 import {
-  contentId, optionalBoolean, optionalOneOf, requiredIntegerInRange, searchText, slugList,
+  contentId, contentIdList, optionalBoolean, optionalOneOf, requiredIntegerInRange, searchText, slugList,
 } from "./types.js";
 import { TransportError } from "./transport-error.js";
 
@@ -47,6 +47,7 @@ function captureDescriptor(d: OperationDescriptor): OperationDescriptor {
     // mutation of the object the caller passed in.
     fixedQuery: Object.freeze({ ...(d.fixedQuery ?? {}) }),
     queryParams: Object.freeze({ ...(d.queryParams ?? {}) }),
+    repeatedQueryParams: Object.freeze({ ...(d.repeatedQueryParams ?? {}) }),
     scope: d.scope,
     auth: d.auth,
     mutation: d.mutation,
@@ -155,10 +156,33 @@ export function createOperationRegistry(
       }
     }
     for (const key of Object.keys(d.fixedQuery ?? {})) {
-      if (key in d.queryParams) {
+      if (key in (d.queryParams ?? {})) {
         throw new TransportError(
           "INVALID_ARGUMENTS",
           `operation ${d.id} declares query key ${key} both fixed and caller-filled`
+        );
+      }
+    }
+    // BT7. A repeated key must name a declared caller param, and a wire key may
+    // be rendered exactly one way — an ambiguous key is how an array silently
+    // becomes a scalar, or a constant silently loses to caller input.
+    for (const [key, param] of Object.entries(d.repeatedQueryParams ?? {})) {
+      if (!(param in d.callerParams)) {
+        throw new TransportError(
+          "INVALID_ARGUMENTS",
+          `operation ${d.id} maps repeated query ${key} to undeclared parameter ${param}`
+        );
+      }
+      if (key in (d.queryParams ?? {})) {
+        throw new TransportError(
+          "INVALID_ARGUMENTS",
+          `operation ${d.id} declares query key ${key} both repeated and scalar`
+        );
+      }
+      if (key in (d.fixedQuery ?? {})) {
+        throw new TransportError(
+          "INVALID_ARGUMENTS",
+          `operation ${d.id} declares query key ${key} both repeated and fixed`
         );
       }
     }
@@ -213,6 +237,9 @@ export function resolveCall(
 /** The locale this build requests. A constant, never a caller argument. */
 export const CATALOG_LOCALE = "en-US";
 
+/** An unbounded id list is an unbounded URL; this is the ceiling. */
+export const MAX_CONTENT_IDS = 100;
+
 /**
  * Every BT5/BT6 operation is the same shape: a public catalog READ that still
  * carries a bearer, resolves no identity, mutates nothing, and asks for one
@@ -233,7 +260,40 @@ function publicRead(spec: {
     authDerivedParams: Object.freeze({}),
     fixedQuery: Object.freeze({ locale: CATALOG_LOCALE }),
     queryParams: Object.freeze({ ...(spec.queryParams ?? {}) }),
+    repeatedQueryParams: Object.freeze({}),
     scope: "PUBLIC",
+    auth: "BEARER",
+    mutation: false,
+  }) as OperationDescriptor;
+}
+
+/**
+ * BT7. An ACCOUNT read: the path addresses the authenticated account, so it
+ * declares `accountId` as auth-derived and the value is resolved by BT3's
+ * `bind()` — never by a caller, never by this table.
+ *
+ * `locale` is included by default because every one of these endpoints sent it,
+ * with ONE exception: `GET_PLAYHEADS` sent none, and `withLocale: false` keeps
+ * that faithful rather than tidy.
+ */
+function accountRead(spec: {
+  id: string;
+  pathTemplate: string;
+  callerParams?: Record<string, ParamSpec>;
+  queryParams?: Record<string, string>;
+  repeatedQueryParams?: Record<string, string>;
+  withLocale?: boolean;
+}): OperationDescriptor {
+  return Object.freeze({
+    id: spec.id as OperationId,
+    method: "GET",
+    pathTemplate: spec.pathTemplate,
+    callerParams: Object.freeze({ ...(spec.callerParams ?? {}) }),
+    authDerivedParams: Object.freeze({ accountId: Object.freeze({ source: "accountId" }) }),
+    fixedQuery: Object.freeze(spec.withLocale === false ? {} : { locale: CATALOG_LOCALE }),
+    queryParams: Object.freeze({ ...(spec.queryParams ?? {}) }),
+    repeatedQueryParams: Object.freeze({ ...(spec.repeatedQueryParams ?? {}) }),
+    scope: "ACCOUNT",
     auth: "BEARER",
     mutation: false,
   }) as OperationDescriptor;
@@ -321,5 +381,45 @@ export const PRODUCTION_OPERATIONS: readonly OperationDescriptor[] = Object.free
       is_subbed: "is_subbed",
       is_dubbed: "is_dubbed",
     },
+  }),
+
+  // ── BT7: account reads. Identity is a PATH parameter resolved by bind(). ──
+  accountRead({
+    id: "GET_SIMILAR",
+    pathTemplate: "/content/v2/discover/{accountId}/similar_to/{series_id}",
+    callerParams: { series_id: contentId, n: requiredIntegerInRange(1, 100) },
+    queryParams: { n: "n" },
+  }),
+  accountRead({
+    id: "GET_RECOMMENDATIONS",
+    pathTemplate: "/content/v2/discover/{accountId}/recommendations",
+    callerParams: { n: requiredIntegerInRange(1, 100) },
+    queryParams: { n: "n" },
+  }),
+  accountRead({
+    id: "GET_WATCHLIST",
+    pathTemplate: "/content/v2/{accountId}/watchlist",
+    callerParams: { n: requiredIntegerInRange(1, 100), order: optionalOneOf(["desc", "asc"]) },
+    queryParams: { n: "n", order: "order" },
+  }),
+  accountRead({
+    id: "GET_HISTORY",
+    pathTemplate: "/content/v2/{accountId}/watch-history",
+    callerParams: { n: requiredIntegerInRange(1, 100) },
+    queryParams: { n: "n" },
+  }),
+  accountRead({
+    id: "GET_CONTINUE_WATCHING",
+    pathTemplate: "/content/v2/{accountId}/continue_watching",
+    callerParams: { n: requiredIntegerInRange(1, 100) },
+    queryParams: { n: "n" },
+  }),
+  accountRead({
+    id: "GET_PLAYHEADS",
+    pathTemplate: "/content/v2/{accountId}/playheads",
+    // The legacy request sent NO locale here. Preserved verbatim.
+    withLocale: false,
+    callerParams: { content_ids: contentIdList(MAX_CONTENT_IDS) },
+    repeatedQueryParams: { "content_ids[]": "content_ids" },
   }),
 ]);

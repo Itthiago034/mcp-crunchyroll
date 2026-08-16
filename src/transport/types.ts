@@ -71,6 +71,15 @@ export interface OperationDescriptor {
    * guessed would silently drop or duplicate it.
    */
   readonly queryParams: Readonly<Record<string, string>>;
+  /**
+   * BT7. Query key → a DECLARED, array-valued caller param, emitted once per
+   * element in caller order (`content_ids[]=A&content_ids[]=B`).
+   *
+   * A separate map rather than a flag on `queryParams`, because the two render
+   * differently and conflating them is how an array quietly becomes
+   * `content_ids=A,B` — a different request than the provider expects.
+   */
+  readonly repeatedQueryParams: Readonly<Record<string, string>>;
   readonly scope: AuthScope;
   readonly auth: AuthMaterialRequirement;
   readonly mutation: MutationClass;
@@ -146,6 +155,24 @@ export const slugList: ParamSpec = {
 export const optionalBoolean: ParamSpec = {
   validate: (v) => typeof v === "boolean",
 };
+
+/**
+ * A bounded list of content ids, for a repeated query parameter.
+ *
+ * It reuses the SAME id rule as `contentId` rather than restating it: one
+ * definition of "what an id looks like" is the point. The bound exists because
+ * an unbounded list is an unbounded URL.
+ */
+export function contentIdList(maxEntries: number): ParamSpec {
+  return {
+    required: true,
+    validate: (v) =>
+      Array.isArray(v) &&
+      v.length >= 1 &&
+      v.length <= maxEntries &&
+      v.every((entry) => contentId.validate(entry)),
+  };
+}
 
 export function requiredIntegerInRange(min: number, max: number): ParamSpec {
   return {

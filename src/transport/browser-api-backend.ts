@@ -53,6 +53,17 @@ export function buildRequestUrl(
     if (value === undefined) continue;
     query.set(key, String(value));
   }
+  // BT7: repeated keys are appended once per element, in caller order. The
+  // provider expects `content_ids[]=A&content_ids[]=B`; a comma-joined single
+  // value would be a different request.
+  for (const [key, param] of Object.entries(descriptor.repeatedQueryParams ?? {})) {
+    const values = callerParams[param];
+    if (values === undefined) continue;
+    if (!Array.isArray(values)) {
+      throw new TransportError("INVALID_ARGUMENTS", `expected a list: ${param}`);
+    }
+    for (const entry of values) query.append(key, String(entry));
+  }
   for (const [key, value] of Object.entries(descriptor.fixedQuery ?? {})) {
     query.set(key, value);
   }
@@ -118,15 +129,14 @@ export function createBrowserApiBackend(ports: BrowserApiBackendPorts): Transpor
         throw new TransportError("OPERATION_NOT_MIGRATED", "method");
       }
 
-      // The URL is built from the descriptor and the values the registry has
-      // already validated. The caller contributes nothing else: every key it
-      // did not declare was refused before this point.
-      const url = buildRequestUrl(call);
-      if (!url.startsWith(`${CRUNCHYROLL_API_ORIGIN}/`)) {
-        throw new TransportError("INVALID_ARGUMENTS", "path");
-      }
-
       // ── The auth acquisition point (BT3 §13.4) ───────────────────────────
+      //
+      // BT7 (G-1): this happens BEFORE the URL exists. An account-scoped
+      // descriptor carries `{accountId}` in its path, and the only source for
+      // that value is the record `bind()` resolves from. Building the URL
+      // first — as BT5/BT6 did, when no descriptor had identity — would leave
+      // a placeholder with nothing to fill it, and would mean a request could
+      // be shaped before the authority had been consulted at all.
       let execution;
       try {
         execution = ports.reader.bind(call);
@@ -138,6 +148,14 @@ export function createBrowserApiBackend(ports: BrowserApiBackendPorts): Transpor
         // without one cannot be served, and inventing a bearer-less request
         // would just produce a 401 with extra steps.
         throw new TransportError("AUTH_NOT_READY", "no-bearer");
+      }
+
+      // Only now can the URL be materialized: identity comes from the bound
+      // call, never from the caller, and auth-derived values take precedence
+      // over caller params for any placeholder they share.
+      const url = buildRequestUrl(call, execution.authDerivedParams);
+      if (!url.startsWith(`${CRUNCHYROLL_API_ORIGIN}/`)) {
+        throw new TransportError("INVALID_ARGUMENTS", "path");
       }
 
       try {

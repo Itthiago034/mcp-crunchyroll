@@ -85,14 +85,20 @@ describe("BT1 registry — construction and lookup", () => {
       [
         "BROWSE",
         "GET_CATEGORIES",
+        "GET_CONTINUE_WATCHING",
         "GET_EPISODE",
         "GET_EPISODES",
+        "GET_HISTORY",
+        "GET_PLAYHEADS",
+        "GET_RECOMMENDATIONS",
         "GET_SEASONS",
         "GET_SERIES",
+        "GET_SIMILAR",
         "GET_SIMULCAST_SEASONS",
+        "GET_WATCHLIST",
         "SEARCH",
       ],
-      "BT5 migrated categories; BT6 migrated the remaining public catalog reads"
+      "BT5 categories; BT6 the public catalog reads; BT7 the account reads"
     );
   });
 });

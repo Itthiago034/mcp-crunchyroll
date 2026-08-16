@@ -20,6 +20,15 @@ import {
   parseSimulcastSeasons,
   CatalogShapeError,
 } from "../catalog-domain.js";
+import {
+  AccountShapeError,
+  parseContinueWatching,
+  parseHistory,
+  parsePlayheads,
+  parseRecommendations,
+  parseSimilar,
+  parseWatchlist,
+} from "../account-domain.js";
 import type { OperationRegistry } from "./operation-registry.js";
 import { TransportError } from "./transport-error.js";
 import type { CrunchyrollTransport, OperationId, CallerParams } from "./types.js";
@@ -31,6 +40,10 @@ import type { CrunchyrollTransport, OperationId, CallerParams } from "./types.js
  */
 const DEFAULT_PAGE_SIZE = 20;
 const DEFAULT_BROWSE_START = 0;
+/** Continue-watching has always asked for ten, not twenty. Preserved. */
+const DEFAULT_CONTINUE_WATCHING_SIZE = 10;
+/** The watchlist has always been newest-first unless the caller says otherwise. */
+const DEFAULT_WATCHLIST_ORDER = "desc";
 
 /** Only defined values are forwarded: an absent option must stay absent. */
 function withDefined(params: Record<string, unknown>): CallerParams {
@@ -98,7 +111,7 @@ export function createContentGateway(
       } catch (error) {
         // A domain shape failure carries a field PATH and no provider content;
         // it becomes the transport's closed vocabulary here.
-        if (error instanceof CatalogShapeError) {
+        if (error instanceof CatalogShapeError || error instanceof AccountShapeError) {
           throw new TransportError("SCHEMA_MISMATCH", error.path);
         }
         throw error;
@@ -171,6 +184,53 @@ export function createContentGateway(
           );
           return parseBrowse(result.json);
         }
+
+        // ── BT7: account reads. The caller supplies functional arguments
+        // only; the account identity is a path parameter the registry declares
+        // and BT3's bind() resolves, and it never appears here.
+        case "GET_SIMILAR": {
+          const result = await transport.execute(
+            operation,
+            withDefined({ series_id: args.series_id, n: args.n ?? DEFAULT_PAGE_SIZE })
+          );
+          return parseSimilar(result.json);
+        }
+
+        case "GET_RECOMMENDATIONS":
+          return parseRecommendations(
+            (await transport.execute(operation, withDefined({ n: args.n ?? DEFAULT_PAGE_SIZE }))).json
+          );
+
+        case "GET_WATCHLIST": {
+          const result = await transport.execute(
+            operation,
+            withDefined({
+              n: args.n ?? DEFAULT_PAGE_SIZE,
+              order: args.order ?? DEFAULT_WATCHLIST_ORDER,
+            })
+          );
+          return parseWatchlist(result.json);
+        }
+
+        case "GET_HISTORY":
+          return parseHistory(
+            (await transport.execute(operation, withDefined({ n: args.n ?? DEFAULT_PAGE_SIZE }))).json
+          );
+
+        case "GET_CONTINUE_WATCHING":
+          return parseContinueWatching(
+            (
+              await transport.execute(
+                operation,
+                withDefined({ n: args.n ?? DEFAULT_CONTINUE_WATCHING_SIZE })
+              )
+            ).json
+          );
+
+        case "GET_PLAYHEADS":
+          return parsePlayheads(
+            (await transport.execute(operation, withDefined({ content_ids: args.content_ids }))).json
+          );
 
         default:
           // A descriptor exists but this boundary has no parser for it: refuse

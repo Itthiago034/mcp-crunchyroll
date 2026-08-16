@@ -654,19 +654,6 @@ async function getValidToken(): Promise<{ token: string; account_id: string }> {
 
 // ── Watchlist ─────────────────────────────────────────────────────────────────
 
-export async function getWatchlist(options: { n?: number; order?: "desc" | "asc" } = {}): Promise<WatchlistItem[]> {
-  const { token, account_id } = await getValidToken();
-  const params = new URLSearchParams({
-    n: String(options.n ?? 20),
-    order: options.order ?? "desc",
-    locale: DEFAULT_LOCALE,
-  });
-  const data = await request<{ data: WatchlistItem[] }>(
-    `${API_BASE}/content/v2/${account_id}/watchlist?${params}`,
-    { token }
-  );
-  return data.data ?? [];
-}
 
 export async function addToWatchlist(contentId: string): Promise<{ success: boolean; message: string }> {
   const { token, account_id } = await getValidToken();
@@ -690,29 +677,7 @@ export async function removeFromWatchlist(contentId: string): Promise<{ success:
 
 // ── Watch History & Progress ──────────────────────────────────────────────────
 
-export async function getWatchHistory(options: { n?: number; locale?: string } = {}): Promise<HistoryItem[]> {
-  const { token, account_id } = await getValidToken();
-  const params = new URLSearchParams({
-    n: String(options.n ?? 20),
-    locale: options.locale ?? DEFAULT_LOCALE,
-  });
-  const data = await request<{ data: HistoryItem[] }>(
-    `${API_BASE}/content/v2/${account_id}/watch-history?${params}`,
-    { token }
-  );
-  return data.data ?? [];
-}
 
-export async function getPlayheads(contentIds: string[]): Promise<PlayheadData[]> {
-  const { token, account_id } = await getValidToken();
-  const params = new URLSearchParams();
-  contentIds.forEach((id) => params.append("content_ids[]", id));
-  const data = await request<{ data: PlayheadData[] }>(
-    `${API_BASE}/content/v2/${account_id}/playheads?${params}`,
-    { token }
-  );
-  return data.data ?? [];
-}
 
 export async function updatePlayhead(
   contentId: string,
@@ -727,46 +692,10 @@ export async function updatePlayhead(
   return { success: true, message: `Updated playhead for ${contentId} to ${playhead}s` };
 }
 
-export async function getContinueWatching(options: { n?: number } = {}): Promise<WatchlistItem[]> {
-  const { token, account_id } = await getValidToken();
-  const params = new URLSearchParams({
-    n: String(options.n ?? 10),
-    locale: DEFAULT_LOCALE,
-  });
-  const data = await request<{ data: WatchlistItem[] }>(
-    `${API_BASE}/content/v2/${account_id}/continue_watching?${params}`,
-    { token }
-  );
-  return data.data ?? [];
-}
 
 // ── Recommendations ───────────────────────────────────────────────────────────
 
-export async function getRecommendations(options: { n?: number } = {}): Promise<Recommendation[]> {
-  const { token, account_id } = await getValidToken();
-  const params = new URLSearchParams({
-    n: String(options.n ?? 20),
-    locale: DEFAULT_LOCALE,
-  });
-  const data = await request<{ data: Recommendation[] }>(
-    `${API_BASE}/content/v2/discover/${account_id}/recommendations?${params}`,
-    { token }
-  );
-  return data.data ?? [];
-}
 
-export async function getSimilar(seriesId: string, options: { n?: number } = {}): Promise<Recommendation[]> {
-  const { token, account_id } = await getValidToken();
-  const params = new URLSearchParams({
-    n: String(options.n ?? 20),
-    locale: DEFAULT_LOCALE,
-  });
-  const data = await request<{ data: Recommendation[] }>(
-    `${API_BASE}/content/v2/discover/${account_id}/similar_to/${seriesId}?${params}`,
-    { token }
-  );
-  return data.data ?? [];
-}
 
 // ── Simulcast / Browse ────────────────────────────────────────────────────────
 

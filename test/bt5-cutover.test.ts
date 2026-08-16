@@ -133,13 +133,13 @@ describe("BT5 cutover — migrated vs unmigrated, decided in one place", () => {
 
   // RETIRED AT BT6 for the three catalog reads that were migrated; the
   // representatives are now operations that must still be refused.
+  // RETIRED AT BT7 for the account reads, which are migrated now. The
+  // representatives are the deferred operation and the BT8 mutations.
   for (const tool of [
-    "crunchyroll_get_watchlist",
-    "crunchyroll_update_playhead",
     "crunchyroll_get_subscription",
-    "crunchyroll_get_similar",
-    "crunchyroll_get_recommendations",
-    "crunchyroll_get_history",
+    "crunchyroll_update_playhead",
+    "crunchyroll_add_to_watchlist",
+    "crunchyroll_remove_from_watchlist",
   ]) {
     test(`${tool} is refused with OPERATION_NOT_MIGRATED`, async () => {
       const h = gatewayHarness();

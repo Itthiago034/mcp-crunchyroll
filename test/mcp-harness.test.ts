@@ -96,13 +96,13 @@ describe("MCP server harness", () => {
       // unmigrated content tool reached Node and failed on missing tokens.
       // After the cutover the same call is refused locally, before any
       // transport and long before any network.
-      // BT6 migrated get_series, so the representative moved to an operation
-      // that is still refused — an account read, which BT7 owns.
+      // BT7 migrated the account reads, so the representative moved again — to
+      // a BT8 mutation, which must stay refused for two more stages.
       test("an unmigrated content tool is refused with OPERATION_NOT_MIGRATED", async () => {
         await withClient(target, async (client) => {
           const result = await client.sendRequest("tools/call", {
-            name: "crunchyroll_get_watchlist",
-            arguments: {},
+            name: "crunchyroll_update_playhead",
+            arguments: { content_id: "GE00377909ENUS", playhead: 1 },
           });
           assert.equal(result.error, undefined, "unexpected MCP-level error");
           const content = (result.result as { content: { text: string }[] }).content[0].text;
