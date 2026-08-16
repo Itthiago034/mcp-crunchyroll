@@ -8,9 +8,6 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 import {
-  login,
-  logout,
-  getStatus,
   searchAnime,
   getSeriesDetails,
   getSeasons,
@@ -37,6 +34,15 @@ import { setLegacyAuthTransitionSink } from "./api.js";
 // else — see the composition-root section below.
 import { createAuthContextAuthority } from "./transport/auth-context.js";
 import { createAuthProducer, createDefaultAuthProducerPorts } from "./transport/auth-producer.js";
+import { createAuthOrchestrator } from "./transport/auth-orchestrator.js";
+import { createBrowserAuthObserver, CRUNCHYROLL_LOGIN_URL } from "./transport/browser-auth.js";
+import {
+  createBrowserSessionManager,
+  createRealBrowserSessionSeams,
+  type BrowserSessionManager,
+} from "./transport/browser-session-manager.js";
+import { browserProfileDir, resolveBrowserExecutable } from "./transport/browser-profile.js";
+import { DEFAULT_BROWSER_SESSION_CONFIG } from "./transport/browser-lifecycle-types.js";
 
 // B6-core: operation-scoped secret redaction (internal, not an MCP surface).
 import { withRedactionScope, safeErrorWithCleanStack, redactSecrets, sanitizeToolResult } from "./redact.js";
@@ -99,12 +105,80 @@ const server = new Server(
 const authAuthority = createAuthContextAuthority();
 const authProducer = createAuthProducer(createDefaultAuthProducerPorts(authAuthority.asWriter()));
 
+/**
+ * The managed browser, built on first use.
+ *
+ * Construction resolves a real executable and can fail on a machine with no
+ * supported browser installed. That must not stop the server from starting and
+ * reporting an honest LOGIN_REQUIRED, so nothing is built until an interactive
+ * login actually asks for it.
+ */
+let browserSession: BrowserSessionManager | undefined;
+
+function managedBrowser(): BrowserSessionManager {
+  if (!browserSession) {
+    browserSession = createBrowserSessionManager(
+      {
+        ...DEFAULT_BROWSER_SESSION_CONFIG,
+        // The managed page opens directly on the FIXED login surface. It is a
+        // constant of this build: never a tool argument, never an environment
+        // variable, never assembled from a caller-supplied fragment.
+        initialPageUrl: CRUNCHYROLL_LOGIN_URL,
+        profileDir: browserProfileDir(),
+        executablePath: resolveBrowserExecutable(),
+      },
+      createRealBrowserSessionSeams(DEFAULT_BROWSER_SESSION_CONFIG.cdpCommandTimeoutMs)
+    );
+  }
+  return browserSession;
+}
+
+/**
+ * Auth orchestration: the login gate, the exclusive logout gate and the honest
+ * composite readiness report.
+ *
+ * The authority itself does not travel here either — the orchestrator receives
+ * a closure over the two SAFE diagnostics (availability and whether the record
+ * carries a profile id) and can neither read material nor commit one.
+ */
+const authOrchestrator = createAuthOrchestrator({
+  diagnostics: {
+    availability: () => authAuthority.diagnostics().availability,
+    hasProfileId: () => authAuthority.diagnostics().hasProfileId,
+  },
+  browser: {
+    lifecycleState: () => browserSession?.state(),
+    openLoginSurface: async () => {
+      const session = managedBrowser();
+      await session.start();
+      await session.ensureManagedPage();
+    },
+  },
+  producer: authProducer,
+  observer: createBrowserAuthObserver({
+    // The pattern is chosen by the observer module that owns the constant; the
+    // manager only opens the closed channel it is handed.
+    openInterception: (urlPattern) => managedBrowser().openResponseInterception(urlPattern),
+    now: () => Date.now(),
+    schedule: (callback, ms) => {
+      const timer = setTimeout(callback, ms);
+      // An observation deadline must never hold the process open by itself.
+      timer.unref?.();
+      return { cancel: () => clearTimeout(timer) };
+    },
+  }),
+});
+
 // BT4-D2: the legacy refresh path notifies us on a semantic invalid_grant so
 // the LIVE authority is invalidated BEFORE `clearAuthData()` runs. The sink is
 // synchronous, holds no state, and never re-enters the legacy module.
 setLegacyAuthTransitionSink({
   onInvalidGrant: () => {
     authProducer.invalidateForInvalidGrant();
+    // The provider said this session must be re-established. That is a REASON,
+    // recorded separately from availability, so status can distinguish "never
+    // logged in" from "log in again".
+    authOrchestrator.signalReauthRequired();
   },
 });
 
@@ -114,16 +188,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     // Auth
     {
+      // BT4 completion §8 — BREAKING: no credential arguments of any kind.
+      // The human types into Crunchyroll's own page in the managed browser;
+      // this server never receives an email, password, code or cookie.
       name: "crunchyroll_login",
-      description: "Log in to Crunchyroll with email and password. Tokens are saved locally for future requests.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          email: { type: "string", description: "Crunchyroll account email" },
-          password: { type: "string", description: "Crunchyroll account password" },
-        },
-        required: ["email", "password"],
-      },
+      description:
+        "Log in to Crunchyroll interactively in the managed browser. Takes no arguments: you type your credentials into Crunchyroll's own page, and this server never receives them.",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
     },
     {
       name: "crunchyroll_logout",
@@ -132,7 +203,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "crunchyroll_status",
-      description: "Check current Crunchyroll login status and account info.",
+      description:
+        "Report current Crunchyroll readiness: whether authenticated work is permitted, the browser lifecycle, and the auth state.",
       inputSchema: { type: "object", properties: {} },
     },
 
@@ -370,11 +442,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   return withRedactionScope(async (scope) => {
     const { name, arguments: args = {} } = request.params;
 
-    // B6-core: register the raw credentials received by the login handler.
-    // They must not survive in any error path that crosses the MCP boundary.
-    // Empty/whitespace values are rejected by registerSecret by design.
+    // B6: anything credential-shaped that arrives at the login tool is still
+    // registered before it can reach an error path — the tool now REFUSES such
+    // input (§8), and a refused credential must not leak on the way out either.
     if (name === "crunchyroll_login") {
-      scope.registerSecret(String(args.password ?? ""), String(args.email ?? ""));
+      scope.registerSecret(
+        ...Object.values(args as Record<string, unknown>)
+          .filter((value): value is string => typeof value === "string" && value.length > 0)
+      );
     }
 
     // B6-FIX-1 (blocker B6-C2): register known-sensitive argument fields for
@@ -398,17 +473,33 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         switch (name) {
         // ── Auth ──────────────────────────────────────────────────────────────
         case "crunchyroll_login": {
-          const result = await login(args.email as string, args.password as string);
-        return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        };
+          // Fails closed on BOTH surfaces: the published schema admits no
+          // property, and any supplied argument is refused here with a typed
+          // error rather than silently ignored. The refusal names no key and
+          // echoes no value.
+          if (Object.keys(args as Record<string, unknown>).length > 0) {
+            throw new McpError(
+              ErrorCode.InvalidParams,
+              "crunchyroll_login takes no arguments. Login is interactive: type your credentials into the Crunchyroll page in the managed browser. This server never accepts or stores them."
+            );
+          }
+          const outcome = await authOrchestrator.login();
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({ accepted: outcome.accepted, ...outcome.readiness }, null, 2),
+              },
+            ],
+          };
       }
 
       case "crunchyroll_logout": {
-        // BT4: the live authority is invalidated synchronously BEFORE any
-        // filesystem work, and the structured LogoutResult is passed through
-        // verbatim — the public output contract is unchanged.
-        const logoutResult = (await authProducer.logout()).persistence;
+        // BT4: the exclusive logout gate holds for the whole transaction, the
+        // live authority is invalidated BEFORE any filesystem work, and the
+        // structured LogoutResult is passed through verbatim — the public
+        // output contract is unchanged (the four-axis result is BT8's).
+        const logoutResult = (await authOrchestrator.logout()).persistence as LogoutResult;
         const presentation = formatLogoutResult(logoutResult);
         return {
           content: [{ type: "text", text: JSON.stringify(presentation) }],
@@ -416,7 +507,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "crunchyroll_status": {
-        const status = await getStatus();
+        // Strictly read-only (§10): it never logs in, refreshes, mints,
+        // commits, invalidates, mutates storage, navigates or reopens a
+        // browser. It reports current known readiness and nothing else.
+        const status = authOrchestrator.readiness();
         return {
           content: [{ type: "text", text: JSON.stringify(status, null, 2) }],
         };

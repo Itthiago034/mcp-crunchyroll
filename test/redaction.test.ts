@@ -668,13 +668,25 @@ describe("B6-FIX-2: success path sanitized inside the active scope", () => {
         // Regression probe against SHA 83256b1: on that commit sanitizeToolResult
         // ran AFTER the withRedactionScope finally cleanup, so a runtime-
         // registered literal (no static pattern around it) leaked into the
-        // outward success payload. This test reproduces the exact causal chain:
+        // outward success payload. The original causal chain was:
         //   tools/call crunchyroll_status
         //   → arguments.password = SENTINEL  (SENSITIVE_ARG_KEYS registers it)
         //   → getStatus() builds the success result with session.email = SENTINEL
         //   → central success sanitize boundary (inside the active scope)
         //   → client receives ***REDACTED***
         //   → finally clears the registry
+        //
+        // BT4 completion §10 REMOVED `email`, `account_id` and
+        // `token_expires_at` from the status result, so the stored email no
+        // longer reaches the payload at all: the vehicle that made this leak
+        // observable end to end is gone, and the guarantee became structural
+        // (nothing to redact) instead of redactive. The temporal ordering it
+        // was built to catch stays guarded by the unit timing proof above,
+        // "boundary runs while the scope is still active".
+        //
+        // The probe is kept with the same isolated HOME and now proves the
+        // stronger property: with the sentinel BOTH on disk and supplied as an
+        // argument, neither reaches the client.
         // No real network: the local synthetic session/tokens fixtures are used.
         const tmpHome = mkdtempSync(joinPath(tmpdir(), "b6-fix2-home-"));
         const striderDir = joinPath(tmpHome, ".strider");
@@ -732,27 +744,24 @@ describe("B6-FIX-2: success path sanitized inside the active scope", () => {
           const content = (resp.result as { content?: { type: string; text?: string }[] }).content;
           assert.ok(content && content.length > 0, "content must exist");
           const rawPayload = JSON.stringify(resp);
-          // The sentinel appears as a PURE value (raw email, no static
-          // pattern prefix) — a static regex cannot hide the temporal bug.
+          // The sentinel is on disk (session.email) AND was supplied as an
+          // argument. Neither route may reach the client.
           assert.equal(
             rawPayload.includes(SENTINEL_SUCCESS_BOUNDARY),
             false,
             "runtime sentinel must not appear in the outward success payload"
           );
-          assert.equal(
-            rawPayload.includes(REDACTED_MARKER),
-            true,
-            "marker must replace the runtime sentinel"
-          );
-          // Safe status structure still visible.
+          // Safe readiness structure still visible (BT4 §10 contract).
           const text = content.map((c) => c.text ?? "").join("\n");
           assert.ok(
-            text.includes("logged_in") && text.includes("account_id") && text.includes("token_expires_at"),
-            "safe status structure (logged_in/account_id/token_expires_at) still visible"
+            text.includes("logged_in") && text.includes("auth_state"),
+            "safe readiness structure (logged_in/auth_state) still visible"
           );
-          // The email field is still present — redacted, not removed.
-          assert.ok(text.includes("email"), "email field still present (redacted value)");
-          assert.equal(text.includes(SENTINEL_SUCCESS_BOUNDARY), false, "session.email sentinel redacted");
+          // §10: the identity fields are REMOVED, not merely redacted — a
+          // field that never exists cannot leak in a later refactor.
+          for (const removed of ["email", "account_id", "token_expires_at"]) {
+            assert.equal(text.includes(removed), false, `${removed} must be absent from status`);
+          }
         } finally {
           client2.kill();
           rmSync(tmpHome, { recursive: true, force: true });

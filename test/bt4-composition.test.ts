@@ -100,6 +100,75 @@ describe("BT4 composition — exactly one production authority", () => {
   });
 });
 
+describe("BT4 composition — the interactive login is wired, and only as intended", () => {
+  const ROOT_CODE = (): string =>
+    readFileSync(COMPOSITION_ROOT, "utf-8").replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
+
+  test("exactly one orchestrator and one browser session are composed", () => {
+    assert.deepEqual(callSitesOf("createAuthOrchestrator"), [COMPOSITION_ROOT]);
+    assert.deepEqual(callSitesOf("createBrowserSessionManager"), [COMPOSITION_ROOT]);
+    assert.deepEqual(callSitesOf("createBrowserAuthObserver"), [COMPOSITION_ROOT]);
+  });
+
+  test("the browser layer never receives the writer, the authority or a producer", () => {
+    for (const file of productionSources()) {
+      if (!/browser-(session-manager|auth|profile|lifecycle)/.test(file.path)) continue;
+      for (const forbidden of ["asWriter", "authAuthority", "AuthProducer", "commitAuthenticatedMaterial"]) {
+        assert.equal(
+          file.code.includes(forbidden),
+          false,
+          `${file.path} references ${forbidden}`
+        );
+      }
+    }
+  });
+
+  test("the composition root consumes no credential argument at all", () => {
+    const code = ROOT_CODE();
+    for (const forbidden of [
+      /args\.password/,
+      /args\.email/,
+      /args\.username/,
+      /\blogin\s*\(\s*args\b/,
+    ]) {
+      assert.equal(forbidden.test(code), false, `credential-consuming path remains: ${forbidden}`);
+    }
+  });
+
+  test("the login surface and token endpoint are fixed, never caller or environment input", () => {
+    // Raw source on purpose: comment stripping would swallow a URL literal at
+    // its own `//`, which would make this assertion pass vacuously.
+    const browserAuth = readFileSync(join(SRC_ROOT, "transport", "browser-auth.ts"), "utf-8");
+    assert.match(browserAuth, /"https:\/\/www\.crunchyroll\.com\/login"/);
+    assert.match(browserAuth, /"https:\/\/www\.crunchyroll\.com\/auth\/v1\/token"/);
+    assert.equal(/process\.env/.test(browserAuth), false, "no environment-configurable origin");
+    // The observer is handed a pattern by the module that owns the constant,
+    // never by a caller: no parameter of the MCP boundary reaches it.
+    const root = ROOT_CODE();
+    assert.equal(
+      /openResponseInterception\s*\(\s*args\b/.test(root),
+      false,
+      "a caller must never choose the intercepted URL"
+    );
+  });
+
+  test("the tool boundary reaches the browser only through the orchestrator", () => {
+    const code = readFileSync(COMPOSITION_ROOT, "utf-8");
+    const handlerStart = code.indexOf("setRequestHandler(CallToolRequestSchema");
+    assert.ok(handlerStart > 0);
+    const handler = code.slice(handlerStart);
+    for (const forbidden of [
+      "browserSession",
+      "openResponseInterception",
+      "ensureManagedPage",
+      "createBrowserAuthObserver",
+      "establishFromObservedMaterial",
+    ]) {
+      assert.equal(handler.includes(forbidden), false, `the tool boundary must not reference ${forbidden}`);
+    }
+  });
+});
+
 describe("BT4 composition — live invalid_grant invalidates before cleanup", () => {
   function isolatedHome(tokens: TokenData): { home: string; tokenFile: string; restore(): void } {
     const home = mkdtempSync(join(tmpdir(), "bt4-home-"));
