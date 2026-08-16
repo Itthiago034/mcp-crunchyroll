@@ -60,7 +60,10 @@ const CLEARED: LogoutResult = {
  * the semantics under test are BT3's own — while the call log lets a test prove
  * that a read-only operation touched no writer method at all.
  */
-function recordingWriter(authority: ReturnType<typeof createAuthContextAuthority>) {
+function recordingWriter(
+  authority: ReturnType<typeof createAuthContextAuthority>,
+  events: string[] = []
+) {
   const calls: string[] = [];
   const writer = authority.asWriter();
   const port: AuthWriterPort = {
@@ -74,6 +77,7 @@ function recordingWriter(authority: ReturnType<typeof createAuthContextAuthority
     },
     invalidate: (cause) => {
       calls.push(`invalidate:${String(cause)}`);
+      events.push(`invalidate:${String(cause)}`);
       return writer.invalidate(cause);
     },
   };
@@ -88,7 +92,7 @@ interface StorageFake {
   setClearResult(result: LogoutResult): void;
 }
 
-function storageFake(initial: TokenLike | null = null): StorageFake {
+function storageFake(initial: TokenLike | null = null, events: string[] = []): StorageFake {
   let current = initial;
   let loadError: unknown;
   let clearResult: LogoutResult = CLEARED;
@@ -112,6 +116,7 @@ function storageFake(initial: TokenLike | null = null): StorageFake {
       },
       clearAuthData: async () => {
         calls.clear += 1;
+        events.push("clear");
         return clearResult;
       },
       isTokenExpired: (t) => T0 >= t.expires_at - 60_000,
@@ -169,15 +174,18 @@ function harness(initialTokens: TokenLike | null = null) {
     epochFactory: () => EPOCH,
     now: () => T0,
   });
-  const writer = recordingWriter(authority);
-  const storage = storageFake(initialTokens);
+  /** One ordered log across BOTH side-effecting layers, so an ordering rule
+   *  ("invalidate before any filesystem work") is a single deepEqual. */
+  const events: string[] = [];
+  const writer = recordingWriter(authority, events);
+  const storage = storageFake(initialTokens, events);
   const legacy = legacyFake();
   const producer = createAuthProducer({
     writer: writer.port,
     storage: storage.port,
     legacy: legacy.port,
   });
-  return { authority, writer, storage, legacy, producer };
+  return { authority, writer, storage, legacy, producer, events };
 }
 
 describe("BT4 login — persistence first, authority second", () => {
@@ -439,5 +447,253 @@ describe("BT4 login — a hostile storage document cannot smuggle a second value
     // untrusted read and never re-reads it.
     assert.deepEqual(outcome, { kind: "AUTHORITY_REJECTED", reason: "STALE" });
     assert.equal(h.authority.diagnostics().availability, "UNAVAILABLE");
+  });
+});
+
+// ── Refresh ─────────────────────────────────────────────────────────────────
+
+/** A RefreshError-shaped rejection, exactly as src/api.ts produces it. */
+function refreshError(kind: string): Error {
+  const error = new Error(`fixed message for ${kind}`);
+  error.name = "RefreshError";
+  (error as unknown as { kind: string }).kind = kind;
+  return error;
+}
+
+async function established(h: ReturnType<typeof harness>, overrides: Record<string, unknown> = {}) {
+  h.storage.set(tokens(overrides));
+  const outcome = await h.producer.establishFromLogin(EMAIL_SENTINEL, PASSWORD_SENTINEL);
+  assert.deepEqual(outcome, { kind: "ESTABLISHED" });
+  h.writer.calls.length = 0;
+  h.events.length = 0;
+  return h;
+}
+
+describe("BT4 refresh — one commit, or none at all", () => {
+  test("G: a successful refresh commits exactly one REFRESH", async () => {
+    const h = await established(harness());
+    h.legacy.setRefresh(async () => tokens({ access_token: ACCESS_SENTINEL_B }));
+
+    const outcome = await h.producer.refresh();
+
+    assert.deepEqual(outcome, { kind: "REFRESHED" });
+    assert.equal(h.authority.currentRevision().generation, 2);
+    assert.equal(h.authority.diagnostics().availability, "READY");
+    assert.deepEqual(h.writer.calls, ["currentRevision", "commit:REFRESH"]);
+  });
+
+  test("G: the refresh token is never handed to the writer", async () => {
+    const h = await established(harness());
+    const captured: Record<string, unknown>[] = [];
+    const producer = createAuthProducer({
+      writer: {
+        currentRevision: () => h.writer.port.currentRevision(),
+        commitAuthenticatedMaterial: (expected, mode, candidate) => {
+          captured.push(candidate as Record<string, unknown>);
+          return h.writer.port.commitAuthenticatedMaterial(expected, mode, candidate);
+        },
+        invalidate: (cause) => h.writer.port.invalidate(cause),
+      },
+      storage: h.storage.port,
+      legacy: h.legacy.port,
+    });
+    h.legacy.setRefresh(async () =>
+      tokens({ access_token: ACCESS_SENTINEL_B, refresh_token: "ROTATED-REFRESH-SENTINEL" })
+    );
+
+    await producer.refresh();
+
+    assert.equal(JSON.stringify(captured[0]).includes("ROTATED-REFRESH-SENTINEL"), false);
+    assert.equal(JSON.stringify(captured[0]).includes(REFRESH_SENTINEL), false);
+    assert.equal("refresh_token" in captured[0], false);
+  });
+
+  test("refresh with no persisted material performs no transition", async () => {
+    const h = harness();
+    h.storage.set(null);
+    const outcome = await h.producer.refresh();
+    assert.deepEqual(outcome, { kind: "NO_MATERIAL" });
+    assert.equal(h.legacy.calls.refresh, 0);
+    assert.equal(h.authority.currentRevision().generation, 0);
+  });
+
+  test("refresh against an unavailable authority cannot bootstrap an identity", async () => {
+    const h = harness();
+    h.storage.set(tokens());
+    const outcome = await h.producer.refresh();
+    // BT3 refuses REFRESH continuity with nothing to continue.
+    assert.deepEqual(outcome, { kind: "UNAVAILABLE" });
+    assert.equal(h.authority.currentRevision().generation, 0);
+  });
+
+  test("H: a refresh that loses to a logout is stale and restores nothing", async () => {
+    const h = await established(harness());
+    h.legacy.setRefresh(async () => {
+      // The logout lands while the network request is in flight.
+      h.authority.invalidate("LOGOUT");
+      return tokens({ access_token: ACCESS_SENTINEL_B });
+    });
+
+    const outcome = await h.producer.refresh();
+
+    assert.deepEqual(outcome, { kind: "STALE" });
+    assert.equal(h.authority.diagnostics().availability, "UNAVAILABLE");
+    assert.equal(h.authority.diagnostics().cause, "LOGOUT");
+    assert.equal(h.authority.currentRevision().generation, 2, "the stale commit is not a transition");
+  });
+
+  test("I: concurrent refreshes share one request and produce one transition", async () => {
+    const h = await established(harness());
+    let operations = 0;
+    let inFlight: Promise<TokenLike> | undefined;
+    // Mirrors the legacy single-flight in src/api.ts: BT4 must not add a second
+    // deduplication layer, and must not break the existing one.
+    h.legacy.setRefresh(() => {
+      if (!inFlight) {
+        operations += 1;
+        inFlight = Promise.resolve(tokens({ access_token: ACCESS_SENTINEL_B })).finally(() => {
+          inFlight = undefined;
+        });
+      }
+      return inFlight;
+    });
+
+    const [first, second] = await Promise.all([h.producer.refresh(), h.producer.refresh()]);
+
+    assert.equal(operations, 1, "the single-flight is preserved");
+    assert.equal(h.legacy.calls.refresh, 2, "BT4 adds no deduplication of its own");
+    const kinds = [first.kind, second.kind].sort();
+    assert.deepEqual(kinds, ["REFRESHED", "STALE"], "exactly one commit wins");
+    assert.equal(h.authority.currentRevision().generation, 2, "no double increment");
+  });
+
+  test("J: a refresh that changes the account id invalidates instead of switching", async () => {
+    const h = await established(harness());
+    h.legacy.setRefresh(async () => tokens({ account_id: ACCOUNT_SENTINEL_B }));
+
+    const outcome = await h.producer.refresh();
+
+    assert.deepEqual(outcome, { kind: "IDENTITY_CHANGED" });
+    assert.equal(h.authority.diagnostics().availability, "UNAVAILABLE");
+    assert.equal(h.authority.currentRevision().generation, 2);
+    // BT4 never auto-establishes the new identity.
+    assert.equal(h.authority.inspectForTest().accountId, undefined);
+  });
+
+  const profileChanges: Array<[string, Record<string, unknown>, Record<string, unknown>]> = [
+    ["a profile appears", {}, { profile_id: PROFILE_SENTINEL }],
+    ["a profile disappears", { profile_id: PROFILE_SENTINEL }, {}],
+    ["a profile changes", { profile_id: PROFILE_SENTINEL }, { profile_id: PROFILE_SENTINEL_B }],
+  ];
+
+  for (const [name, initial, refreshed] of profileChanges) {
+    test(`K: refresh where ${name} is an identity change`, async () => {
+      const h = await established(harness(), initial);
+      h.legacy.setRefresh(async () => tokens(refreshed));
+
+      const outcome = await h.producer.refresh();
+
+      assert.deepEqual(outcome, { kind: "IDENTITY_CHANGED" });
+      assert.equal(h.authority.diagnostics().availability, "UNAVAILABLE");
+    });
+  }
+
+  test("L: invalid_grant invalidates the authority BEFORE any filesystem work", async () => {
+    const h = await established(harness());
+    h.legacy.setRefresh(async () => {
+      throw refreshError("REAUTH_REQUIRED");
+    });
+
+    const outcome = await h.producer.refresh();
+
+    assert.deepEqual(outcome, { kind: "REAUTH_REQUIRED" });
+    assert.deepEqual(h.events, ["invalidate:INVALID_GRANT", "clear"], "ordering is the whole point");
+    assert.equal(h.authority.diagnostics().availability, "UNAVAILABLE");
+    assert.equal(h.authority.diagnostics().cause, "INVALID_GRANT");
+  });
+
+  test("L: a failed clear after invalid_grant never resurrects the authority", async () => {
+    const h = await established(harness());
+    h.storage.setClearResult({
+      state: "FAILED",
+      tokens: { state: "FAILED", reason: "INSECURE_DIR" },
+      session: { state: "FAILED", reason: "INSECURE_DIR" },
+    });
+    h.legacy.setRefresh(async () => {
+      throw refreshError("REAUTH_REQUIRED");
+    });
+
+    const outcome = await h.producer.refresh();
+
+    assert.deepEqual(outcome, { kind: "REAUTH_REQUIRED" });
+    assert.equal(h.authority.diagnostics().availability, "UNAVAILABLE");
+  });
+
+  const preservingFailures: Array<[string, string, string]> = [
+    ["M: a transient failure", "TRANSIENT", "TRANSIENT"],
+    ["a safe failure", "SAFE_FAILURE", "FAILED"],
+    ["a malformed response", "MALFORMED_RESPONSE", "FAILED"],
+    ["an unrecognised failure", "SOMETHING_ELSE", "FAILED"],
+  ];
+
+  for (const [name, errorKind, expected] of preservingFailures) {
+    test(`${name} preserves the current material untouched`, async () => {
+      const h = await established(harness());
+      h.legacy.setRefresh(async () => {
+        throw refreshError(errorKind);
+      });
+
+      const outcome = await h.producer.refresh();
+
+      assert.deepEqual(outcome, { kind: expected });
+      assert.equal(h.authority.diagnostics().availability, "READY");
+      assert.equal(h.authority.currentRevision().generation, 1, "no transition");
+      assert.equal(h.authority.inspectForTest().accountId, ACCOUNT_SENTINEL);
+      assert.deepEqual(h.events, [], "no invalidation, no filesystem work");
+    });
+  }
+
+  test("a structurally invalid refreshed payload performs no transition", async () => {
+    const h = await established(harness());
+    h.legacy.setRefresh(async () => tokens({ access_token: "" }));
+
+    const outcome = await h.producer.refresh();
+
+    assert.deepEqual(outcome, { kind: "FAILED" });
+    assert.equal(h.authority.currentRevision().generation, 1);
+    assert.equal(h.authority.diagnostics().availability, "READY");
+  });
+
+  test("a hostile refreshed payload is read at most once per field", async () => {
+    const h = await established(harness());
+    const reads: Record<string, number> = { access_token: 0, token_type: 0, expires_at: 0, account_id: 0, profile_id: 0 };
+    h.legacy.setRefresh(async () => {
+      const hostile: Record<string, unknown> = { refresh_token: REFRESH_SENTINEL };
+      const answers: Record<string, unknown> = {
+        access_token: ACCESS_SENTINEL_B,
+        token_type: "Bearer",
+        expires_at: T0 + ONE_HOUR,
+        account_id: ACCOUNT_SENTINEL,
+        profile_id: undefined,
+      };
+      for (const field of Object.keys(reads)) {
+        Object.defineProperty(hostile, field, {
+          enumerable: true,
+          get() {
+            reads[field] += 1;
+            return reads[field] === 1 ? answers[field] : `POISONED-${field}`;
+          },
+        });
+      }
+      return hostile as unknown as TokenLike;
+    });
+
+    const outcome = await h.producer.refresh();
+
+    assert.deepEqual(outcome, { kind: "REFRESHED" });
+    for (const field of Object.keys(reads)) {
+      assert.ok(reads[field] <= 1, `${field} read ${reads[field]} times`);
+    }
+    assert.equal(h.authority.inspectForTest().accountId, ACCOUNT_SENTINEL);
   });
 });

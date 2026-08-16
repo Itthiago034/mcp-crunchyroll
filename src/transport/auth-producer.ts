@@ -92,8 +92,23 @@ export type LoginOutcome =
   | { readonly kind: "MATERIAL_UNAVAILABLE" }
   | { readonly kind: "AUTHORITY_REJECTED"; readonly reason: AuthorityRejection };
 
+/**
+ * Refresh outcomes. `TRANSIENT`, `FAILED` and `NO_MATERIAL` are explicitly NOT
+ * authority transitions: the current material stays exactly as it was.
+ */
+export type RefreshOutcome =
+  | { readonly kind: "REFRESHED" }
+  | { readonly kind: "NO_MATERIAL" }
+  | { readonly kind: "STALE" }
+  | { readonly kind: "IDENTITY_CHANGED" }
+  | { readonly kind: "UNAVAILABLE" }
+  | { readonly kind: "REAUTH_REQUIRED" }
+  | { readonly kind: "TRANSIENT" }
+  | { readonly kind: "FAILED" };
+
 export interface AuthProducer {
   establishFromLogin(email: string, password: string): Promise<LoginOutcome>;
+  refresh(): Promise<RefreshOutcome>;
 }
 
 // ── Validated material ──────────────────────────────────────────────────────
@@ -131,6 +146,27 @@ function isUsableString(value: unknown): value is string {
  * and checked against a runtime allowlist. Anything unrecognised fails closed
  * as UNAVAILABLE — BT4 never treats an unknown failure as success.
  */
+const REFRESH_FAILURE_KINDS: readonly string[] = Object.freeze([
+  "REAUTH_REQUIRED",
+  "TRANSIENT",
+  "SAFE_FAILURE",
+  "MALFORMED_RESPONSE",
+]);
+
+/**
+ * Classify a legacy `RefreshError` structurally, by the same runtime-allowlist
+ * rule used for authority rejections. Anything unrecognised is treated as the
+ * conservative class: no authority transition, current material preserved.
+ */
+function classifyRefreshFailure(error: unknown): string {
+  const name = (error as { name?: unknown } | null)?.name;
+  const kind = (error as { kind?: unknown } | null)?.kind;
+  if (name === "RefreshError" && typeof kind === "string" && REFRESH_FAILURE_KINDS.includes(kind)) {
+    return kind;
+  }
+  return "SAFE_FAILURE";
+}
+
 function classifyAuthorityRejection(error: unknown): AuthorityRejection {
   const name = (error as { name?: unknown } | null)?.name;
   const kind = (error as { kind?: unknown } | null)?.kind;
@@ -179,7 +215,92 @@ class AuthProducerImpl implements AuthProducer {
       return Object.freeze({ kind: "MATERIAL_UNAVAILABLE" as const });
     }
 
-    return this.commit(expected, "ESTABLISH", material.candidate);
+    const rejection = this.commit(expected, "ESTABLISH", material.candidate);
+    return rejection === null
+      ? Object.freeze({ kind: "ESTABLISHED" as const })
+      : Object.freeze({ kind: "AUTHORITY_REJECTED" as const, reason: rejection });
+  }
+
+  /**
+   * Refresh → REFRESH (design §7).
+   *
+   * The existing process-local single-flight in `src/api.ts` is preserved and
+   * not refactored: it deduplicates a *request*, and is not the authority, not
+   * a generation, not a lock and not an AuthContext. BT4 adds no second
+   * deduplication layer — two concurrent refreshes share one request, and BT3's
+   * compare-and-swap ensures only one of them becomes a transition.
+   */
+  async refresh(): Promise<RefreshOutcome> {
+    // Captured before the network await, so a logout or a newer commit landing
+    // while the request is in flight is detected rather than overwritten.
+    const expected = this.ports.writer.currentRevision();
+
+    let stored: TokenLike | null;
+    try {
+      stored = await this.ports.storage.loadTokens();
+    } catch {
+      return Object.freeze({ kind: "NO_MATERIAL" as const });
+    }
+    if (stored === null || stored === undefined) {
+      return Object.freeze({ kind: "NO_MATERIAL" as const });
+    }
+
+    let refreshed: TokenLike;
+    try {
+      // The stored document is passed through by reference: the refresh token
+      // it carries stays owned by the legacy path and hardened storage, and is
+      // never copied out into a candidate here.
+      refreshed = await this.ports.legacy.refreshRequest(stored);
+    } catch (error) {
+      return this.handleRefreshFailure(error);
+    }
+
+    const material = this.validateMaterial(refreshed);
+    if (material.kind !== "OK") {
+      // A malformed or unusable payload leaves the current record installed.
+      return Object.freeze({ kind: "FAILED" as const });
+    }
+
+    const rejection = this.commit(expected, "REFRESH", material.candidate);
+    if (rejection === null) return Object.freeze({ kind: "REFRESHED" as const });
+    if (rejection === "STALE") return Object.freeze({ kind: "STALE" as const });
+    if (rejection === "IDENTITY_CHANGED") {
+      // BT3 owns the single identity-continuity rule and has already
+      // invalidated. BT4 does not compare identities itself, does not work
+      // around the refusal, and never auto-establishes the new identity.
+      return Object.freeze({ kind: "IDENTITY_CHANGED" as const });
+    }
+    return Object.freeze({ kind: "UNAVAILABLE" as const });
+  }
+
+  /**
+   * Translate a legacy refresh failure.
+   *
+   * `REAUTH_REQUIRED` (semantic invalid_grant) is the only class that touches
+   * the authority, and it invalidates FIRST — before any producer-owned
+   * asynchronous persistence work — so a slow or failing clear can never leave
+   * an old context usable. A PARTIAL or FAILED clear never resurrects it.
+   */
+  private async handleRefreshFailure(error: unknown): Promise<RefreshOutcome> {
+    const kind = classifyRefreshFailure(error);
+
+    if (kind !== "REAUTH_REQUIRED") {
+      // TRANSIENT / SAFE_FAILURE / MALFORMED_RESPONSE and anything
+      // unrecognised: the exact current record stays installed and usable, and
+      // the generation does not move.
+      return Object.freeze({
+        kind: (kind === "TRANSIENT" ? "TRANSIENT" : "FAILED") as "TRANSIENT" | "FAILED",
+      });
+    }
+
+    try {
+      this.ports.writer.invalidate("INVALID_GRANT");
+    } catch {
+      // An already-terminal authority is still unavailable, which is the
+      // outcome this path wants; the cleanup below must still run.
+    }
+    await this.ports.storage.clearAuthData();
+    return Object.freeze({ kind: "REAUTH_REQUIRED" as const });
   }
 
   /** Commit and translate. No retry, ever — a rejection is a result. */
@@ -187,16 +308,13 @@ class AuthProducerImpl implements AuthProducer {
     expected: AuthRevisionSnapshot,
     mode: "ESTABLISH" | "REFRESH",
     candidate: ValidatedCandidate
-  ): LoginOutcome {
+  ): AuthorityRejection | null {
     try {
       this.ports.writer.commitAuthenticatedMaterial(expected, mode, candidate);
     } catch (error) {
-      return Object.freeze({
-        kind: "AUTHORITY_REJECTED" as const,
-        reason: classifyAuthorityRejection(error),
-      });
+      return classifyAuthorityRejection(error);
     }
-    return Object.freeze({ kind: "ESTABLISHED" as const });
+    return null;
   }
 
   /**
@@ -218,7 +336,19 @@ class AuthProducerImpl implements AuthProducer {
       return { kind: "UNUSABLE" };
     }
     if (stored === null || stored === undefined) return { kind: "ABSENT" };
+    return this.validateMaterial(stored);
+  }
 
+  /**
+   * Reduce one crossing document to validated local primitives.
+   *
+   * Each authorized field is read AT MOST ONCE. Persisted documents and
+   * provider-derived material both cross a trust boundary and may carry getters
+   * or Proxy traps, so validating one read and committing another would be
+   * exactly the vulnerability BT3-R1 closed. The refresh token is never among
+   * the fields read into a candidate.
+   */
+  private validateMaterial(stored: TokenLike): MaterialRead {
     const accessToken: unknown = stored.access_token;
     const tokenType: unknown = stored.token_type;
     const expiresAt: unknown = stored.expires_at;
