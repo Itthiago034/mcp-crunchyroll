@@ -72,11 +72,13 @@ describe("BT1 registry — construction and lookup", () => {
     );
   });
 
-  test("the production operation table is empty in BT1", () => {
+  test("the production operation table holds exactly the migrated operations", () => {
+    // RETIRED AT BT5: "empty in BT1" was true until the cutover. A descriptor
+    // enters only when its path literal LEAVES src/api.ts, which is what BT5
+    // did for GET_CATEGORIES; the remaining reads follow at BT6/BT7.
     assert.deepEqual(
-      [...PRODUCTION_OPERATIONS],
-      [],
-      "real descriptors enter only when their path literal leaves src/api.ts (BT6/BT7)"
+      [...PRODUCTION_OPERATIONS].map((d) => d.id),
+      ["GET_CATEGORIES"]
     );
   });
 });

@@ -92,7 +92,11 @@ describe("MCP server harness", () => {
         });
       });
 
-      test("authenticated calls fail compatibly when no tokens are saved", async () => {
+      // BT5 cutover: this used to characterize the LEGACY path, where an
+      // unmigrated content tool reached Node and failed on missing tokens.
+      // After the cutover the same call is refused locally, before any
+      // transport and long before any network.
+      test("an unmigrated content tool is refused with OPERATION_NOT_MIGRATED", async () => {
         await withClient(target, async (client) => {
           const result = await client.sendRequest("tools/call", {
             name: "crunchyroll_get_series",
@@ -100,8 +104,22 @@ describe("MCP server harness", () => {
           });
           assert.equal(result.error, undefined, "unexpected MCP-level error");
           const content = (result.result as { content: { text: string }[] }).content[0].text;
-          // The server must surface an authentication failure rather than succeed or crash
-          assert.match(content, /not logged in|login|auth|session/i);
+          assert.match(content, /OPERATION_NOT_MIGRATED/);
+        });
+      });
+
+      test("the migrated content tool routes to the browser transport, never to Node", async () => {
+        await withClient(target, async (client) => {
+          const result = await client.sendRequest("tools/call", {
+            name: "crunchyroll_get_categories",
+            arguments: {},
+          });
+          assert.equal(result.error, undefined, "unexpected MCP-level error");
+          const content = (result.result as { content: { text: string }[] }).content[0].text;
+          // No browser and no session in the harness, so the honest outcome is
+          // a typed transport refusal — NOT a legacy "not logged in" from Node.
+          assert.match(content, /Not authenticated|browser/i);
+          assert.equal(/OPERATION_NOT_MIGRATED/.test(content), false, "it IS migrated");
         });
       });
 

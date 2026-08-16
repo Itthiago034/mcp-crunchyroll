@@ -7,27 +7,6 @@ import {
   McpError,
 } from "@modelcontextprotocol/sdk/types.js";
 
-import {
-  searchAnime,
-  getSeriesDetails,
-  getSeasons,
-  getEpisodes,
-  getEpisodeDetails,
-  getWatchlist,
-  addToWatchlist,
-  removeFromWatchlist,
-  getWatchHistory,
-  getPlayheads,
-  updatePlayhead,
-  getContinueWatching,
-  getRecommendations,
-  getSimilar,
-  getSimulcastSeasons,
-  browse,
-  getCategories,
-  getSubscription,
-} from "./api.js";
-
 import { setLegacyAuthTransitionSink } from "./api.js";
 
 // BT4: the auth authority and its trusted producer. Composed here and nowhere
@@ -43,6 +22,14 @@ import {
 } from "./transport/browser-session-manager.js";
 import { browserProfileDir, resolveBrowserExecutable } from "./transport/browser-profile.js";
 import { DEFAULT_BROWSER_SESSION_CONFIG } from "./transport/browser-lifecycle-types.js";
+
+// BT5: the cutover. Content tools reach the browser transport through the
+// gateway, or they are refused — there is no other route from here.
+import { createOperationRegistry, PRODUCTION_OPERATIONS } from "./transport/operation-registry.js";
+import { createTransportDispatcher } from "./transport/dispatcher.js";
+import { createBrowserApiBackend } from "./transport/browser-api-backend.js";
+import { createContentGateway } from "./transport/content-gateway.js";
+import { installNodeCrunchyrollGuard } from "./transport/node-egress-guard.js";
 
 // B6-core: operation-scoped secret redaction (internal, not an MCP surface).
 import { withRedactionScope, safeErrorWithCleanStack, redactSecrets, sanitizeToolResult } from "./redact.js";
@@ -99,8 +86,9 @@ const server = new Server(
 // writer port crosses into the producer, so no other module can install
 // material, invalidate, mint a context or reach the reader side.
 //
-// BT5 holds the reader: `asReader()`, `bind()` and `runCurrent()` are not used
-// here and no content tool routes through the transport dispatcher.
+// The BT3 reader stays unused: `asReader()`, `bind()` and `runCurrent()` are
+// not called here. BT5 routes content through the dispatcher instead, with the
+// bearer taken from a snapshot of this same authority.
 
 const authAuthority = createAuthContextAuthority();
 const authProducer = createAuthProducer(createDefaultAuthProducerPorts(authAuthority.asWriter()));
@@ -171,6 +159,32 @@ const authOrchestrator = createAuthOrchestrator({
     },
   }),
 });
+
+// ── BT5 cutover ──────────────────────────────────────────────────────────────
+//
+// The Node egress assertion is installed unconditionally, at composition, for
+// the life of the process: after the cutover Crunchyroll is reachable only from
+// the managed browser, and any Node-originated attempt fails closed before a
+// socket exists. It is scoped by destination host, so a loopback fixture or any
+// unrelated destination is untouched.
+installNodeCrunchyrollGuard();
+
+/**
+ * The content boundary: registry → dispatcher → browser transport.
+ *
+ * BT3's reader is the only auth surface that crosses. It snapshots the record
+ * once per operation, registers the bearer as a secret, and performs the final
+ * generation commit check itself — so a response obtained under a session that
+ * has since changed is discarded rather than returned.
+ */
+const contentGateway = (() => {
+  const registry = createOperationRegistry(PRODUCTION_OPERATIONS);
+  const backend = createBrowserApiBackend({
+    openChannel: () => managedBrowser().openApiExecutionChannel(),
+    reader: authAuthority.asReader(),
+  });
+  return createContentGateway(createTransportDispatcher(registry, backend), registry);
+})();
 
 // BT4-D2: the legacy refresh path notifies us on a semantic invalid_grant so
 // the LIVE authority is invalidated BEFORE `clearAuthData()` runs. The sink is
@@ -473,6 +487,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // McpError throws from the switch (default case) propagate untouched to
       // the catch — ErrorCode and MethodNotFound semantics are preserved.
       const result = await (async () => {
+        // ── BT5 cutover boundary ────────────────────────────────────────────
+        //
+        // Every content tool is decided HERE, once, before any handler runs.
+        // A migrated operation goes to the browser transport; an unmigrated one
+        // is refused with OPERATION_NOT_MIGRATED. Neither outcome can reach the
+        // legacy Node client, because this boundary is the only route left and
+        // it has no legacy branch.
+        if (contentGateway.isContentTool(name)) {
+          const payload = await contentGateway.callTool(name, args as Record<string, unknown>);
+          return {
+            content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
+          };
+        }
+
         switch (name) {
         // ── Auth ──────────────────────────────────────────────────────────────
         case "crunchyroll_login": {
@@ -519,208 +547,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
-      // ── Search ────────────────────────────────────────────────────────────
-      case "crunchyroll_search": {
-        const results = await searchAnime(args.query as string, {
-          type: args.type as "series" | "movie_listing" | "" | undefined,
-          n: args.n as number | undefined,
-        });
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ count: results.length, results }, null, 2),
-            },
-          ],
-        };
-      }
-
-      // ── Series ────────────────────────────────────────────────────────────
-      case "crunchyroll_get_series": {
-        const series = await getSeriesDetails(args.series_id as string);
-        return {
-          content: [{ type: "text", text: JSON.stringify(series, null, 2) }],
-        };
-      }
-
-      case "crunchyroll_get_seasons": {
-        const seasons = await getSeasons(args.series_id as string);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ count: seasons.length, seasons }, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "crunchyroll_get_episodes": {
-        const episodes = await getEpisodes(args.season_id as string);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ count: episodes.length, episodes }, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "crunchyroll_get_episode": {
-        const episode = await getEpisodeDetails(args.episode_id as string);
-        return {
-          content: [{ type: "text", text: JSON.stringify(episode, null, 2) }],
-        };
-      }
-
-      // ── Watchlist ─────────────────────────────────────────────────────────
-      case "crunchyroll_get_watchlist": {
-        const items = await getWatchlist({
-          n: args.n as number | undefined,
-          order: args.order as "desc" | "asc" | undefined,
-        });
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ count: items.length, items }, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "crunchyroll_add_to_watchlist": {
-        const result = await addToWatchlist(args.content_id as string);
-        return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        };
-      }
-
-      case "crunchyroll_remove_from_watchlist": {
-        const result = await removeFromWatchlist(args.content_id as string);
-        return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        };
-      }
-
-      // ── History & Progress ────────────────────────────────────────────────
-      case "crunchyroll_get_history": {
-        const items = await getWatchHistory({ n: args.n as number | undefined });
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ count: items.length, items }, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "crunchyroll_continue_watching": {
-        const items = await getContinueWatching({ n: args.n as number | undefined });
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ count: items.length, items }, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "crunchyroll_get_playheads": {
-        const data = await getPlayheads(args.content_ids as string[]);
-        return {
-          content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-        };
-      }
-
-      case "crunchyroll_update_playhead": {
-        const result = await updatePlayhead(args.content_id as string, args.playhead as number);
-        return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        };
-      }
-
-      // ── Recommendations ───────────────────────────────────────────────────
-      case "crunchyroll_get_recommendations": {
-        const recs = await getRecommendations({ n: args.n as number | undefined });
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ count: recs.length, recommendations: recs }, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "crunchyroll_get_similar": {
-        const recs = await getSimilar(args.series_id as string, { n: args.n as number | undefined });
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ count: recs.length, similar: recs }, null, 2),
-            },
-          ],
-        };
-      }
-
-      // ── Simulcast ─────────────────────────────────────────────────────────
-      case "crunchyroll_get_simulcast_seasons": {
-        const seasons = await getSimulcastSeasons();
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ count: seasons.length, seasons }, null, 2),
-            },
-          ],
-        };
-      }
-
-      // ── Browse ────────────────────────────────────────────────────────────
-      case "crunchyroll_browse": {
-        const items = await browse({
-          sort_by: args.sort_by as "popularity" | "newly_added" | "updated" | "alphabetical" | undefined,
-          categories: args.categories as string | undefined,
-          seasonal_tag: args.seasonal_tag as string | undefined,
-          is_subbed: args.is_subbed as boolean | undefined,
-          is_dubbed: args.is_dubbed as boolean | undefined,
-          n: args.n as number | undefined,
-          start: args.start as number | undefined,
-        });
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ count: items.length, items }, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "crunchyroll_get_categories": {
-        const cats = await getCategories();
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ count: cats.length, categories: cats }, null, 2),
-            },
-          ],
-        };
-      }
-
-      // ── Subscription ──────────────────────────────────────────────────────
-      case "crunchyroll_get_subscription": {
-        const sub = await getSubscription();
-        return {
-          content: [{ type: "text", text: JSON.stringify(sub, null, 2) }],
-        };
-      }
+        // ── Content ─────────────────────────────────────────────────────────
+        // BT5 cutover: every content tool is decided by the gateway BEFORE
+        // this switch is reached, so no content case exists here any more and
+        // no content path can reach the legacy Node client. See the
+        // composition root's content boundary above.
 
         default:
           throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);

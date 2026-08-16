@@ -70,7 +70,14 @@ describe("BT4 composition — exactly one production authority", () => {
   test("the composition root hands out only the writer port", () => {
     const code = readFileSync(COMPOSITION_ROOT, "utf-8").replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
     assert.match(code, /asWriter\s*\(\s*\)/, "the writer must be derived");
-    assert.equal(/asReader\s*\(/.test(code), false, "BT4 must not derive the reader");
+    // RETIRED AT BT5: BT4 derived no reader because no content operation
+    // existed. The cutover derives exactly one, here, and hands on the port —
+    // never the authority.
+    assert.equal(
+      (code.match(/asReader\s*\(/g) ?? []).length,
+      1,
+      "exactly one reader is derived, in the composition root"
+    );
     // The authority object itself is never passed into a constructed component:
     // every composed factory receives the writer or a narrower port.
     assert.equal(
@@ -80,12 +87,14 @@ describe("BT4 composition — exactly one production authority", () => {
     );
   });
 
-  test("no production module uses the BT3 reader side", () => {
-    for (const file of productionSources()) {
-      if (file.path.endsWith("auth-context.ts")) continue; // BT3 defines them
-      assert.equal(/\basReader\s*\(/.test(file.code), false, `${file.path} calls asReader`);
-      assert.equal(/\brunCurrent\s*\(/.test(file.code), false, `${file.path} calls runCurrent`);
-    }
+  test("the BT3 reader side is used by the transport backend and nowhere else", () => {
+    // RETIRED AT BT5, replaced by its post-cutover shape: the reader exists to
+    // serve exactly one consumer, and no other module may reach material.
+    const consumers = productionSources()
+      .filter((f) => !f.path.endsWith("auth-context.ts"))
+      .filter((f) => /\brunCurrent\s*\(/.test(f.code))
+      .map((f) => f.path);
+    assert.deepEqual(consumers, [join(SRC_ROOT, "transport", "browser-api-backend.ts")]);
   });
 
   test("the composition root composes the accepted producer, not a second one", () => {

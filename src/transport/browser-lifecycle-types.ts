@@ -100,6 +100,53 @@ export interface ResponseInterception {
   close(): Promise<void>;
 }
 
+// ── BT5 — closed browser-context API execution ──────────────────────────────
+
+/**
+ * The single response cap for the browser API transport. It lives here, in the
+ * neutral vocabulary module, so the page-side channel and the transport that
+ * re-checks it in Node can never drift apart.
+ */
+export const MAX_API_RESPONSE_BYTES = 512 * 1024;
+
+/**
+ * One request the managed page performs on our behalf.
+ *
+ * Every field is derived by the transport from the frozen registry descriptor
+ * and the AuthContext snapshot. There is deliberately no field that could
+ * carry code, a header map, a body or a cookie: the function that runs in the
+ * page is a constant of this build, and these are its only arguments.
+ */
+export interface ApiExecutionRequest {
+  readonly url: string;
+  readonly method: "GET";
+  /** The complete Authorization header value, from the auth snapshot. */
+  readonly authorization: string;
+  readonly deadlineMs: number;
+  readonly maxBytes: number;
+}
+
+/** The bounded shape the page function returns. Never a page object. */
+export interface ApiExecutionResponse {
+  readonly status: number;
+  readonly contentType: string;
+  readonly body: string;
+  readonly truncated: boolean;
+}
+
+/**
+ * A closed execution channel on the managed Crunchyroll page.
+ *
+ * It exposes ONE verb. There is no generic evaluate, no method string, no
+ * caller-chosen function and no way to reach any other execution context.
+ */
+export interface ApiExecutionChannel {
+  /** The BT2 connection generation this channel was opened on. */
+  readonly connectionGeneration: number;
+  request(input: ApiExecutionRequest): Promise<ApiExecutionResponse>;
+  close(): Promise<void>;
+}
+
 export interface CdpConnector {
   connect(webSocketDebuggerUrl: string): Promise<CdpConnection>;
 }

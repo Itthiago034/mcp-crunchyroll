@@ -943,15 +943,9 @@ export async function browse(options: BrowseOptions = {}): Promise<BrowseItem[]>
   });
 }
 
-export async function getCategories(): Promise<Array<{ id: string; localization: { title: string } }>> {
-  const { token } = await getValidToken();
-  const params = new URLSearchParams({ locale: DEFAULT_LOCALE });
-  const data = await request<{ data: Array<{ id: string; localization: { title: string } }> }>(
-    `${API_BASE}/content/v2/discover/categories?${params}`,
-    { token }
-  );
-  return data.data ?? [];
-}
+// BT5: getCategories moved to the Operation Registry (GET_CATEGORIES) and the
+// browser transport. Its path literal left this module in the same commit the
+// descriptor entered the registry — never copy-first, remove-later.
 
 // ── Subscription ──────────────────────────────────────────────────────────────
 

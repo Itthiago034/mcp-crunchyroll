@@ -17,7 +17,11 @@ import type {
   ValidatedOwnedBrowser,
   ResponseInterception,
   PausedResponse,
+  ApiExecutionChannel,
+  ApiExecutionRequest,
+  ApiExecutionResponse,
 } from "./browser-lifecycle-types.js";
+import { MAX_API_RESPONSE_BYTES } from "./browser-lifecycle-types.js";
 import { BrowserLifecycleError } from "./browser-lifecycle-error.js";
 import { createCdpConnector } from "./cdp-client.js";
 import {
@@ -73,6 +77,15 @@ export interface BrowserSessionManager {
    * identity — it opens and closes a channel and nothing more.
    */
   openResponseInterception(urlPattern: string): Promise<ResponseInterception>;
+  /**
+   * BT5: open the closed browser-context execution channel on the managed
+   * Crunchyroll page.
+   *
+   * It exposes exactly one verb, `request`, which runs one frozen function
+   * with structured arguments. There is no evaluate, no caller-supplied
+   * function, no method string and no access to any other execution context.
+   */
+  openApiExecutionChannel(): Promise<ApiExecutionChannel>;
   onStateChange(
     listener: (from: BrowserLifecycleState, to: BrowserLifecycleState) => void,
   ): void;
@@ -81,6 +94,56 @@ export interface BrowserSessionManager {
 
 const ENDPOINT_POLL_INTERVAL_MS = 50;
 const ADOPTED_PROCESS_POLL_INTERVAL_MS = 250;
+
+// ── BT5 — the authorized browser-context execution channel ──────────────────
+
+/** The only origin a page context may have to be used, and to be talked to. */
+const CRUNCHYROLL_PAGE_ORIGIN = "https://www.crunchyroll.com";
+
+/**
+ * The ONE function that ever runs in the page, frozen as a source literal.
+ *
+ * It is never assembled, interpolated or influenced by a caller, the registry,
+ * the response or anything remote: the url, method, Authorization value and cap
+ * arrive as structured CDP arguments, which is exactly why this can be a
+ * constant. `credentials: "omit"` keeps the browser's cookie jar out of the
+ * request, and `redirect: "manual"` means a redirect is reported rather than
+ * silently followed to an unvalidated origin.
+ */
+export const CRUNCHYROLL_FETCH_FUNCTION = `
+  async function (url, method, authorization, maxChars) {
+    const response = await fetch(url, {
+      method,
+      headers: { Authorization: authorization },
+      credentials: "omit",
+      redirect: "manual",
+    });
+    const contentType = response.headers.get("content-type") || "";
+    const text = await response.text();
+    const truncated = text.length > maxChars;
+    return {
+      status: response.status,
+      contentType,
+      body: truncated ? text.slice(0, maxChars) : text,
+      truncated,
+    };
+  }
+`;
+
+/** Origin+scheme equality, parsed — never a prefix test. */
+function isCrunchyrollApiUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return (
+      parsed.protocol === "https:" &&
+      parsed.hostname === "www.crunchyroll.com" &&
+      parsed.username === "" &&
+      parsed.password === ""
+    );
+  } catch {
+    return false;
+  }
+}
 
 interface ValidatedProcessIdentity {
   readonly pid: number;
@@ -815,6 +878,154 @@ export function createBrowserSessionManager(
         },
       };
       return interception;
+    },
+
+    async openApiExecutionChannel() {
+      const active = connectionRegistration;
+      if (
+        lifecycleState !== "BROWSER_READY" ||
+        stopRequested ||
+        !active ||
+        active.generation !== activeConnectionGeneration
+      ) {
+        throw new BrowserLifecycleError("BROWSER_UNAVAILABLE");
+      }
+      const targetId = await manager.ensureManagedPage();
+      const generation = active.generation;
+
+      const attached = (await active.connection.send("Target.attachToTarget", {
+        targetId,
+        flatten: true,
+      })) as { sessionId?: unknown };
+      const sessionId = attached.sessionId;
+      if (typeof sessionId !== "string" || sessionId.length === 0) {
+        throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
+      }
+
+      // Only contexts announced on THIS page's session are ever considered, and
+      // among those only the page's own default context on the expected origin.
+      // An extension, a devtools page or an unrelated isolated world can never
+      // match, and nothing is ever "recovered" by falling back to another one.
+      let executionContextId: number | undefined;
+      active.connection.on("Runtime.executionContextCreated", (params, frameSessionId) => {
+        if (frameSessionId !== sessionId) return;
+        if (generation !== activeConnectionGeneration) return;
+        const context = (params as { context?: { id?: unknown; origin?: unknown; auxData?: unknown } })
+          ?.context;
+        if (!context || typeof context.id !== "number") return;
+        if (context.origin !== CRUNCHYROLL_PAGE_ORIGIN) return;
+        if ((context.auxData as { isDefault?: unknown } | undefined)?.isDefault !== true) return;
+        executionContextId = context.id;
+      });
+
+      await active.connection.send("Runtime.enable", undefined, sessionId);
+
+      const detach = async (): Promise<void> => {
+        try {
+          await active.connection.send("Target.detachFromTarget", { sessionId });
+        } catch {
+          // a disconnected browser is already the outcome close wants
+        }
+      };
+
+      if (executionContextId === undefined) {
+        // Fail closed: no legitimate Crunchyroll page context exists right now.
+        await detach();
+        throw new BrowserLifecycleError("BROWSER_UNAVAILABLE", "no-page-context");
+      }
+
+      let closed = false;
+      const contextId = executionContextId;
+
+      const channel: ApiExecutionChannel = {
+        connectionGeneration: generation,
+
+        async request(input: ApiExecutionRequest): Promise<ApiExecutionResponse> {
+          if (closed) throw new BrowserLifecycleError("BROWSER_UNAVAILABLE", "channel-closed");
+          // Revalidated here as well as at the transport: the page is only ever
+          // asked for the origin this build is allowed to talk to.
+          if (!isCrunchyrollApiUrl(input.url)) {
+            throw new BrowserLifecycleError("BROWSER_UNAVAILABLE", "origin");
+          }
+          if (
+            generation !== activeConnectionGeneration ||
+            lifecycleState !== "BROWSER_READY" ||
+            stopRequested
+          ) {
+            throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
+          }
+
+          let timer: { cancel(): void } | undefined;
+          const deadline = new Promise<never>((_resolve, reject) => {
+            timer = seams.clock.setTimeout(
+              () => reject(new BrowserLifecycleError("BROWSER_UNAVAILABLE", "deadline")),
+              input.deadlineMs
+            );
+          });
+
+          let raw: unknown;
+          try {
+            raw = await Promise.race([
+              active.connection.send(
+                "Runtime.callFunctionOn",
+                {
+                  functionDeclaration: CRUNCHYROLL_FETCH_FUNCTION,
+                  executionContextId: contextId,
+                  // The variable parts cross as STRUCTURED arguments. They are
+                  // never concatenated into the function source.
+                  arguments: [
+                    { value: input.url },
+                    { value: input.method },
+                    { value: input.authorization },
+                    { value: input.maxBytes },
+                  ],
+                  awaitPromise: true,
+                  returnByValue: true,
+                  silent: true,
+                  userGesture: false,
+                },
+                sessionId
+              ),
+              deadline,
+            ]);
+          } finally {
+            timer?.cancel();
+          }
+
+          const frame = raw as {
+            result?: { value?: unknown };
+            exceptionDetails?: unknown;
+          };
+          if (frame.exceptionDetails !== undefined) {
+            // The page threw. Its text may quote a URL or a header, so nothing
+            // from it is carried out — only the structural fact.
+            throw new BrowserLifecycleError("BROWSER_UNAVAILABLE", "page-exception");
+          }
+          const value = frame.result?.value as Partial<ApiExecutionResponse> | undefined;
+          if (
+            !value ||
+            typeof value.status !== "number" ||
+            typeof value.contentType !== "string" ||
+            typeof value.body !== "string" ||
+            typeof value.truncated !== "boolean"
+          ) {
+            throw new BrowserLifecycleError("BROWSER_UNAVAILABLE", "malformed-result");
+          }
+          return Object.freeze({
+            status: value.status,
+            contentType: value.contentType,
+            body: value.body,
+            truncated: value.truncated,
+          });
+        },
+
+        async close() {
+          if (closed) return;
+          closed = true;
+          await detach();
+        },
+      };
+      return channel;
     },
     onStateChange(listener) { stateListeners.add(listener); },
     onLifecycleEvent(listener) { lifecycleListeners.add(listener); },

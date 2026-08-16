@@ -4,7 +4,7 @@
 // Nothing here is wired into an MCP tool in BT1.
 
 import type {
-  AuthDerivedParamSpec, CallerParams, OperationDescriptor, ParamSpec, ResolvedCall,
+  AuthDerivedParamSpec, CallerParams, OperationDescriptor, OperationId, ParamSpec, ResolvedCall,
 } from "./types.js";
 import { TransportError } from "./transport-error.js";
 
@@ -121,12 +121,40 @@ export function resolveCall(
 }
 
 /**
- * The production operation table. INTENTIONALLY EMPTY IN BT1.
+ * The production operation table.
  *
- * Registry MACHINERY exists in BT1; production endpoint OWNERSHIP is not
- * transferred, because no production descriptor exists yet. At each later
- * migration the path literal leaves src/api.ts AND the descriptor enters here
- * in the SAME auditable stage — never copy-first, remove-later across a closed
- * stage boundary. Catalog at BT6, account at BT7.
+ * Registry MACHINERY arrived in BT1; endpoint OWNERSHIP transfers one operation
+ * at a time. At each migration the path literal leaves `src/api.ts` AND the
+ * descriptor enters here in the SAME auditable stage — never copy-first,
+ * remove-later across a closed stage boundary.
+ *
+ * BT5 (cutover) migrates `GET_CATEGORIES` and nothing else. The remaining
+ * catalog reads follow at BT6, account reads at BT7, mutations at BT8. Every
+ * content operation absent from this table is refused with
+ * `OPERATION_NOT_MIGRATED` and can no longer reach Node.
+ *
+ * `GET_CATEGORIES` declares no caller params — the tool takes none — and no
+ * auth-derived params: it needs a bearer, not an identity.
+ *
+ * DEVIATION, DECLARED: the external ruling labelled this operation
+ * `scope: PUBLIC` while stating that PUBLIC does not mean anonymous and that a
+ * bearer is still required. In BT3's closed vocabulary those two things cannot
+ * both be true: `bind()` answers a PUBLIC descriptor with no context and no
+ * material at all, so a PUBLIC operation is unable to carry a bearer. ACCOUNT
+ * with ZERO auth-derived params is the shape that means exactly what the ruling
+ * described — a live AuthContext is required, no identity is resolved, and
+ * ACCOUNT_READY suffices because nothing here needs a profile id. Choosing
+ * PUBLIC instead would have meant reading material outside BT3's reader and
+ * duplicating the §13A commit check, which is worse. Submitted for review.
  */
-export const PRODUCTION_OPERATIONS: readonly OperationDescriptor[] = Object.freeze([]);
+export const PRODUCTION_OPERATIONS: readonly OperationDescriptor[] = Object.freeze([
+  Object.freeze({
+    id: "GET_CATEGORIES" as OperationId,
+    method: "GET",
+    pathTemplate: "/content/v2/discover/categories?locale=en-US",
+    callerParams: Object.freeze({}),
+    authDerivedParams: Object.freeze({}),
+    scope: "ACCOUNT",
+    mutation: false,
+  }) as OperationDescriptor,
+]);

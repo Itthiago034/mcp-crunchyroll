@@ -1241,19 +1241,24 @@ describe("BT4 closure — T/V/W: no capability BT4 must not have", () => {
     assert.deepEqual([...distinct].sort(), ["commit", "currentRevision", "invalidate"]);
   });
 
-  test("W: the content transport is uncut and the registry is still empty", () => {
-    assert.deepEqual(PRODUCTION_OPERATIONS, []);
+  test("W: the producer stays out of the content path the cutover opened", () => {
+    // RETIRED AT BT5: this used to assert the registry was empty and the entry
+    // point had no dispatcher, registry or backend — the pre-cutover shape.
+    // BT5 is the cutover, so what must remain true is narrower and about the
+    // PRODUCER: it gained no content role when content started flowing.
+    assert.deepEqual(PRODUCTION_OPERATIONS.map((d) => d.id), ["GET_CATEGORIES"]);
     assert.equal(Object.isFrozen(PRODUCTION_OPERATIONS), true);
-    // RETIRED AT BT4 COMPLETION: this used to assert that src/index.ts does not
-    // reference the producer at all. That encoded the unwired foundation stage,
-    // not an invariant — BT4-D1 is exactly the wiring that makes it false. What
-    // must remain true after wiring is that the CONTENT path is untouched.
     const entry = readFileSync(join(BT4_REPO_ROOT, "src/index.ts"), "utf-8");
-    assert.equal(entry.includes('from "./api.js"'), true, "content tools keep their legacy path");
-    assert.equal(/from\s+"[^"]*dispatcher\.js"/.test(entry), false, "no dispatcher at the boundary");
-    assert.equal(/from\s+"[^"]*operation-registry\.js"/.test(entry), false, "no registry at the boundary");
-    assert.equal(/executeResolved|TransportBackend/.test(entry), false, "no backend cutover");
-    assert.equal(/auth-producer\.js/.test(entry), true, "BT4-D1 is resolved: the producer is wired");
+    assert.equal(/from\s+"[^"]*dispatcher\.js"/.test(entry), true, "content routes through the dispatcher");
+    assert.equal(/auth-producer\.js/.test(entry), true, "the producer is still wired for auth");
+    // The producer itself never learned about operations, transports or content.
+    for (const forbidden of ["executeResolved", "TransportBackend", "dispatcher", "content-gateway"]) {
+      assert.equal(
+        PRODUCER_CODE.includes(forbidden),
+        false,
+        `the producer must not reference ${forbidden}`
+      );
+    }
   });
 
   test("U: the public tool contract is still exactly 21 unchanged names", () => {

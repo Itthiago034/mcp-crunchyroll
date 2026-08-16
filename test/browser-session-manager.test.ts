@@ -126,12 +126,16 @@ describe("BT2 session manager — start and stop", () => {
     //
     // BT4-R1 adds `connectionGeneration`: read-only evidence of connection
     // identity. It answers with a number and grants no capability at all.
+    // BT5 adds `openApiExecutionChannel`: one more CLOSED channel, not a
+    // generic surface. It runs one frozen function with structured arguments
+    // on the managed Crunchyroll page and exposes no method string.
     assert.deepEqual(Object.keys(manager).sort(), [
       "connectionGeneration",
       "ensureManagedPage",
       "managedPageId",
       "onLifecycleEvent",
       "onStateChange",
+      "openApiExecutionChannel",
       "openResponseInterception",
       "restart",
       "start",

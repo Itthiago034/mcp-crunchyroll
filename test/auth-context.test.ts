@@ -1490,38 +1490,68 @@ describe("BT4 architecture — the authority is wired, and only as intended", ()
     }
   });
 
-  test("5. no production module calls bind() or runCurrent()", () => {
+  // RETIRED AT BT5 (cutover). Assertions 5, 6 and 8 said the BT3 READER was
+  // unused and the authority module was imported by the composition root only.
+  // They encoded "no content operation exists yet", not an invariant: BT5 is
+  // the stage where a content operation takes a bearer, and BT3 built bind()/
+  // runCurrent() for exactly that. What must remain true once the reader IS
+  // used is that it is used in ONE place, by the transport backend, and that
+  // no module reaches the material any other way.
+  //
+  // Recorded RED before replacement: with the cutover wired, 5, 6, 7 and 8
+  // failed, and only those four in this file.
+
+  test("5/6/8. the BT3 reader is used by exactly one production module", () => {
+    const users = sources()
+      .filter((f) => f.path !== AUTH_CONTEXT_SOURCE_PATH)
+      .filter((f) => /\brunCurrent\s*\(|\bbind\s*\(/.test(f.code))
+      .map((f) => f.path);
+    assert.deepEqual(users, [join(SRC, "transport", "browser-api-backend.ts")]);
+
+    // The reader is DERIVED only where the authority lives, and handed on.
+    const derivers = sources()
+      .filter((f) => f.path !== AUTH_CONTEXT_SOURCE_PATH)
+      .filter((f) => /asReader\s*\(/.test(f.code))
+      .map((f) => f.path);
+    assert.deepEqual(derivers, [COMPOSITION_ROOT]);
+
+    // And the authority module is imported by those two modules only.
+    const importers = sources()
+      .filter((f) => f.path !== AUTH_CONTEXT_SOURCE_PATH)
+      .filter((f) => /from\s+"[^"]*auth-context\.js"/.test(f.code))
+      .map((f) => f.path)
+      .sort();
+    assert.deepEqual(importers, [COMPOSITION_ROOT, join(SRC, "transport", "browser-api-backend.ts")].sort());
+  });
+
+  test("5/6/8. no module reads auth material outside the reader", () => {
     for (const file of sources()) {
       if (file.path === AUTH_CONTEXT_SOURCE_PATH) continue;
-      assert.equal(/\brunCurrent\s*\(/.test(file.code), false, `${file.path} calls runCurrent`);
-      assert.equal(/\.bind\s*\(/.test(file.code), false, `${file.path} calls bind`);
+      // inspectForTest is the only other door to a record, and it is test-only.
+      assert.equal(/inspectForTest\s*\(/.test(file.code), false, `${file.path}`);
     }
   });
 
-  test("6. no production module derives the BT3 reader", () => {
-    for (const file of sources()) {
-      if (file.path === AUTH_CONTEXT_SOURCE_PATH) continue;
-      assert.equal(/asReader\s*\(/.test(file.code), false, `${file.path} derives a reader`);
-    }
-  });
-
-  test("7. the content path is uncut: registry empty, dispatcher unreachable from the entry point", () => {
-    assert.deepEqual(PRODUCTION_OPERATIONS, []);
+  test("7. the content path is CUT: exactly one migrated operation, one route", () => {
+    // RETIRED AT BT5: this used to assert the registry was empty and the
+    // dispatcher unreachable. That was the pre-cutover condition; BT5 is the
+    // cutover. What replaces it is the shape of the cut itself.
+    assert.deepEqual(
+      PRODUCTION_OPERATIONS.map((d) => d.id),
+      ["GET_CATEGORIES"],
+      "BT5 migrates exactly one operation"
+    );
     const reachable = importClosure(COMPOSITION_ROOT);
     assert.equal(
       reachable.has(join(SRC, "transport", "dispatcher.ts")),
-      false,
-      "no content tool may route through the transport dispatcher in BT4"
+      true,
+      "content now routes through the transport dispatcher"
     );
-  });
-
-  test("8. the authority module is imported only by the composition root", () => {
-    const importers: string[] = [];
-    for (const file of sources()) {
-      if (file.path === AUTH_CONTEXT_SOURCE_PATH) continue;
-      if (/from\s+"[^"]*auth-context\.js"/.test(file.code)) importers.push(file.path);
-    }
-    assert.deepEqual(importers, [COMPOSITION_ROOT]);
+    assert.equal(
+      reachable.has(join(SRC, "transport", "browser-api-backend.ts")),
+      true,
+      "and through the browser transport backend"
+    );
   });
 
   test("9. no other module can manufacture a second production authority", () => {
@@ -1558,8 +1588,9 @@ describe("BT4 architecture — the authority is wired, and only as intended", ()
 });
 
 describe("BT3 closure — preserved scope proofs", () => {
-  test("PRODUCTION_OPERATIONS remains empty and frozen", () => {
-    assert.deepEqual(PRODUCTION_OPERATIONS, []);
+  test("PRODUCTION_OPERATIONS holds exactly the BT5 migration and stays frozen", () => {
+    // RETIRED AT BT5: "remains empty" was the pre-cutover condition.
+    assert.deepEqual(PRODUCTION_OPERATIONS.map((d) => d.id), ["GET_CATEGORIES"]);
     assert.equal(Object.isFrozen(PRODUCTION_OPERATIONS), true);
   });
 
