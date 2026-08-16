@@ -697,3 +697,235 @@ describe("BT4 refresh — one commit, or none at all", () => {
     assert.equal(h.authority.inspectForTest().accountId, ACCOUNT_SENTINEL);
   });
 });
+
+// ── Logout, status, bootstrap, shutdown ─────────────────────────────────────
+
+describe("BT4 logout — authority first, persistence second, layers separate", () => {
+  test("N: the authority is invalidated BEFORE any filesystem work", async () => {
+    const h = await established(harness());
+
+    const outcome = await h.producer.logout();
+
+    assert.deepEqual(h.events, ["invalidate:LOGOUT", "clear"]);
+    assert.equal(outcome.authority, "INVALIDATED");
+    assert.equal(h.authority.diagnostics().availability, "UNAVAILABLE");
+    assert.equal(h.authority.diagnostics().cause, "LOGOUT");
+  });
+
+  test("N: the structured persistence result is preserved verbatim", async () => {
+    const cases: LogoutResult[] = [
+      CLEARED,
+      { state: "ALREADY_ABSENT", tokens: { state: "ALREADY_ABSENT" }, session: { state: "ALREADY_ABSENT" } },
+      {
+        state: "PARTIAL",
+        tokens: { state: "REMOVED" },
+        session: { state: "FAILED", reason: "INSECURE_OWNER" },
+      },
+      {
+        state: "FAILED",
+        tokens: { state: "FAILED", reason: "FILESYSTEM_ERROR" },
+        session: { state: "FAILED", reason: "INSECURE_DIR" },
+      },
+    ];
+    for (const persistence of cases) {
+      const h = await established(harness());
+      h.storage.setClearResult(persistence);
+      const outcome = await h.producer.logout();
+      assert.deepEqual(outcome.persistence, persistence, "no second outcome matrix");
+      assert.equal(outcome.persistence.tokens.reason, persistence.tokens.reason);
+      assert.equal(outcome.persistence.session.reason, persistence.session.reason);
+    }
+  });
+
+  test("O: a partial or failed clear never restores the authority", async () => {
+    for (const state of ["PARTIAL", "FAILED"] as const) {
+      const h = await established(harness());
+      h.storage.setClearResult({
+        state,
+        tokens: { state: "FAILED", reason: "INSECURE_DIR" },
+        session: { state: "FAILED", reason: "INSECURE_DIR" },
+      });
+
+      const outcome = await h.producer.logout();
+
+      assert.equal(outcome.persistence.state, state);
+      assert.equal(h.authority.diagnostics().availability, "UNAVAILABLE");
+      assert.throws(() => h.authority.acquire());
+    }
+  });
+
+  test("O: logout on a terminal authority still performs the cleanup", async () => {
+    const terminal = createAuthContextAuthority({
+      epochFactory: () => EPOCH,
+      now: () => T0,
+      initialGeneration: Number.MAX_SAFE_INTEGER,
+    });
+    const events: string[] = [];
+    const writer = recordingWriter(terminal, events);
+    const storage = storageFake(tokens(), events);
+    const producer = createAuthProducer({
+      writer: writer.port,
+      storage: storage.port,
+      legacy: legacyFake().port,
+    });
+
+    const outcome = await producer.logout();
+
+    assert.equal(outcome.authority, "ALREADY_TERMINAL");
+    assert.equal(storage.calls.clear, 1, "cleanup must not be skipped");
+    assert.equal(terminal.diagnostics().availability, "UNAVAILABLE");
+  });
+});
+
+describe("BT4 status — strictly read-only", () => {
+  test("P: status never touches the writer and never moves the generation", async () => {
+    const h = await established(harness());
+    const before = h.authority.currentRevision().generation;
+    h.legacy.setStatus({ logged_in: true, account_id: ACCOUNT_SENTINEL, token_expires_at: "2026-01-01T00:00:00.000Z" });
+
+    const status = await h.producer.status();
+
+    assert.deepEqual(h.writer.calls, [], "not even currentRevision may be called");
+    assert.equal(h.authority.currentRevision().generation, before);
+    assert.equal(h.authority.diagnostics().availability, "READY");
+    assert.deepEqual(status, {
+      logged_in: true,
+      account_id: ACCOUNT_SENTINEL,
+      token_expires_at: "2026-01-01T00:00:00.000Z",
+    });
+  });
+
+  test("P: status neither refreshes nor mutates storage", async () => {
+    const h = await established(harness());
+    await h.producer.status();
+    await h.producer.status();
+    assert.equal(h.legacy.calls.refresh, 0);
+    assert.equal(h.storage.calls.clear, 0);
+    assert.deepEqual(h.events, []);
+    assert.equal(h.authority.currentRevision().generation, 1);
+  });
+
+  test("P: status adds no field of its own to the public shape", async () => {
+    const h = harness();
+    h.legacy.setStatus({ logged_in: false });
+    const status = await h.producer.status();
+    assert.deepEqual(Object.keys(status), ["logged_in"]);
+    const rendered = JSON.stringify(status);
+    assert.equal(rendered.includes(EPOCH), false);
+    assert.equal(rendered.includes("generation"), false);
+    assert.equal(rendered.includes("epoch"), false);
+    assert.equal(rendered.includes("context"), false);
+  });
+});
+
+describe("BT4 bootstrap — explicit, never implicit trust", () => {
+  test("D: valid persisted material establishes through the CAS", async () => {
+    const h = harness();
+    h.storage.set(tokens({ profile_id: PROFILE_SENTINEL }));
+
+    const outcome = await h.producer.bootstrapFromStorage();
+
+    assert.deepEqual(outcome, { kind: "ESTABLISHED" });
+    assert.equal(h.authority.currentRevision().generation, 1);
+    assert.equal(h.authority.inspectForTest().accountId, ACCOUNT_SENTINEL);
+    assert.equal(h.authority.inspectForTest().profileId, PROFILE_SENTINEL);
+    assert.deepEqual(h.writer.calls, ["currentRevision", "commit:ESTABLISH"]);
+  });
+
+  test("E: missing material leaves the process unavailable", async () => {
+    const h = harness();
+    h.storage.set(null);
+
+    const outcome = await h.producer.bootstrapFromStorage();
+
+    assert.deepEqual(outcome, { kind: "NO_MATERIAL" });
+    assert.equal(h.authority.diagnostics().availability, "UNAVAILABLE");
+    assert.equal(h.writer.calls.some((c) => c.startsWith("commit")), false);
+  });
+
+  test("F: corrupt or insecure storage stays unavailable, never 'logged out'", async () => {
+    for (const state of ["CORRUPT_SESSION", "INSECURE_DIR", "INSECURE_OWNER", "FILESYSTEM_ERROR"]) {
+      const h = harness();
+      const error = Object.assign(new Error("storage refused"), { name: "StorageError", state });
+      h.storage.failLoad(error);
+
+      const outcome = await h.producer.bootstrapFromStorage();
+
+      assert.deepEqual(outcome, { kind: "STORAGE_UNUSABLE" }, state);
+      assert.equal(h.authority.diagnostics().availability, "UNAVAILABLE");
+      assert.equal(h.writer.calls.some((c) => c.startsWith("commit")), false);
+    }
+  });
+
+  test("expired persisted material is not installed", async () => {
+    const h = harness();
+    h.storage.set(tokens({ expires_at: T0 - 1 }));
+
+    const outcome = await h.producer.bootstrapFromStorage();
+
+    assert.deepEqual(outcome, { kind: "EXPIRED" });
+    assert.equal(h.authority.diagnostics().availability, "UNAVAILABLE");
+    assert.equal(h.writer.calls.some((c) => c.startsWith("commit")), false);
+  });
+
+  test("a bootstrap rejected by the authority is reported, not retried", async () => {
+    const terminal = createAuthContextAuthority({
+      epochFactory: () => EPOCH,
+      now: () => T0,
+      initialGeneration: Number.MAX_SAFE_INTEGER,
+    });
+    const writer = recordingWriter(terminal);
+    const producer = createAuthProducer({
+      writer: writer.port,
+      storage: storageFake(tokens()).port,
+      legacy: legacyFake().port,
+    });
+
+    const outcome = await producer.bootstrapFromStorage();
+
+    assert.deepEqual(outcome, { kind: "AUTHORITY_REJECTED", reason: "UNAVAILABLE" });
+    assert.equal(writer.calls.filter((c) => c.startsWith("commit")).length, 1);
+  });
+
+  test("no epoch or generation is ever written back to storage", async () => {
+    const h = harness();
+    h.storage.set(tokens());
+    await h.producer.bootstrapFromStorage();
+    // The storage port exposes no save at all: BT4 cannot change the on-disk
+    // format even by mistake.
+    assert.deepEqual(Object.keys(h.storage.port).sort(), [
+      "clearAuthData",
+      "isTokenExpired",
+      "loadTokens",
+    ]);
+  });
+});
+
+describe("BT4 shutdown — invalidate without destroying credentials", () => {
+  test("shutdown invalidates the live authority and performs no filesystem work", async () => {
+    const h = await established(harness());
+
+    const outcome = h.producer.invalidateForShutdown();
+
+    assert.deepEqual(outcome, { authority: "INVALIDATED" });
+    assert.deepEqual(h.events, ["invalidate:PROCESS_SHUTDOWN"]);
+    assert.equal(h.storage.calls.clear, 0, "shutdown must not clear stored credentials");
+    assert.equal(h.authority.diagnostics().availability, "UNAVAILABLE");
+    assert.equal(h.authority.diagnostics().cause, "PROCESS_SHUTDOWN");
+  });
+
+  test("shutdown on a terminal authority is reported, never thrown", async () => {
+    const terminal = createAuthContextAuthority({
+      epochFactory: () => EPOCH,
+      now: () => T0,
+      initialGeneration: Number.MAX_SAFE_INTEGER,
+    });
+    const producer = createAuthProducer({
+      writer: recordingWriter(terminal).port,
+      storage: storageFake().port,
+      legacy: legacyFake().port,
+    });
+
+    assert.deepEqual(producer.invalidateForShutdown(), { authority: "ALREADY_TERMINAL" });
+  });
+});

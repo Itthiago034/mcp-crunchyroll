@@ -106,9 +106,37 @@ export type RefreshOutcome =
   | { readonly kind: "TRANSIENT" }
   | { readonly kind: "FAILED" };
 
+export type AuthorityInvalidation = "INVALIDATED" | "ALREADY_TERMINAL";
+
+/**
+ * Logout keeps the two layers separate on purpose: live authority invalidation
+ * and hardened persistence cleanup are different failure domains, and the
+ * structured `LogoutResult` is passed through verbatim rather than collapsed
+ * into a generic auth error.
+ */
+export interface LogoutOutcome {
+  readonly authority: AuthorityInvalidation;
+  readonly persistence: LogoutResult;
+}
+
+export interface ShutdownOutcome {
+  readonly authority: AuthorityInvalidation;
+}
+
+export type BootstrapOutcome =
+  | { readonly kind: "ESTABLISHED" }
+  | { readonly kind: "NO_MATERIAL" }
+  | { readonly kind: "EXPIRED" }
+  | { readonly kind: "STORAGE_UNUSABLE" }
+  | { readonly kind: "AUTHORITY_REJECTED"; readonly reason: AuthorityRejection };
+
 export interface AuthProducer {
   establishFromLogin(email: string, password: string): Promise<LoginOutcome>;
   refresh(): Promise<RefreshOutcome>;
+  logout(): Promise<LogoutOutcome>;
+  bootstrapFromStorage(): Promise<BootstrapOutcome>;
+  invalidateForShutdown(): ShutdownOutcome;
+  status(): Promise<AuthStatusShape>;
 }
 
 // ── Validated material ──────────────────────────────────────────────────────
@@ -301,6 +329,86 @@ class AuthProducerImpl implements AuthProducer {
     }
     await this.ports.storage.clearAuthData();
     return Object.freeze({ kind: "REAUTH_REQUIRED" as const });
+  }
+
+  /**
+   * Logout (design §9). The live authority is invalidated synchronously, before
+   * any filesystem work, so a slow, partial or failing clear can never leave an
+   * old context usable — and can never restore one either.
+   *
+   * The structured `LogoutResult` is returned verbatim: BT4 owns no second
+   * outcome matrix and never collapses CLEARED / ALREADY_ABSENT / PARTIAL /
+   * FAILED or a per-artifact reason into a generic auth error.
+   */
+  async logout(): Promise<LogoutOutcome> {
+    const authority = this.invalidateNow("LOGOUT");
+    const persistence = await this.ports.storage.clearAuthData();
+    return Object.freeze({ authority, persistence });
+  }
+
+  /**
+   * Startup bootstrap (design §11). Nothing is trusted merely because a file
+   * exists: the material is loaded and validated OUTSIDE the authority, the
+   * revision is captured, and installation is an explicit ESTABLISH through the
+   * same compare-and-swap every other producer transition uses.
+   */
+  async bootstrapFromStorage(): Promise<BootstrapOutcome> {
+    const expected = this.ports.writer.currentRevision();
+    const material = await this.readValidatedMaterial();
+
+    switch (material.kind) {
+      case "ABSENT":
+        return Object.freeze({ kind: "NO_MATERIAL" as const });
+      case "EXPIRED":
+        return Object.freeze({ kind: "EXPIRED" as const });
+      case "INVALID":
+      case "UNUSABLE":
+        // A corrupt, insecure or foreign-owned store stays unusable. It is
+        // never silently downgraded into "logged out", which would let a
+        // planted or broken file hide the real state.
+        return Object.freeze({ kind: "STORAGE_UNUSABLE" as const });
+      default:
+        break;
+    }
+
+    const rejection = this.commit(expected, "ESTABLISH", material.candidate);
+    return rejection === null
+      ? Object.freeze({ kind: "ESTABLISHED" as const })
+      : Object.freeze({ kind: "AUTHORITY_REJECTED" as const, reason: rejection });
+  }
+
+  /**
+   * Process shutdown (design §14). Invalidates the live authority and does NOT
+   * touch persistence: shutting down is not logging out, and destroying stored
+   * credentials on exit would be a data-loss bug, not a security measure.
+   */
+  invalidateForShutdown(): ShutdownOutcome {
+    return Object.freeze({ authority: this.invalidateNow("PROCESS_SHUTDOWN") });
+  }
+
+  /**
+   * Status (design §10). Deliberately never touches the writer — not even
+   * `currentRevision`. Not calling the authority at all is a stronger
+   * read-only proof than calling it carefully, and it guarantees that no
+   * epoch, generation or context can reach the public result.
+   */
+  async status(): Promise<AuthStatusShape> {
+    return this.ports.legacy.getStatus();
+  }
+
+  /** Invalidate now, reporting a terminal authority instead of throwing. */
+  private invalidateNow(
+    cause: "LOGOUT" | "INVALID_GRANT" | "AUTH_MATERIAL_LOST" | "PROCESS_SHUTDOWN"
+  ): AuthorityInvalidation {
+    try {
+      this.ports.writer.invalidate(cause);
+      return "INVALIDATED";
+    } catch {
+      // An exhausted authority is already permanently unavailable, which is
+      // exactly the state these callers want; the caller's own cleanup still
+      // has to run.
+      return "ALREADY_TERMINAL";
+    }
   }
 
   /** Commit and translate. No retry, ever — a rejection is a result. */
