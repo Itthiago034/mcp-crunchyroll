@@ -8,6 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import type {
   BrowserLifecycleState,
@@ -145,6 +146,12 @@ export class FakeSpawner implements ProcessSpawner {
     this.launches.push(handle);
     if (this.options.failLaunch) throw new Error("synthetic launch failure");
     this.inspector.registerSpawn(handle.pid, this.profileDir, executable);
+    if (this.options.runtimeCmdlineRewritten) {
+      this.inspector.setArgv(handle.pid, [args.join(" ")]);
+    }
+    // The fake browser, not BT2, owns ProcessSingleton creation/replacement.
+    rmSync(join(this.profileDir, "SingletonLock"), { recursive: true, force: true });
+    symlinkSync(`${hostname()}-${handle.pid}`, join(this.profileDir, "SingletonLock"));
     handle.onExit(() => {
       this.inspector.setAlive(handle.pid, false);
       this.inspector.setStartTime(handle.pid, null);
@@ -333,6 +340,7 @@ export interface WireFakeOptions {
   existingOwnedBrowser?: string;
   adoptedExitsOnClose?: boolean;
   distinctRuntimeExecutable?: boolean;
+  runtimeCmdlineRewritten?: boolean;
 }
 
 export function wireFakes(options: WireFakeOptions = {}) {
@@ -364,37 +372,18 @@ export function wireFakes(options: WireFakeOptions = {}) {
     let recordLauncherExecutable = canonicalExecutable;
     let recordRuntimeExecutable = processInspector.canonicalRuntimeExecutable;
     let recordStartTime = 1_234_567;
-    processInspector.setArgv(
-      processInspector.adoptedPid,
-      [executablePath, `--user-data-dir=${canonicalProfile}`],
-    );
+    processInspector.setArgv(processInspector.adoptedPid, [
+      executablePath,
+      `--user-data-dir=${canonicalProfile}`,
+    ]);
     if (existing === "stale-pid") {
       processInspector.setAlive(processInspector.adoptedPid, false);
       processInspector.setStartTime(processInspector.adoptedPid, null);
     } else if (existing === "record-profile-mismatch") {
       recordProfile = realpathSync(otherProfile);
-    } else if (existing === "cmdline-profile-mismatch") {
-      processInspector.setArgv(
-        processInspector.adoptedPid,
-        [executablePath, `--user-data-dir=${realpathSync(otherProfile)}`],
-      );
-    } else if (existing === "cmdline-profile-substring") {
-      const substringProfile = `${profileDir}-suffix`;
-      mkdirSync(substringProfile);
-      chmodSync(substringProfile, 0o700);
-      processInspector.setArgv(
-        processInspector.adoptedPid,
-        [executablePath, `--user-data-dir=${realpathSync(substringProfile)}`],
-      );
-    } else if (existing === "cmdline-missing-profile") {
-      processInspector.setArgv(processInspector.adoptedPid, [executablePath]);
-    } else if (existing === "cmdline-unavailable") {
-      processInspector.setArgv(processInspector.adoptedPid, null);
-    } else if (existing === "cmdline-duplicate-profile") {
+    } else if (existing === "singleton-valid-rewritten-cmdline") {
       processInspector.setArgv(processInspector.adoptedPid, [
-        executablePath,
-        `--user-data-dir=${canonicalProfile}`,
-        `--user-data-dir=${canonicalProfile}`,
+        `${executablePath} --user-data-dir=${canonicalProfile}`,
       ]);
     } else if (existing === "canonical-executable-mismatch") {
       processInspector.setExecutable(processInspector.adoptedPid, "/different/browser");
@@ -419,6 +408,18 @@ export function wireFakes(options: WireFakeOptions = {}) {
         ? "malformed\n"
         : "45000\n/devtools/browser/adopted\n",
     );
+    const singletonPath = join(profileDir, "SingletonLock");
+    if (existing === "singleton-regular-file") {
+      writeFileSync(singletonPath, `${hostname()}-${processInspector.adoptedPid}`);
+    } else if (existing !== "singleton-missing") {
+      let singletonTarget = `${hostname()}-${processInspector.adoptedPid}`;
+      if (existing === "singleton-wrong-hostname") {
+        singletonTarget = `other-host-${processInspector.adoptedPid}`;
+      } else if (existing === "singleton-wrong-pid") {
+        singletonTarget = `${hostname()}-${processInspector.adoptedPid + 1}`;
+      }
+      symlinkSync(singletonTarget, singletonPath);
+    }
   }
   const spawner = new FakeSpawner(profileDir, options, processInspector);
   const clock = new FakeClock();

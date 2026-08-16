@@ -154,6 +154,33 @@ export function ownershipRecordPath(dir = browserProfileDir()): string {
   return join(dir, ".mcp-browser-owner.json");
 }
 
+export interface ProfileSingletonReader {
+  lstat(path: string): { isSymbolicLink(): boolean };
+  readlink(path: string): string;
+}
+
+const REAL_PROFILE_SINGLETON_READER: ProfileSingletonReader = {
+  lstat: (path) => lstatSync(path),
+  readlink: (path) => readlinkSync(path, "utf8"),
+};
+
+/** Read-only ProcessSingleton evidence; the marker is owned by Chromium. */
+export function profileSingletonMatchesPid(
+  canonicalProfile: string,
+  pid: number,
+  localHostname: string,
+  reader: ProfileSingletonReader = REAL_PROFILE_SINGLETON_READER,
+): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0 || localHostname.length === 0) return false;
+  const lockPath = join(canonicalProfile, "SingletonLock");
+  try {
+    if (!reader.lstat(lockPath).isSymbolicLink()) return false;
+    return reader.readlink(lockPath) === `${localHostname}-${pid}`;
+  } catch {
+    return false;
+  }
+}
+
 function ownershipInvalid(detail: string): BrowserLifecycleError {
   return new BrowserLifecycleError("OWNERSHIP_INVALID", detail);
 }
@@ -272,15 +299,6 @@ export function createProcessIdentityInspector(): ProcessIdentityInspector {
       catch { return null; }
     },
     startTimeTicks: readStartTimeTicks,
-    argv(pid) {
-      try {
-        const parts = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0");
-        if (parts.at(-1) === "") parts.pop();
-        return parts.length > 0 && parts.every((part) => part.length > 0) ? parts : null;
-      } catch {
-        return null;
-      }
-    },
     canonicalPath(path) {
       try { return realpathSync(path); }
       catch { return null; }

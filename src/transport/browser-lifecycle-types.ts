@@ -59,7 +59,6 @@ export interface ProcessIdentityInspector {
   isAlive(pid: number): boolean;
   executable(pid: number): string | null;
   startTimeTicks(pid: number): number | null;
-  argv(pid: number): readonly string[] | null;
   canonicalPath(path: string): string | null;
 }
 

@@ -138,7 +138,7 @@ describe("BT2 session manager — start and stop", () => {
     assert.equal(typeof seams.clock.sleep, "function");
     assert.equal(typeof seams.clock.setTimeout, "function");
     assert.equal(typeof seams.connector.connect, "function");
-    assert.equal(typeof seams.processInspector.argv, "function");
+    assert.equal("argv" in seams.processInspector, false);
     assert.equal(typeof seams.processInspector.startTimeTicks, "function");
   });
 });
@@ -436,14 +436,28 @@ describe("BT2 session manager — owned-browser reuse and orphans", () => {
     assert.equal(manager.managedPageId(), undefined, "never adopts an orphan tab");
   });
 
+  test("a valid SingletonLock adopts even when Brave rewrites cmdline boundaries", async () => {
+    const { manager, spawner } = wireFakes({
+      existingOwnedBrowser: "singleton-valid-rewritten-cmdline",
+    });
+    await manager.start();
+    assert.equal(manager.state(), "BROWSER_READY");
+    assert.equal(spawner.launches.length, 0, "exact profile-to-retained-pid binding adopts");
+  });
+
+  test("a fresh launch accepts an exact SingletonLock without runtime argv boundaries", async () => {
+    const { manager } = wireFakes({ runtimeCmdlineRewritten: true });
+    await manager.start();
+    assert.equal(manager.state(), "BROWSER_READY");
+  });
+
   for (const [label, fixture] of [
     ["stale PID", "stale-pid"],
     ["record profile mismatch", "record-profile-mismatch"],
-    ["live cmdline profile mismatch", "cmdline-profile-mismatch"],
-    ["cmdline profile substring", "cmdline-profile-substring"],
-    ["missing --user-data-dir", "cmdline-missing-profile"],
-    ["unavailable cmdline", "cmdline-unavailable"],
-    ["duplicate --user-data-dir", "cmdline-duplicate-profile"],
+    ["missing SingletonLock", "singleton-missing"],
+    ["regular-file SingletonLock", "singleton-regular-file"],
+    ["SingletonLock hostname mismatch", "singleton-wrong-hostname"],
+    ["SingletonLock pid mismatch", "singleton-wrong-pid"],
     ["canonical executable mismatch", "canonical-executable-mismatch"],
     ["start-time mismatch", "starttime-mismatch"],
     ["malformed endpoint", "bad-endpoint"],

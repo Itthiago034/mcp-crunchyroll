@@ -7,6 +7,7 @@ import {
   realpathSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -39,6 +40,15 @@ const ownerApi = browserProfile as typeof browserProfile & {
   canonicalizeProfilePath(dir: string): string;
   canonicalizeExecutablePath(path: string): string;
   createProcessIdentityInspector(): ProcessIdentityInspector;
+  profileSingletonMatchesPid(
+    canonicalProfile: string,
+    pid: number,
+    hostname: string,
+    reader?: {
+      lstat(path: string): { isSymbolicLink(): boolean };
+      readlink(path: string): string;
+    },
+  ): boolean;
 };
 
 function withProfile(fn: (dir: string) => Promise<void> | void) {
@@ -296,14 +306,13 @@ describe("BT2 ownership record", () => {
     const inspector = ownerApi.createProcessIdentityInspector();
     assert.equal(inspector.executable(process.pid), realpathSync(process.execPath));
     assert.equal(typeof inspector.startTimeTicks(process.pid), "number");
-    assert.ok(inspector.argv(process.pid)?.length);
+    assert.equal("argv" in inspector, false, "rewritten cmdline is not an ownership seam");
   });
 
   test("the real inspector fails closed for a dead pid", () => {
     const inspector = ownerApi.createProcessIdentityInspector();
     assert.equal(inspector.startTimeTicks(2 ** 30), null);
     assert.equal(inspector.executable(2 ** 30), null);
-    assert.equal(inspector.argv(2 ** 30), null);
   });
 
   test("clearOwnershipRecord removes the record and preserves the profile", withProfile(async (dir) => {
@@ -311,5 +320,62 @@ describe("BT2 ownership record", () => {
     await ownerApi.clearOwnershipRecord(dir);
     assert.equal(await ownerApi.readOwnershipRecord(dir), null);
     assert.equal(statSync(dir).mode & 0o777, 0o700);
+  }));
+});
+
+describe("BT2 ProcessSingleton profile binding", () => {
+  test("an exact SingletonLock symlink binds the profile to the retained pid", withProfile((dir) => {
+    symlinkSync("test-host-12345", join(dir, "SingletonLock"));
+    assert.equal(ownerApi.profileSingletonMatchesPid(dir, 12_345, "test-host"), true);
+  }));
+
+  test("a hostname containing multiple hyphens is compared without parsing", withProfile((dir) => {
+    symlinkSync("my-test-host-name-424242", join(dir, "SingletonLock"));
+    assert.equal(
+      ownerApi.profileSingletonMatchesPid(dir, 424_242, "my-test-host-name"),
+      true,
+    );
+  }));
+
+  test("a missing SingletonLock fails closed", withProfile((dir) => {
+    assert.equal(ownerApi.profileSingletonMatchesPid(dir, 123, "host-a"), false);
+  }));
+
+  test("a regular SingletonLock file fails closed", withProfile((dir) => {
+    writeFileSync(join(dir, "SingletonLock"), "host-a-123");
+    assert.equal(ownerApi.profileSingletonMatchesPid(dir, 123, "host-a"), false);
+  }));
+
+  test("a SingletonLock directory fails closed", withProfile((dir) => {
+    mkdirSync(join(dir, "SingletonLock"));
+    assert.equal(ownerApi.profileSingletonMatchesPid(dir, 123, "host-a"), false);
+  }));
+
+  for (const [label, target] of [
+    ["wrong hostname", "host-b-123"],
+    ["wrong pid", "host-a-456"],
+    ["extra prefix", "evil-host-a-123"],
+    ["extra suffix", "host-a-123-extra"],
+    ["partial pid", "host-a-123"],
+  ] as const) {
+    test(`${label} in SingletonLock fails exact binding`, withProfile((dir) => {
+      symlinkSync(target, join(dir, "SingletonLock"));
+      const expectedPid = label === "partial pid" ? 12_345 : 123;
+      assert.equal(ownerApi.profileSingletonMatchesPid(dir, expectedPid, "host-a"), false);
+    }));
+  }
+
+  test("an empty readlink result fails closed", withProfile((dir) => {
+    assert.equal(ownerApi.profileSingletonMatchesPid(dir, 123, "host-a", {
+      lstat: () => ({ isSymbolicLink: () => true }),
+      readlink: () => "",
+    }), false);
+  }));
+
+  test("a readlink failure fails closed", withProfile((dir) => {
+    assert.equal(ownerApi.profileSingletonMatchesPid(dir, 123, "host-a", {
+      lstat: () => ({ isSymbolicLink: () => true }),
+      readlink: () => { throw new Error("synthetic readlink failure"); },
+    }), false);
   }));
 });

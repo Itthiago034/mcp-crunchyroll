@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { hostname } from "node:os";
 import type {
   AdoptedBrowserProcessHandle,
   BrowserLifecycleState,
@@ -22,6 +23,7 @@ import {
   clearStaleEndpoint,
   createProcessIdentityInspector,
   ensureBrowserProfile,
+  profileSingletonMatchesPid,
   readOwnershipRecord,
   readDevToolsEndpoint,
   writeOwnershipRecord,
@@ -419,16 +421,6 @@ export function createBrowserSessionManager(
     removeExitListener = handle.onExit(handleObservedExit);
   };
 
-  const liveProfileMatches = (pid: number, canonicalProfile: string): boolean => {
-    const argv = seams.processInspector.argv(pid);
-    if (!argv) return false;
-    const userDataArgs = argv.filter((arg) => arg.startsWith("--user-data-dir="));
-    if (userDataArgs.length !== 1) return false;
-    const value = userDataArgs[0].slice("--user-data-dir=".length);
-    if (!value) return false;
-    return seams.processInspector.canonicalPath(value) === canonicalProfile;
-  };
-
   const endpointIsLoopback = (candidateEndpoint: DevToolsEndpoint): boolean => {
     try {
       const parsed = new URL(candidateEndpoint.webSocketDebuggerUrl);
@@ -460,7 +452,7 @@ export function createBrowserSessionManager(
       if (record.launcherExecutable !== canonicalLauncherExecutable) {
         throw new Error("launcher-executable");
       }
-      // Checks 6–9: live pid, recorded runtime executable, start time, and exact profile argv.
+      // Checks 6–9: live pid, runtime executable, start time, and exact ProcessSingleton binding.
       if (!seams.processInspector.isAlive(record.pid)) throw new Error("dead");
       if (seams.processInspector.executable(record.pid) !== record.runtimeExecutable) {
         throw new Error("runtime-executable");
@@ -468,7 +460,9 @@ export function createBrowserSessionManager(
       if (seams.processInspector.startTimeTicks(record.pid) !== record.startTimeTicks) {
         throw new Error("start-time");
       }
-      if (!liveProfileMatches(record.pid, canonicalProfile)) throw new Error("argv");
+      if (!profileSingletonMatchesPid(canonicalProfile, record.pid, hostname())) {
+        throw new Error("process-singleton");
+      }
       // Checks 10–12: exact-profile endpoint, loopback invariant, and handshake.
       const ownedEndpoint = await readDevToolsEndpoint(config.profileDir);
       if (!endpointIsLoopback(ownedEndpoint)) throw new Error("endpoint");
@@ -566,7 +560,7 @@ export function createBrowserSessionManager(
         throw new BrowserLifecycleError("BROWSER_UNAVAILABLE");
       }
       const startTimeTicks = seams.processInspector.startTimeTicks(spawned.pid);
-      if (startTimeTicks === null || !liveProfileMatches(spawned.pid, canonicalProfile)) {
+      if (startTimeTicks === null) {
         throw new BrowserLifecycleError("OWNERSHIP_INVALID");
       }
       endpoint = await Promise.race([
@@ -587,7 +581,7 @@ export function createBrowserSessionManager(
       if (
         !runtimeExecutable ||
         seams.processInspector.startTimeTicks(spawned.pid) !== startTimeTicks ||
-        !liveProfileMatches(spawned.pid, canonicalProfile)
+        !profileSingletonMatchesPid(canonicalProfile, spawned.pid, hostname())
       ) {
         throw new BrowserLifecycleError("OWNERSHIP_INVALID");
       }
