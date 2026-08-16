@@ -1415,46 +1415,149 @@ describe("BT3 closure — the module has no capability it must not have", () => 
   });
 });
 
-describe("BT3 closure — public unreachability (design §29)", () => {
-  test("no import path from the MCP entry point reaches the authority", () => {
-    const reachable = importClosure(join(REPO_ROOT, "src/index.ts"));
-    assert.equal(
-      reachable.has(AUTH_CONTEXT_SOURCE_PATH),
-      false,
-      "src/index.ts must not reach auth-context.ts, directly or transitively"
-    );
-    // Sanity: the walker really does follow the module graph.
-    assert.equal(reachable.has(join(REPO_ROOT, "src/redact.ts")), true);
-  });
+// ── RETIRED AT BT4 ──────────────────────────────────────────────────────────
+//
+// Three assertions used to live here:
+//
+//   - no import path from the MCP entry point reaches the authority;
+//   - no other production module imports the authority;
+//   - the published bundle carries no trace of the authority.
+//
+// They encoded the BT3 CLOSURE CONDITION — "BT3 exists but is not yet
+// integrated" — not an eternal architecture invariant. BT4 is the stage that
+// integrates it, so satisfying them would now mean the production authority
+// does not exist. They are replaced in place by the stronger architecture
+// assertions below, which say what must be true once the authority IS wired.
+// The other 158 BT3 behavioural and security tests are untouched.
+//
+// Recorded RED before replacement: with the BT4 composition root wired, those
+// three failed and only those three (158/161 still green).
 
-  test("no other production module imports the authority", () => {
-    const importers: string[] = [];
+describe("BT4 architecture — the authority is wired, and only as intended", () => {
+  const SRC = join(REPO_ROOT, "src");
+  const COMPOSITION_ROOT = join(SRC, "index.ts");
+
+  function sources(): Array<{ path: string; code: string }> {
+    const files: Array<{ path: string; code: string }> = [];
     const walk = (directory: string): void => {
       for (const entry of readdirSync(directory, { withFileTypes: true })) {
         const full = join(directory, entry.name);
         if (entry.isDirectory()) walk(full);
-        else if (entry.name.endsWith(".ts") && full !== AUTH_CONTEXT_SOURCE_PATH) {
-          if (/from\s+"[^"]*auth-context\.js"/.test(readFileSync(full, "utf-8"))) importers.push(full);
+        else if (entry.name.endsWith(".ts")) {
+          files.push({
+            path: full,
+            code: readFileSync(full, "utf-8").replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, ""),
+          });
         }
       }
     };
-    walk(join(REPO_ROOT, "src"));
-    assert.deepEqual(importers, []);
+    walk(SRC);
+    return files;
+  }
+
+  test("1. exactly one production authority construction site exists", () => {
+    const callers = sources()
+      .filter((f) => f.path !== AUTH_CONTEXT_SOURCE_PATH)
+      .filter((f) => /createAuthContextAuthority\s*\(/.test(f.code))
+      .map((f) => f.path);
+    assert.deepEqual(callers, [COMPOSITION_ROOT], "one authority per process, built in one place");
   });
 
-  test("the published bundle carries no trace of the authority", () => {
-    const bundle = readFileSync(join(REPO_ROOT, "dist/index.js"), "utf-8");
-    for (const marker of [
-      "Authentication context is unavailable",
-      "Authentication context is stale",
-      "Authentication identity changed unexpectedly",
-      "AuthContextAuthority",
-      "issuedContexts",
-    ]) {
-      assert.equal(bundle.includes(marker), false, `the bundle must not contain: ${marker}`);
+  test("2. it is constructed in the composition root, not a utility module", () => {
+    const code = readFileSync(COMPOSITION_ROOT, "utf-8");
+    assert.match(code, /createAuthContextAuthority\s*\(\s*\)/);
+    assert.match(code, /composition root/i, "the section must be identified as such");
+  });
+
+  test("3. only the writer port is handed out; the authority never travels", () => {
+    const code = readFileSync(COMPOSITION_ROOT, "utf-8").replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
+    assert.match(code, /asWriter\s*\(\s*\)/);
+    for (const other of sources()) {
+      if (other.path === COMPOSITION_ROOT || other.path === AUTH_CONTEXT_SOURCE_PATH) continue;
+      assert.equal(/asWriter\s*\(/.test(other.code), false, `${other.path} derives a writer`);
     }
   });
 
+  test("4. no MCP tool schema admits a writer, reader, authority, context, epoch or generation", () => {
+    const baseline = JSON.parse(
+      readFileSync(join(REPO_ROOT, "test/fixtures/baseline-tools.json"), "utf-8")
+    ) as Array<{ name: string; inputSchema: { properties?: Record<string, unknown> } }>;
+    const forbidden = ["writer", "reader", "authority", "context", "epoch", "generation", "authgeneration"];
+    for (const tool of baseline) {
+      for (const property of Object.keys(tool.inputSchema.properties ?? {})) {
+        assert.equal(forbidden.includes(property.toLowerCase()), false, `${tool.name}.${property}`);
+      }
+    }
+  });
+
+  test("5. no production module calls bind() or runCurrent()", () => {
+    for (const file of sources()) {
+      if (file.path === AUTH_CONTEXT_SOURCE_PATH) continue;
+      assert.equal(/\brunCurrent\s*\(/.test(file.code), false, `${file.path} calls runCurrent`);
+      assert.equal(/\.bind\s*\(/.test(file.code), false, `${file.path} calls bind`);
+    }
+  });
+
+  test("6. no production module derives the BT3 reader", () => {
+    for (const file of sources()) {
+      if (file.path === AUTH_CONTEXT_SOURCE_PATH) continue;
+      assert.equal(/asReader\s*\(/.test(file.code), false, `${file.path} derives a reader`);
+    }
+  });
+
+  test("7. the content path is uncut: registry empty, dispatcher unreachable from the entry point", () => {
+    assert.deepEqual(PRODUCTION_OPERATIONS, []);
+    const reachable = importClosure(COMPOSITION_ROOT);
+    assert.equal(
+      reachable.has(join(SRC, "transport", "dispatcher.ts")),
+      false,
+      "no content tool may route through the transport dispatcher in BT4"
+    );
+  });
+
+  test("8. the authority module is imported only by the composition root", () => {
+    const importers: string[] = [];
+    for (const file of sources()) {
+      if (file.path === AUTH_CONTEXT_SOURCE_PATH) continue;
+      if (/from\s+"[^"]*auth-context\.js"/.test(file.code)) importers.push(file.path);
+    }
+    assert.deepEqual(importers, [COMPOSITION_ROOT]);
+  });
+
+  test("9. no other module can manufacture a second production authority", () => {
+    // The factory is not re-exported anywhere, so there is no second door.
+    for (const file of sources()) {
+      if (file.path === AUTH_CONTEXT_SOURCE_PATH || file.path === COMPOSITION_ROOT) continue;
+      assert.equal(
+        /export\s+\{[^}]*createAuthContextAuthority/.test(file.code),
+        false,
+        `${file.path} re-exports the authority factory`
+      );
+    }
+  });
+
+  test("10. the tool-call boundary never touches the authority", () => {
+    const code = readFileSync(COMPOSITION_ROOT, "utf-8");
+    const handlerStart = code.indexOf("setRequestHandler(CallToolRequestSchema");
+    assert.ok(handlerStart > 0, "the CallTool handler must exist");
+    const handlerBody = code.slice(handlerStart);
+    for (const forbidden of [
+      "authAuthority",
+      "asWriter",
+      "currentRevision",
+      "inspectForTest",
+      "commitAuthenticatedMaterial",
+    ]) {
+      assert.equal(
+        handlerBody.includes(forbidden),
+        false,
+        `the tool boundary must not reference ${forbidden}`
+      );
+    }
+  });
+});
+
+describe("BT3 closure — preserved scope proofs", () => {
   test("PRODUCTION_OPERATIONS remains empty and frozen", () => {
     assert.deepEqual(PRODUCTION_OPERATIONS, []);
     assert.equal(Object.isFrozen(PRODUCTION_OPERATIONS), true);

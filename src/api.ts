@@ -357,6 +357,42 @@ export function classifyRefreshResponse(status: number, body: unknown): RefreshE
  */
 let refreshInFlight: Promise<TokenData> | undefined;
 
+// ── BT4 — live auth transition sink ─────────────────────────────────────────
+
+/**
+ * A narrow, synchronous notification the composition root registers so the live
+ * invalid_grant path can invalidate the auth authority BEFORE any persistence
+ * cleanup begins (BT4 completion errata §4).
+ *
+ * It holds no auth state, no authority reference and no storage knowledge — it
+ * is a one-way edge out of this module. `clearAuthData()` remains the single,
+ * unduplicated owner of secure clearing.
+ */
+export interface LegacyAuthTransitionSink {
+  onInvalidGrant(): void;
+}
+
+let authTransitionSink: LegacyAuthTransitionSink | undefined;
+
+export function setLegacyAuthTransitionSink(sink: LegacyAuthTransitionSink | undefined): void {
+  authTransitionSink = sink;
+}
+
+/**
+ * Notify the sink, never letting its failure become an outward error of its
+ * own: a broken listener must not change the classification the provider gave
+ * us, and must not stop the cleanup that follows.
+ */
+function notifyInvalidGrant(): void {
+  const sink = authTransitionSink;
+  if (!sink) return;
+  try {
+    sink.onInvalidGrant();
+  } catch {
+    // deliberately swallowed — see above
+  }
+}
+
 /**
  * Internal refresh-specific token path (Architecture B). Generic
  * request() is NOT used here: refresh classification requires local
@@ -421,6 +457,9 @@ async function refreshOperation(oldTokens: TokenData): Promise<TokenData> {
   }
   if (classified) {
     if (classified.kind === "REAUTH_REQUIRED") {
+      // BT4: the LIVE authority is invalidated FIRST, synchronously, so a slow
+      // or failing filesystem clear can never leave an old context usable.
+      notifyInvalidGrant();
       // Semantic invalid_grant: do not save the response, do not return the
       // old access token, attempt local clear (best-effort, unchanged B2/B3
       // semantics), throw, no retry.

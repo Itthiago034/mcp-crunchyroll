@@ -31,6 +31,13 @@ import {
   getSubscription,
 } from "./api.js";
 
+import { setLegacyAuthTransitionSink } from "./api.js";
+
+// BT4: the auth authority and its trusted producer. Composed here and nowhere
+// else — see the composition-root section below.
+import { createAuthContextAuthority } from "./transport/auth-context.js";
+import { createAuthProducer, createDefaultAuthProducerPorts } from "./transport/auth-producer.js";
+
 // B6-core: operation-scoped secret redaction (internal, not an MCP surface).
 import { withRedactionScope, safeErrorWithCleanStack, redactSecrets, sanitizeToolResult } from "./redact.js";
 // Gate B5: structured logout domain types from the storage layer.
@@ -77,6 +84,29 @@ const server = new Server(
   { name: "crunchyroll", version: "0.1.0" },
   { capabilities: { tools: {} } }
 );
+
+// ── BT4 composition root ─────────────────────────────────────────────────────
+//
+// This file is the ONLY place that constructs an auth authority, and it
+// constructs EXACTLY ONE per MCP process — never one per request or per tool.
+// The authority object itself never leaves this section: only the narrow
+// writer port crosses into the producer, so no other module can install
+// material, invalidate, mint a context or reach the reader side.
+//
+// BT5 holds the reader: `asReader()`, `bind()` and `runCurrent()` are not used
+// here and no content tool routes through the transport dispatcher.
+
+const authAuthority = createAuthContextAuthority();
+const authProducer = createAuthProducer(createDefaultAuthProducerPorts(authAuthority.asWriter()));
+
+// BT4-D2: the legacy refresh path notifies us on a semantic invalid_grant so
+// the LIVE authority is invalidated BEFORE `clearAuthData()` runs. The sink is
+// synchronous, holds no state, and never re-enters the legacy module.
+setLegacyAuthTransitionSink({
+  onInvalidGrant: () => {
+    authProducer.invalidateForInvalidGrant();
+  },
+});
 
 // ── Tool Definitions ──────────────────────────────────────────────────────────
 
@@ -375,7 +405,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "crunchyroll_logout": {
-        const logoutResult = await logout();
+        // BT4: the live authority is invalidated synchronously BEFORE any
+        // filesystem work, and the structured LogoutResult is passed through
+        // verbatim — the public output contract is unchanged.
+        const logoutResult = (await authProducer.logout()).persistence;
         const presentation = formatLogoutResult(logoutResult);
         return {
           content: [{ type: "text", text: JSON.stringify(presentation) }],
@@ -641,7 +674,44 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 
+/**
+ * BT4: invalidate the live authority before asynchronous teardown.
+ *
+ * This is the existing teardown seam — no process manager is invented for it.
+ * Shutting down is not logging out: persisted credentials are deliberately left
+ * alone, only the process-local authority is dropped.
+ */
+function installShutdownInvalidation(): void {
+  let shuttingDown = false;
+  const shutdown = (signal: NodeJS.Signals) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    try {
+      authProducer.invalidateForShutdown();
+    } catch {
+      // a terminal authority is already unavailable; never block teardown
+    }
+    process.exit(signal === "SIGINT" ? 130 : 143);
+  };
+  process.once("SIGINT", () => shutdown("SIGINT"));
+  process.once("SIGTERM", () => shutdown("SIGTERM"));
+}
+
 async function main() {
+  installShutdownInvalidation();
+
+  // BT4 startup bootstrap: hardened storage is loaded and validated OUTSIDE the
+  // authority and installed through an explicit ESTABLISH compare-and-swap.
+  // Nothing is trusted merely because a file exists, and every non-installing
+  // outcome leaves the process unavailable rather than pretending otherwise.
+  // It never throws: a broken store must not stop the server from starting and
+  // reporting an honest LOGIN_REQUIRED.
+  try {
+    await authProducer.bootstrapFromStorage();
+  } catch {
+    // fail closed and stay unavailable
+  }
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("Crunchyroll MCP server running on stdio");

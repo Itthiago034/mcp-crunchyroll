@@ -138,6 +138,7 @@ export interface AuthProducer {
   logout(): Promise<LogoutOutcome>;
   bootstrapFromStorage(): Promise<BootstrapOutcome>;
   invalidateForShutdown(): ShutdownOutcome;
+  invalidateForInvalidGrant(): ShutdownOutcome;
   status(): Promise<AuthStatusShape>;
 }
 
@@ -386,6 +387,18 @@ class AuthProducerImpl implements AuthProducer {
    */
   invalidateForShutdown(): ShutdownOutcome {
     return Object.freeze({ authority: this.invalidateNow("PROCESS_SHUTDOWN") });
+  }
+
+  /**
+   * BT4-D2 (completion errata §4). Invalidate the live authority when the
+   * legacy refresh path observes a semantic invalid_grant.
+   *
+   * It deliberately performs NO persistence cleanup: the legacy path owns that
+   * step and runs it immediately afterwards, so the ordering is
+   * invalidate-then-clear without this module duplicating `clearAuthData`.
+   */
+  invalidateForInvalidGrant(): ShutdownOutcome {
+    return Object.freeze({ authority: this.invalidateNow("INVALID_GRANT") });
   }
 
   /**

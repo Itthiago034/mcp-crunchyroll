@@ -1059,12 +1059,16 @@ describe("BT4 closure — T/V/W: no capability BT4 must not have", () => {
   test("W: the content transport is uncut and the registry is still empty", () => {
     assert.deepEqual(PRODUCTION_OPERATIONS, []);
     assert.equal(Object.isFrozen(PRODUCTION_OPERATIONS), true);
-    // The MCP entry point does not reach the producer either: BT4 wiring is the
-    // deferred obligation BT4-D1, recorded in the design.
+    // RETIRED AT BT4 COMPLETION: this used to assert that src/index.ts does not
+    // reference the producer at all. That encoded the unwired foundation stage,
+    // not an invariant — BT4-D1 is exactly the wiring that makes it false. What
+    // must remain true after wiring is that the CONTENT path is untouched.
     const entry = readFileSync(join(BT4_REPO_ROOT, "src/index.ts"), "utf-8");
-    assert.equal(/auth-producer/.test(entry), false);
-    // Content tools keep their legacy path in full.
-    assert.equal(entry.includes('from "./api.js"'), true);
+    assert.equal(entry.includes('from "./api.js"'), true, "content tools keep their legacy path");
+    assert.equal(/from\s+"[^"]*dispatcher\.js"/.test(entry), false, "no dispatcher at the boundary");
+    assert.equal(/from\s+"[^"]*operation-registry\.js"/.test(entry), false, "no registry at the boundary");
+    assert.equal(/executeResolved|TransportBackend/.test(entry), false, "no backend cutover");
+    assert.equal(/auth-producer\.js/.test(entry), true, "BT4-D1 is resolved: the producer is wired");
   });
 
   test("U: the public tool contract is still exactly 21 unchanged names", () => {
