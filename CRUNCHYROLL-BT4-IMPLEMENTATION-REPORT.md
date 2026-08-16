@@ -541,3 +541,123 @@ or `src/redact.ts` change, no push, no merge, no `main` change.
   unproven live is a human completing a *fresh* login inside the managed
   browser (BT4-N5). Readiness for the seeded path is evidenced; readiness for
   cold first login is not claimed.
+
+---
+
+# Part III — BT4-R1 (external review blocker, FIX1)
+
+Append-only. Parts I and II stand as written; this part records one defect
+found by external review of the frozen candidate `8e33096`, and its repair.
+It authorizes nothing, reopens no macrophase and starts no BT5 work.
+
+## 19. The defect
+
+A login attempt's observation could install material **after** a logout had
+already completed.
+
+`runLoginDecision` guarded the install with `if (logoutFlight) return false`.
+That variable is the logout *gate*, and the gate is released the moment the
+logout transaction finishes. So the window it protected was only the logout's
+own duration:
+
+```
+login A pending on the observation
+  → logout invalidates the authority, clears storage, finishes
+  → logoutFlight = undefined            (gate released)
+  → A's observation finally arrives
+  → the guard sees no gate
+  → ESTABLISH reinstalls the session the user just destroyed
+```
+
+The existing test `K` did not catch it: it resolved the observation while the
+gate was still held and only completed the logout afterwards. It has been
+renamed to say `during` so the claim matches what it proves.
+
+The same staleness had a second face. `browser-auth.ts` produces
+`connectionGeneration` on every OBSERVED outcome — errata §9 requires exactly
+that so a stale observation "whose BT2 connection generation … no longer
+matches" can be discarded — but `AuthObserverPort` dropped the field and
+`runLoginDecision` never read it. A value was produced for a safety check that
+was never performed.
+
+## 20. The repair
+
+Confined to the login/logout/observation boundary. `src/transport/auth-context.ts`
+is untouched, no CDP method was added, no content tool moved, no public schema
+changed.
+
+- **Explicit attempt identity.** A monotonic `attemptSequence`; each login
+  captures its own id and only the `currentAttempt` may install.
+- **Synchronous cancellation.** `logout()` calls `cancelActiveLogin()` before
+  anything is awaited: it bumps the attempt id, aborts the attempt's
+  `AbortController`, and releases the login gate. Nothing can slip through,
+  because there is no await between the decision and its effect.
+- **Never restored.** The id only ever increases, so an attempt cancelled by a
+  logout stays dead however late its material arrives — including long after
+  the logout finished, which is the defect above.
+- **Cancellation reaches the observer.** The signal is passed to
+  `observeNextAuthMaterial({ signal })`; `browser-auth.ts` already honoured it
+  and returns `CANCELLED`, closing its channel.
+- **Generation is no longer produced and ignored.** `AuthObserverPort` carries
+  `connectionGeneration`, and the install boundary requires it to equal the
+  live generation. `BrowserSessionManager` gained one read-only accessor,
+  `connectionGeneration(): number | undefined` (zero, its existing
+  "no live connection" sentinel, maps to `undefined`). It grants no capability
+  and exposes nothing about the session.
+- **Checks sit after every await**, immediately before the only irreversible
+  step: still the current attempt, not aborted, no logout in flight, and the
+  observed generation still live.
+
+A cancelled attempt that finishes late also no longer clears a gate a newer
+attempt holds.
+
+## 21. RED, exactly as observed
+
+Seven failures on the frozen candidate before any source change:
+
+| # | Test | RED |
+|---|---|---|
+| 1 | an observation from a login cancelled by a COMPLETED logout installs nothing | `AUTHENTICATING` where `LOGIN_REQUIRED` was expected — after a fully completed logout the dead attempt still held the gate, and the observation then installed |
+| 2 | a logout aborts the pending observation synchronously | no signal was ever handed to the observer |
+| 3 | a late observation from a superseded attempt installs nothing | the dead attempt installed |
+| 4 | material observed on a stale BT2 connection generation is discarded | installed anyway — the field was never read |
+| 5 | a reconnect racing the commit still discards the old generation | installed anyway |
+| 6 | material cannot install while there is no live connection at all | installed anyway |
+| 7 | a logout whose cleanup FAILED still blocks reinstallation | reinstalled after a failed clear — the worst case |
+
+Two further tests in the family passed on arrival and are recorded as such: the
+timed-out-then-newer-attempt case and the happy path. No defect was invented to
+manufacture a RED, and no earlier RED was rewritten.
+
+## 22. GREEN and verification at the FIX1 tip
+
+| Check | Result |
+|---|---|
+| `test/auth-orchestrator.test.ts` | 44/44 (was 34; +10, of which 7 were RED) |
+| `test/browser-session-manager.test.ts` | 65/65 (+2 for the generation accessor) |
+| Focused BT2/BT3/BT4 suites together | 410/410 |
+| Full suite | **739 tests, 739 pass, 0 fail, 0 skipped** |
+| Zero-egress suite (`bwrap --unshare-net`, `BT2_NET_ISOLATED=1`) | **739/739** |
+| Typecheck / build | exit 0 / exit 0 |
+| Public contract | 21 tools, schemas byte-equivalent, fixture untouched by FIX1 |
+| Secret sentinel sweep | producer 87/87, redaction 47/47, plus a new orchestrator sweep proving no cancellation path leaks material, identity, a generation or a signal |
+| `src/transport/auth-context.ts` | 0 lines changed |
+| New logging / env / fetch / CDP surface | none — asserted by scan over the changed source |
+
+One test was written and then removed rather than shipped: a manager-level
+assertion that an interception channel carries the generation the manager
+reports. The shared BT2 fakes do not implement `Target.attachToTarget`, so it
+would have required widening test infrastructure outside this boundary. The
+linkage is structural (both read the same variable) and the channel's
+generation is exercised in `test/browser-auth.test.ts`.
+
+## 23. Live evidence
+
+The run-3 E2 result in §16b stands as historical evidence and was **not**
+repeated: FIX1 is proven offline, deterministically, with barriers rather than
+sleeps. No browser was opened and no live login was performed for this fix.
+
+## 24. Status
+
+BT4-N2, BT4-N3, BT4-N4 and BT4-N5 are unchanged and still open. BT4-R1 is
+repaired and awaiting external re-review. Nothing here is declared closed.
