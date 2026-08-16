@@ -152,6 +152,24 @@ describe("BT4 composition — the interactive login is wired, and only as intend
     );
   });
 
+  test("both teardown seams drop the authority, and neither clears credentials", () => {
+    const code = ROOT_CODE();
+    const shutdownCalls = code.match(/invalidateForShutdown\s*\(/g) ?? [];
+    assert.equal(shutdownCalls.length, 2, "one signal seam and one transport-close seam");
+    assert.match(code, /process\.once\s*\(\s*"SIGINT"/);
+    assert.match(code, /process\.once\s*\(\s*"SIGTERM"/);
+    assert.match(code, /transport\.onclose\s*=/);
+    // Shutdown is not logout: nothing on either path may remove material.
+    const shutdownRegion = code.slice(code.indexOf("installShutdownInvalidation"));
+    for (const forbidden of ["clearAuthData", "logout(", "invalidateForInvalidGrant"]) {
+      assert.equal(
+        shutdownRegion.includes(forbidden),
+        false,
+        `teardown must not ${forbidden}`
+      );
+    }
+  });
+
   test("the tool boundary reaches the browser only through the orchestrator", () => {
     const code = readFileSync(COMPOSITION_ROOT, "utf-8");
     const handlerStart = code.indexOf("setRequestHandler(CallToolRequestSchema");

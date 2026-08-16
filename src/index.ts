@@ -807,6 +807,17 @@ async function main() {
   }
 
   const transport = new StdioServerTransport();
+  // The stdio close path is the other teardown seam (§11): when the client
+  // goes away, the process-local authority is dropped BEFORE the SDK's own
+  // asynchronous teardown — the SDK chains this handler ahead of its own.
+  // Closing is not logging out: persisted credentials are left alone.
+  transport.onclose = () => {
+    try {
+      authProducer.invalidateForShutdown();
+    } catch {
+      // a terminal authority is already unavailable; never block teardown
+    }
+  };
   await server.connect(transport);
   console.error("Crunchyroll MCP server running on stdio");
 }
