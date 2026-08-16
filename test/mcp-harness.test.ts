@@ -96,11 +96,13 @@ describe("MCP server harness", () => {
       // unmigrated content tool reached Node and failed on missing tokens.
       // After the cutover the same call is refused locally, before any
       // transport and long before any network.
+      // BT6 migrated get_series, so the representative moved to an operation
+      // that is still refused — an account read, which BT7 owns.
       test("an unmigrated content tool is refused with OPERATION_NOT_MIGRATED", async () => {
         await withClient(target, async (client) => {
           const result = await client.sendRequest("tools/call", {
-            name: "crunchyroll_get_series",
-            arguments: { series_id: "GY8VEQ95Y" },
+            name: "crunchyroll_get_watchlist",
+            arguments: {},
           });
           assert.equal(result.error, undefined, "unexpected MCP-level error");
           const content = (result.result as { content: { text: string }[] }).content[0].text;
@@ -108,20 +110,24 @@ describe("MCP server harness", () => {
         });
       });
 
-      test("the migrated content tool routes to the browser transport, never to Node", async () => {
-        await withClient(target, async (client) => {
-          const result = await client.sendRequest("tools/call", {
-            name: "crunchyroll_get_categories",
-            arguments: {},
+      for (const [tool, args] of [
+        ["crunchyroll_get_categories", {}],
+        ["crunchyroll_search", { query: "frieren" }],
+        ["crunchyroll_get_series", { series_id: "GY8VEQ95Y" }],
+        ["crunchyroll_browse", {}],
+      ] as Array<[string, Record<string, unknown>]>) {
+        test(`${tool} routes to the browser transport, never to Node`, async () => {
+          await withClient(target, async (client) => {
+            const result = await client.sendRequest("tools/call", { name: tool, arguments: args });
+            assert.equal(result.error, undefined, "unexpected MCP-level error");
+            const content = (result.result as { content: { text: string }[] }).content[0].text;
+            // No browser and no session in the harness, so the honest outcome is
+            // a typed transport refusal — NOT a legacy "not logged in" from Node.
+            assert.match(content, /Not authenticated|browser/i);
+            assert.equal(/OPERATION_NOT_MIGRATED/.test(content), false, "it IS migrated");
           });
-          assert.equal(result.error, undefined, "unexpected MCP-level error");
-          const content = (result.result as { content: { text: string }[] }).content[0].text;
-          // No browser and no session in the harness, so the honest outcome is
-          // a typed transport refusal — NOT a legacy "not logged in" from Node.
-          assert.match(content, /Not authenticated|browser/i);
-          assert.equal(/OPERATION_NOT_MIGRATED/.test(content), false, "it IS migrated");
         });
-      });
+      }
 
       // BT4 completion §8 — BREAKING: login is browser-interactive and accepts
       // no arguments at all. The old characterization test (credentials in,

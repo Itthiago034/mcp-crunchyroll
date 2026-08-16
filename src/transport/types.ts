@@ -52,9 +52,25 @@ export interface AuthDerivedParamSpec {
 export interface OperationDescriptor {
   readonly id: OperationId;
   readonly method: HttpMethod;
+  /**
+   * Path only — never a query string. `{name}` placeholders are filled from
+   * declared caller params or auth-derived params, both validated first.
+   */
   readonly pathTemplate: string;
   readonly callerParams: Readonly<Record<string, ParamSpec>>;
   readonly authDerivedParams: Readonly<Record<string, AuthDerivedParamSpec>>;
+  /**
+   * BT6. Query keys whose value is a constant of THIS BUILD — `locale`, for
+   * instance. A caller can neither add one nor change one.
+   */
+  readonly fixedQuery: Readonly<Record<string, string>>;
+  /**
+   * BT6. Query key → the DECLARED caller param that fills it. Explicit rather
+   * than inferred, because one value may legitimately appear in both the path
+   * and the query (`GET_SEASONS` sends `series_id` in both), and a rule that
+   * guessed would silently drop or duplicate it.
+   */
+  readonly queryParams: Readonly<Record<string, string>>;
   readonly scope: AuthScope;
   readonly auth: AuthMaterialRequirement;
   readonly mutation: MutationClass;
@@ -104,4 +120,36 @@ export function optionalIntegerInRange(min: number, max: number): ParamSpec {
 
 export function optionalOneOf(allowed: readonly string[]): ParamSpec {
   return { validate: (v) => typeof v === "string" && allowed.includes(v) };
+}
+
+/**
+ * A Crunchyroll content id, as it appears in a path segment. The legacy client
+ * interpolated these raw; nothing but an id can reach a URL now, so traversal
+ * and separator injection are refused before encoding is even considered.
+ */
+export const contentId: ParamSpec = {
+  required: true,
+  validate: (v) => typeof v === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(v),
+};
+
+/** A non-empty free-text query value. It is encoded, never interpolated. */
+export const searchText: ParamSpec = {
+  required: true,
+  validate: (v) => typeof v === "string" && v.trim().length > 0 && v.length <= 256,
+};
+
+/** A comma-separated slug list, e.g. "action,fantasy". */
+export const slugList: ParamSpec = {
+  validate: (v) => typeof v === "string" && /^[a-z0-9-]+(,[a-z0-9-]+)*$/.test(v),
+};
+
+export const optionalBoolean: ParamSpec = {
+  validate: (v) => typeof v === "boolean",
+};
+
+export function requiredIntegerInRange(min: number, max: number): ParamSpec {
+  return {
+    required: true,
+    validate: (v) => typeof v === "number" && Number.isInteger(v) && v >= min && v <= max,
+  };
 }

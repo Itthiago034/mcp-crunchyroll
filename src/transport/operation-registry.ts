@@ -6,6 +6,9 @@
 import type {
   AuthDerivedParamSpec, CallerParams, OperationDescriptor, OperationId, ParamSpec, ResolvedCall,
 } from "./types.js";
+import {
+  contentId, optionalBoolean, optionalOneOf, requiredIntegerInRange, searchText, slugList,
+} from "./types.js";
 import { TransportError } from "./transport-error.js";
 
 export interface OperationRegistry {
@@ -39,6 +42,11 @@ function captureDescriptor(d: OperationDescriptor): OperationDescriptor {
     pathTemplate: d.pathTemplate,
     callerParams: Object.freeze(callerParams),
     authDerivedParams: Object.freeze(authDerivedParams),
+    // Absent maps are normalized to empty: an operation with no query really
+    // has none, and the frozen copy keeps registry policy immune to later
+    // mutation of the object the caller passed in.
+    fixedQuery: Object.freeze({ ...(d.fixedQuery ?? {}) }),
+    queryParams: Object.freeze({ ...(d.queryParams ?? {}) }),
     scope: d.scope,
     auth: d.auth,
     mutation: d.mutation,
@@ -121,6 +129,39 @@ export function createOperationRegistry(
         );
       }
     }
+    // BT6. Path and query are transport knowledge, so the registry is where
+    // they are checked for coherence — before any of it can reach a URL.
+    if (d.pathTemplate.includes("?")) {
+      throw new TransportError(
+        "INVALID_ARGUMENTS",
+        `operation ${d.id} carries a query string in its path template`
+      );
+    }
+    for (const placeholder of d.pathTemplate.matchAll(/\{([^}]+)\}/g)) {
+      const name = placeholder[1];
+      if (!(name in d.callerParams) && !(name in d.authDerivedParams)) {
+        throw new TransportError(
+          "INVALID_ARGUMENTS",
+          `operation ${d.id} has an undeclared path placeholder: ${name}`
+        );
+      }
+    }
+    for (const [key, param] of Object.entries(d.queryParams ?? {})) {
+      if (!(param in d.callerParams)) {
+        throw new TransportError(
+          "INVALID_ARGUMENTS",
+          `operation ${d.id} maps query ${key} to undeclared parameter ${param}`
+        );
+      }
+    }
+    for (const key of Object.keys(d.fixedQuery ?? {})) {
+      if (key in d.queryParams) {
+        throw new TransportError(
+          "INVALID_ARGUMENTS",
+          `operation ${d.id} declares query key ${key} both fixed and caller-filled`
+        );
+      }
+    }
     byId.set(d.id, captureDescriptor(d));
   }
   return {
@@ -169,6 +210,35 @@ export function resolveCall(
   return Object.freeze({ descriptor, callerParams: Object.freeze({ ...params }) });
 }
 
+/** The locale this build requests. A constant, never a caller argument. */
+export const CATALOG_LOCALE = "en-US";
+
+/**
+ * Every BT5/BT6 operation is the same shape: a public catalog READ that still
+ * carries a bearer, resolves no identity, mutates nothing, and asks for one
+ * fixed locale. Writing that once removes the chance of one descriptor
+ * quietly disagreeing with the rest.
+ */
+function publicRead(spec: {
+  id: string;
+  pathTemplate: string;
+  callerParams?: Record<string, ParamSpec>;
+  queryParams?: Record<string, string>;
+}): OperationDescriptor {
+  return Object.freeze({
+    id: spec.id as OperationId,
+    method: "GET",
+    pathTemplate: spec.pathTemplate,
+    callerParams: Object.freeze({ ...(spec.callerParams ?? {}) }),
+    authDerivedParams: Object.freeze({}),
+    fixedQuery: Object.freeze({ locale: CATALOG_LOCALE }),
+    queryParams: Object.freeze({ ...(spec.queryParams ?? {}) }),
+    scope: "PUBLIC",
+    auth: "BEARER",
+    mutation: false,
+  }) as OperationDescriptor;
+}
+
 /**
  * The production operation table.
  *
@@ -193,14 +263,63 @@ export function resolveCall(
  * for the real account operations arriving at BT7.
  */
 export const PRODUCTION_OPERATIONS: readonly OperationDescriptor[] = Object.freeze([
-  Object.freeze({
-    id: "GET_CATEGORIES" as OperationId,
-    method: "GET",
-    pathTemplate: "/content/v2/discover/categories?locale=en-US",
-    callerParams: Object.freeze({}),
-    authDerivedParams: Object.freeze({}),
-    scope: "PUBLIC",
-    auth: "BEARER",
-    mutation: false,
-  }) as OperationDescriptor,
+  publicRead({
+    id: "GET_CATEGORIES",
+    pathTemplate: "/content/v2/discover/categories",
+  }),
+  publicRead({
+    id: "SEARCH",
+    pathTemplate: "/content/v2/discover/search",
+    callerParams: { q: searchText, n: requiredIntegerInRange(1, 100), type: optionalOneOf(["series", "movie_listing"]) },
+    queryParams: { q: "q", n: "n", type: "type" },
+  }),
+  publicRead({
+    id: "GET_SERIES",
+    pathTemplate: "/content/v2/cms/series/{series_id}",
+    callerParams: { series_id: contentId },
+  }),
+  publicRead({
+    id: "GET_SEASONS",
+    // The legacy request sent series_id in BOTH the path and the query; that
+    // is preserved verbatim rather than tidied into one of the two.
+    pathTemplate: "/content/v2/cms/series/{series_id}/seasons",
+    callerParams: { series_id: contentId },
+    queryParams: { series_id: "series_id" },
+  }),
+  publicRead({
+    id: "GET_EPISODES",
+    pathTemplate: "/content/v2/cms/seasons/{season_id}/episodes",
+    callerParams: { season_id: contentId },
+  }),
+  publicRead({
+    id: "GET_EPISODE",
+    pathTemplate: "/content/v2/cms/episodes/{episode_id}",
+    callerParams: { episode_id: contentId },
+  }),
+  publicRead({
+    id: "GET_SIMULCAST_SEASONS",
+    pathTemplate: "/content/v2/discover/seasonal_tags",
+  }),
+  publicRead({
+    id: "BROWSE",
+    pathTemplate: "/content/v2/discover/browse",
+    callerParams: {
+      n: requiredIntegerInRange(1, 100),
+      start: requiredIntegerInRange(0, 10_000),
+      sort_by: optionalOneOf(["popularity", "newly_added", "updated", "alphabetical"]),
+      categories: slugList,
+      seasonal_tag: { validate: (v) => typeof v === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(v) },
+      is_subbed: optionalBoolean,
+      is_dubbed: optionalBoolean,
+    },
+    queryParams: {
+      n: "n",
+      start: "start",
+      sort_by: "sort_by",
+      categories: "categories",
+      seasonal_tag: "seasonal_tag",
+      is_subbed: "is_subbed",
+      is_dubbed: "is_dubbed",
+    },
+  }),
 ]);

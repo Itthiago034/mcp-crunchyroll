@@ -19,6 +19,48 @@ import { MAX_API_RESPONSE_BYTES, type ApiExecutionChannel } from "./browser-life
 import { TransportError } from "./transport-error.js";
 import type { ResolvedCall, TransportBackend, TransportResult } from "./types.js";
 
+/**
+ * Build the request URL from the descriptor and the validated caller values.
+ *
+ * Everything here comes from the registry: the origin is a constant of this
+ * build, the path template and the query mapping are the descriptor's, and the
+ * values have already passed the descriptor's own predicates. Path segments and
+ * query values are encoded, so even a value that somehow slipped a validator
+ * could not escape its position.
+ *
+ * Exported because it is the one place a URL is assembled, and that deserves to
+ * be tested directly rather than only through a browser.
+ */
+export function buildRequestUrl(
+  call: ResolvedCall,
+  authDerived: Readonly<Record<string, string>> = {}
+): string {
+  const { descriptor, callerParams } = call;
+
+  const path = descriptor.pathTemplate.replace(/\{([^}]+)\}/g, (_match, name: string) => {
+    const value = name in authDerived ? authDerived[name] : callerParams[name];
+    if (typeof value !== "string" || value.length === 0) {
+      throw new TransportError("INVALID_ARGUMENTS", `unresolved path parameter: ${name}`);
+    }
+    return encodeURIComponent(value);
+  });
+
+  const query = new URLSearchParams();
+  // Caller-filled keys first, then the build's own constants, so the rendered
+  // order matches what the legacy client sent.
+  for (const [key, param] of Object.entries(descriptor.queryParams ?? {})) {
+    const value = callerParams[param];
+    if (value === undefined) continue;
+    query.set(key, String(value));
+  }
+  for (const [key, value] of Object.entries(descriptor.fixedQuery ?? {})) {
+    query.set(key, value);
+  }
+
+  const rendered = query.toString();
+  return `${CRUNCHYROLL_API_ORIGIN}${path}${rendered.length > 0 ? `?${rendered}` : ""}`;
+}
+
 /** Frozen: never caller input, never environment-configurable. */
 export const CRUNCHYROLL_API_ORIGIN = "https://www.crunchyroll.com";
 
@@ -76,10 +118,10 @@ export function createBrowserApiBackend(ports: BrowserApiBackendPorts): Transpor
         throw new TransportError("OPERATION_NOT_MIGRATED", "method");
       }
 
-      // The URL is built from the descriptor alone and revalidated. The caller
-      // contributes nothing: the registry already refused every key it did not
-      // declare, and this operation declares none.
-      const url = `${CRUNCHYROLL_API_ORIGIN}${descriptor.pathTemplate}`;
+      // The URL is built from the descriptor and the values the registry has
+      // already validated. The caller contributes nothing else: every key it
+      // did not declare was refused before this point.
+      const url = buildRequestUrl(call);
       if (!url.startsWith(`${CRUNCHYROLL_API_ORIGIN}/`)) {
         throw new TransportError("INVALID_ARGUMENTS", "path");
       }

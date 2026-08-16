@@ -18,6 +18,8 @@ const OP: OperationDescriptor = {
   pathTemplate: "/synthetic/v1/public",
   callerParams: { query: nonEmptyString },
   authDerivedParams: {},
+  fixedQuery: {},
+  queryParams: {},
   scope: "PUBLIC",
   auth: "NONE",
   mutation: false,

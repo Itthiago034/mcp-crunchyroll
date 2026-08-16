@@ -38,6 +38,8 @@ const GET_CATEGORIES: OperationDescriptor = Object.freeze({
   // BT5-FIX1/FIX2: PUBLIC + BEARER with zero auth-derived params — the
   // endpoint addresses nobody's account and still requires a live AuthContext.
   // The registry now refuses any descriptor whose scope and identity disagree.
+  fixedQuery: {},
+  queryParams: {},
   scope: "PUBLIC" as const,
   auth: "BEARER" as const,
   mutation: false as const,

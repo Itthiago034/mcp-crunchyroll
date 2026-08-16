@@ -21,6 +21,8 @@ export const SYNTHETIC_PUBLIC: OperationDescriptor = {
   pathTemplate: "/synthetic/v1/public",
   callerParams: { query: nonEmptyString, n: optionalIntegerInRange(1, 100) },
   authDerivedParams: {},
+  fixedQuery: {},
+  queryParams: {},
   scope: "PUBLIC",
   auth: "NONE",
   mutation: false,
@@ -79,8 +81,18 @@ describe("BT1 registry — construction and lookup", () => {
     // enters only when its path literal LEAVES src/api.ts, which is what BT5
     // did for GET_CATEGORIES; the remaining reads follow at BT6/BT7.
     assert.deepEqual(
-      [...PRODUCTION_OPERATIONS].map((d) => d.id),
-      ["GET_CATEGORIES"]
+      [...PRODUCTION_OPERATIONS].map((d) => String(d.id)).sort(),
+      [
+        "BROWSE",
+        "GET_CATEGORIES",
+        "GET_EPISODE",
+        "GET_EPISODES",
+        "GET_SEASONS",
+        "GET_SERIES",
+        "GET_SIMULCAST_SEASONS",
+        "SEARCH",
+      ],
+      "BT5 migrated categories; BT6 migrated the remaining public catalog reads"
     );
   });
 });
@@ -202,7 +214,9 @@ describe("BT1 registry — immutability of captured policy", () => {
       pathTemplate: "/synthetic/v1/mutable",
       callerParams: { q: spec },
       authDerivedParams: {},
-      scope: "PUBLIC",
+      fixedQuery: {},
+  queryParams: {},
+  scope: "PUBLIC",
   auth: "NONE",
       mutation: false,
     };
@@ -226,7 +240,9 @@ describe("BT1 registry — immutability of captured policy", () => {
       pathTemplate: "/synthetic/v1/widen",
       callerParams,
       authDerivedParams: {},
-      scope: "PUBLIC",
+      fixedQuery: {},
+  queryParams: {},
+  scope: "PUBLIC",
   auth: "NONE",
       mutation: false,
     };
@@ -249,7 +265,9 @@ describe("BT1 registry — immutability of captured policy", () => {
       pathTemplate: "/synthetic/v1/original",
       callerParams: {},
       authDerivedParams: {},
-      scope: "PUBLIC",
+      fixedQuery: {},
+  queryParams: {},
+  scope: "PUBLIC",
   auth: "NONE",
       mutation: false,
     };
@@ -392,7 +410,9 @@ describe("BT5-FIX2 registry — scope agrees with the identity it resolves", () 
             id: "SYNTH_PUBLIC_NONE_ID" as OperationId,
             pathTemplate: "/synthetic/v1/{accountId}/thing",
             authDerivedParams: IDENTITY,
-            scope: "PUBLIC",
+            fixedQuery: {},
+  queryParams: {},
+  scope: "PUBLIC",
             auth: "NONE",
           },
         ]),
@@ -409,7 +429,9 @@ describe("BT5-FIX2 registry — scope agrees with the identity it resolves", () 
             id: "SYNTH_PUBLIC_BEARER_ID" as OperationId,
             pathTemplate: "/synthetic/v1/{accountId}/thing",
             authDerivedParams: IDENTITY,
-            scope: "PUBLIC",
+            fixedQuery: {},
+  queryParams: {},
+  scope: "PUBLIC",
             auth: "BEARER",
           },
         ]),
@@ -426,7 +448,9 @@ describe("BT5-FIX2 registry — scope agrees with the identity it resolves", () 
             id: "SYNTH_ACCOUNT_NO_ID" as OperationId,
             pathTemplate: "/synthetic/v1/thing",
             authDerivedParams: {},
-            scope: "ACCOUNT",
+            fixedQuery: {},
+  queryParams: {},
+  scope: "ACCOUNT",
             auth: "BEARER",
           },
         ]),
@@ -441,7 +465,9 @@ describe("BT5-FIX2 registry — scope agrees with the identity it resolves", () 
         id: "OK_PUBLIC_NONE" as OperationId,
         pathTemplate: "/synthetic/v1/open",
         authDerivedParams: {},
-        scope: "PUBLIC",
+        fixedQuery: {},
+  queryParams: {},
+  scope: "PUBLIC",
         auth: "NONE",
       },
       {
@@ -449,7 +475,9 @@ describe("BT5-FIX2 registry — scope agrees with the identity it resolves", () 
         id: "OK_PUBLIC_BEARER" as OperationId,
         pathTemplate: "/synthetic/v1/catalog",
         authDerivedParams: {},
-        scope: "PUBLIC",
+        fixedQuery: {},
+  queryParams: {},
+  scope: "PUBLIC",
         auth: "BEARER",
       },
       {
@@ -457,7 +485,9 @@ describe("BT5-FIX2 registry — scope agrees with the identity it resolves", () 
         id: "OK_ACCOUNT_BEARER" as OperationId,
         pathTemplate: "/synthetic/v1/{accountId}/items",
         authDerivedParams: IDENTITY,
-        scope: "ACCOUNT",
+        fixedQuery: {},
+  queryParams: {},
+  scope: "ACCOUNT",
         auth: "BEARER",
       },
     ]);
@@ -492,7 +522,9 @@ describe("BT5-FIX2 registry — scope agrees with the identity it resolves", () 
         id: "OK_ACCOUNT_BEARER_2" as OperationId,
         pathTemplate: "/synthetic/v1/{accountId}/items",
         authDerivedParams: IDENTITY,
-        scope: "ACCOUNT",
+        fixedQuery: {},
+  queryParams: {},
+  scope: "ACCOUNT",
         auth: "BEARER",
       },
     ]);

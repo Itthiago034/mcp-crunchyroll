@@ -1246,7 +1246,10 @@ describe("BT4 closure — T/V/W: no capability BT4 must not have", () => {
     // point had no dispatcher, registry or backend — the pre-cutover shape.
     // BT5 is the cutover, so what must remain true is narrower and about the
     // PRODUCER: it gained no content role when content started flowing.
-    assert.deepEqual(PRODUCTION_OPERATIONS.map((d) => d.id), ["GET_CATEGORIES"]);
+    // RETIRED AT BT6: the exact table moved to test/bt6-catalog.test.ts. What
+    // this file asserts is that the PRODUCER gained no content role, whatever
+    // the catalog migration does next.
+    assert.ok(PRODUCTION_OPERATIONS.some((d) => String(d.id) === "GET_CATEGORIES"));
     assert.equal(Object.isFrozen(PRODUCTION_OPERATIONS), true);
     const entry = readFileSync(join(BT4_REPO_ROOT, "src/index.ts"), "utf-8");
     assert.equal(/from\s+"[^"]*dispatcher\.js"/.test(entry), true, "content routes through the dispatcher");

@@ -49,6 +49,8 @@ const PUBLIC_DESCRIPTOR: OperationDescriptor = {
   pathTemplate: "/synthetic/v1/public",
   callerParams: { query: nonEmptyString },
   authDerivedParams: {},
+  fixedQuery: {},
+  queryParams: {},
   scope: "PUBLIC",
   auth: "NONE",
   mutation: false,
@@ -61,6 +63,8 @@ const PUBLIC_BEARER_DESCRIPTOR: OperationDescriptor = {
   pathTemplate: "/synthetic/v1/catalog",
   callerParams: {},
   authDerivedParams: {},
+  fixedQuery: {},
+  queryParams: {},
   scope: "PUBLIC",
   auth: "BEARER",
   mutation: false,
@@ -1551,11 +1555,15 @@ describe("BT4 architecture — the authority is wired, and only as intended", ()
     // RETIRED AT BT5: this used to assert the registry was empty and the
     // dispatcher unreachable. That was the pre-cutover condition; BT5 is the
     // cutover. What replaces it is the shape of the cut itself.
-    assert.deepEqual(
-      PRODUCTION_OPERATIONS.map((d) => d.id),
-      ["GET_CATEGORIES"],
-      "BT5 migrates exactly one operation"
+    // RETIRED AT BT6: "exactly one" was the BT5 cutover shape. What this file
+    // cares about is that the content path is CUT and routed, not how many
+    // operations have been migrated since; test/bt6-catalog.test.ts owns the
+    // exact table.
+    assert.ok(
+      PRODUCTION_OPERATIONS.some((d) => String(d.id) === "GET_CATEGORIES"),
+      "the first migrated operation is still migrated"
     );
+    assert.ok(PRODUCTION_OPERATIONS.length >= 1);
     const reachable = importClosure(COMPOSITION_ROOT);
     assert.equal(
       reachable.has(join(SRC, "transport", "dispatcher.ts")),
@@ -1603,9 +1611,11 @@ describe("BT4 architecture — the authority is wired, and only as intended", ()
 });
 
 describe("BT3 closure — preserved scope proofs", () => {
-  test("PRODUCTION_OPERATIONS holds exactly the BT5 migration and stays frozen", () => {
-    // RETIRED AT BT5: "remains empty" was the pre-cutover condition.
-    assert.deepEqual(PRODUCTION_OPERATIONS.map((d) => d.id), ["GET_CATEGORIES"]);
+  test("PRODUCTION_OPERATIONS holds the migrated reads and stays frozen", () => {
+    // RETIRED AT BT5 ("remains empty"), narrowed again at BT6: the exact table
+    // lives in test/bt6-catalog.test.ts. Here it is enough that the table is
+    // non-empty, frozen, and still contains BT5's operation.
+    assert.ok(PRODUCTION_OPERATIONS.some((d) => String(d.id) === "GET_CATEGORIES"));
     assert.equal(Object.isFrozen(PRODUCTION_OPERATIONS), true);
   });
 

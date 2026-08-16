@@ -9,9 +9,37 @@
 // This module holds no origin, no path, no method and no credential: those
 // belong to the registry descriptor and the transport.
 
+import {
+  parseBrowse,
+  parseCategories,
+  parseEpisode,
+  parseEpisodes,
+  parseSearch,
+  parseSeasons,
+  parseSeries,
+  parseSimulcastSeasons,
+  CatalogShapeError,
+} from "../catalog-domain.js";
 import type { OperationRegistry } from "./operation-registry.js";
 import { TransportError } from "./transport-error.js";
 import type { CrunchyrollTransport, OperationId, CallerParams } from "./types.js";
+
+/**
+ * Domain defaults (BT6). The page size and offset a tool uses when the caller
+ * does not say — a domain decision, deliberately not transport policy, kept
+ * exactly as the legacy client had them.
+ */
+const DEFAULT_PAGE_SIZE = 20;
+const DEFAULT_BROWSE_START = 0;
+
+/** Only defined values are forwarded: an absent option must stay absent. */
+function withDefined(params: Record<string, unknown>): CallerParams {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== "") out[key] = value;
+  }
+  return Object.freeze(out);
+}
 
 /**
  * Every content tool, mapped to the operation that will serve it.
@@ -46,52 +74,13 @@ export const CONTENT_TOOL_OPERATIONS: ReadonlyMap<string, OperationId> = new Map
   ).map(([tool, operation]) => [tool, operation as unknown as OperationId])
 );
 
-/** One category, reduced to the two fields the public result has always had. */
-export interface CategorySummary {
-  readonly id: string;
-  readonly localization: { readonly title: string };
-}
-
-export interface CategoriesResult {
-  readonly count: number;
-  readonly categories: readonly CategorySummary[];
-}
-
-/**
- * The domain parser, separated from transport.
- *
- * It accepts only the shape the public result is built from and refuses
- * anything else rather than passing a surprise through. No part of an
- * unrecognised payload is carried into the error.
- */
-export function parseCategories(json: unknown): CategoriesResult {
-  if (typeof json !== "object" || json === null || Array.isArray(json)) {
-    throw new TransportError("SCHEMA_MISMATCH", "categories");
-  }
-  const data = (json as { data?: unknown }).data;
-  if (!Array.isArray(data)) {
-    throw new TransportError("SCHEMA_MISMATCH", "categories.data");
-  }
-  const categories = data.map((entry): CategorySummary => {
-    if (typeof entry !== "object" || entry === null) {
-      throw new TransportError("SCHEMA_MISMATCH", "categories.entry");
-    }
-    const id = (entry as { id?: unknown }).id;
-    const localization = (entry as { localization?: unknown }).localization;
-    const title = (localization as { title?: unknown } | undefined)?.title;
-    if (typeof id !== "string" || typeof title !== "string") {
-      throw new TransportError("SCHEMA_MISMATCH", "categories.entry");
-    }
-    return Object.freeze({ id, localization: Object.freeze({ title }) });
-  });
-  return Object.freeze({ count: categories.length, categories: Object.freeze(categories) });
-}
-
 export interface ContentGateway {
   /** Is this tool name one the cutover boundary owns? */
   isContentTool(name: string): boolean;
   /** Execute a content tool, or refuse it. Never returns a legacy result. */
   callTool(name: string, args: CallerParams): Promise<unknown>;
+  /** Internal: the routing half, without the domain-error translation. */
+  execute(name: string, args: CallerParams): Promise<unknown>;
 }
 
 export function createContentGateway(
@@ -104,6 +93,19 @@ export function createContentGateway(
     },
 
     async callTool(name: string, args: CallerParams): Promise<unknown> {
+      try {
+        return await this.execute(name, args);
+      } catch (error) {
+        // A domain shape failure carries a field PATH and no provider content;
+        // it becomes the transport's closed vocabulary here.
+        if (error instanceof CatalogShapeError) {
+          throw new TransportError("SCHEMA_MISMATCH", error.path);
+        }
+        throw error;
+      }
+    },
+
+    async execute(name: string, args: CallerParams): Promise<unknown> {
       const operation = CONTENT_TOOL_OPERATIONS.get(name);
       if (operation === undefined) {
         // Not a content tool at all — the caller asked the wrong boundary.
@@ -116,12 +118,60 @@ export function createContentGateway(
       }
 
       switch (operation as unknown as string) {
-        case "GET_CATEGORIES": {
-          // The tool takes no arguments; anything supplied is refused by the
-          // registry's allow-list rather than quietly dropped here.
-          const result = await transport.execute(operation, args);
-          return parseCategories(result.json);
+        case "GET_CATEGORIES":
+          return parseCategories((await transport.execute(operation, args)).json);
+
+        case "SEARCH": {
+          const result = await transport.execute(
+            operation,
+            withDefined({
+              q: args.query,
+              n: args.n ?? DEFAULT_PAGE_SIZE,
+              type: args.type,
+            })
+          );
+          return parseSearch(result.json);
         }
+
+        case "GET_SERIES":
+          return parseSeries(
+            (await transport.execute(operation, withDefined({ series_id: args.series_id }))).json
+          );
+
+        case "GET_SEASONS":
+          return parseSeasons(
+            (await transport.execute(operation, withDefined({ series_id: args.series_id }))).json
+          );
+
+        case "GET_EPISODES":
+          return parseEpisodes(
+            (await transport.execute(operation, withDefined({ season_id: args.season_id }))).json
+          );
+
+        case "GET_EPISODE":
+          return parseEpisode(
+            (await transport.execute(operation, withDefined({ episode_id: args.episode_id }))).json
+          );
+
+        case "GET_SIMULCAST_SEASONS":
+          return parseSimulcastSeasons((await transport.execute(operation, {})).json);
+
+        case "BROWSE": {
+          const result = await transport.execute(
+            operation,
+            withDefined({
+              n: args.n ?? DEFAULT_PAGE_SIZE,
+              start: args.start ?? DEFAULT_BROWSE_START,
+              sort_by: args.sort_by,
+              categories: args.categories,
+              seasonal_tag: args.seasonal_tag,
+              is_subbed: args.is_subbed,
+              is_dubbed: args.is_dubbed,
+            })
+          );
+          return parseBrowse(result.json);
+        }
+
         default:
           // A descriptor exists but this boundary has no parser for it: refuse
           // rather than improvise. Migrating an operation means adding both.

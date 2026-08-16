@@ -15,8 +15,8 @@ import { createTransportDispatcher } from "../src/transport/dispatcher.js";
 import {
   CONTENT_TOOL_OPERATIONS,
   createContentGateway,
-  parseCategories,
 } from "../src/transport/content-gateway.js";
+import { parseCategories } from "../src/catalog-domain.js";
 import {
   installNodeCrunchyrollGuard,
   isGuardedCrunchyrollUrl,
@@ -88,13 +88,18 @@ function gatewayHarness(result?: TransportResult) {
 // ── The cutover table ───────────────────────────────────────────────────────
 
 describe("BT5 cutover — exactly one migrated operation", () => {
-  test("PRODUCTION_OPERATIONS contains exactly GET_CATEGORIES", () => {
-    assert.equal(PRODUCTION_OPERATIONS.length, 1);
+  // RETIRED AT BT6: "exactly GET_CATEGORIES" was the BT5 cutover shape. BT6
+  // migrates the remaining public catalog reads, and test/bt6-catalog.test.ts
+  // owns the exact table from here on. What stays true is the SHAPE of every
+  // migrated descriptor, which is what this file checks.
+  test("GET_CATEGORIES is still migrated, unchanged, and still first", () => {
+    assert.ok(PRODUCTION_OPERATIONS.length >= 1);
     assert.equal(Object.isFrozen(PRODUCTION_OPERATIONS), true);
-    const [descriptor] = PRODUCTION_OPERATIONS;
-    assert.equal(descriptor.id, "GET_CATEGORIES");
+    const descriptor = PRODUCTION_OPERATIONS.find((d) => String(d.id) === "GET_CATEGORIES")!;
+    assert.ok(descriptor, "GET_CATEGORIES must stay migrated");
     assert.equal(descriptor.method, "GET");
-    assert.equal(descriptor.pathTemplate, "/content/v2/discover/categories?locale=en-US");
+    assert.equal(descriptor.pathTemplate, "/content/v2/discover/categories");
+    assert.deepEqual({ ...descriptor.fixedQuery }, { locale: "en-US" });
     assert.deepEqual(Object.keys(descriptor.callerParams), []);
     assert.deepEqual(Object.keys(descriptor.authDerivedParams), []);
     // BT5-FIX1: the two dimensions are separate. The endpoint is not
@@ -126,13 +131,15 @@ describe("BT5 cutover — migrated vs unmigrated, decided in one place", () => {
     });
   });
 
+  // RETIRED AT BT6 for the three catalog reads that were migrated; the
+  // representatives are now operations that must still be refused.
   for (const tool of [
-    "crunchyroll_search",
-    "crunchyroll_get_series",
     "crunchyroll_get_watchlist",
     "crunchyroll_update_playhead",
     "crunchyroll_get_subscription",
-    "crunchyroll_get_simulcast_seasons",
+    "crunchyroll_get_similar",
+    "crunchyroll_get_recommendations",
+    "crunchyroll_get_history",
   ]) {
     test(`${tool} is refused with OPERATION_NOT_MIGRATED`, async () => {
       const h = gatewayHarness();
@@ -195,7 +202,7 @@ describe("BT5 cutover — migrated vs unmigrated, decided in one place", () => {
     for (const bad of [null, undefined, 42, "x", { data: "no" }, { data: [1, 2] }]) {
       assert.throws(
         () => parseCategories(bad),
-        (e: unknown) => e instanceof TransportError && e.kind === "SCHEMA_MISMATCH"
+        (e: unknown) => (e as Error).name === "CatalogShapeError"
       );
     }
   });
@@ -241,21 +248,19 @@ describe("BT5 cutover — the Node Crunchyroll path is unreachable", () => {
   test("no transport module imports a CONTENT function from the legacy api module", () => {
     // The producer's legacy AUTH ports (login/refresh/status) are BT4's
     // accepted design and stay. What must not exist is a content edge.
+    //
+    // BT6 note: this checks IMPORTS, not identifiers. The registry now
+    // legitimately owns path literals such as "/content/v2/discover/browse",
+    // and an identifier scan flagged that as if it were a call into api.ts.
+    const ALLOWED = ["login", "refreshRequest", "getStatus", "LogoutResult"];
     for (const file of sources()) {
       if (!file.path.includes("/transport/")) continue;
-      for (const contentFn of [
-        "getCategories",
-        "searchAnime",
-        "getSeriesDetails",
-        "getWatchlist",
-        "updatePlayhead",
-        "browse",
-      ]) {
-        assert.equal(
-          new RegExp(`\\b${contentFn}\\b`).test(file.code),
-          false,
-          `${file.path} reaches ${contentFn}`
-        );
+      const imported = [...file.code.matchAll(/import\s*(?:type\s*)?\{([^}]*)\}\s*from\s*"[^"]*\/api\.js"/g)]
+        .flatMap((m) => m[1].split(","))
+        .map((name) => name.replace(/\btype\b/, "").trim())
+        .filter(Boolean);
+      for (const name of imported) {
+        assert.ok(ALLOWED.includes(name), `${file.path} imports ${name} from the legacy api module`);
       }
     }
   });

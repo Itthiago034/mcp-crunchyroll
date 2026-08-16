@@ -635,32 +635,7 @@ async function getValidToken(): Promise<{ token: string; account_id: string }> {
 // browse titles to the raw id. Both shapes are normalized in ONE place so the
 // drift stays observable here and nowhere else.
 
-/** A discover item in either the legacy or the live metadata shape. */
-interface DiscoverItem {
-  type: string;
-  id: string;
-  title?: string;
-  description?: string;
-  series_meta?: CrunchyrollSeries;
-  movie_listing_meta?: CrunchyrollMovie;
-  series_metadata?: Partial<CrunchyrollSeries>;
-  movie_listing_metadata?: Partial<CrunchyrollMovie>;
-}
 
-/** Shape-independent view of the fields both call sites consume. */
-interface NormalizedDiscoverItem {
-  /**
-   * Whether this item carries metadata in one of the four shapes we
-   * understand. Deliberately independent of the title entirely: the title is
-   * DATA carried by a recognized item, never the discriminator that makes an
-   * item recognized. So an empty-string title must not make an item disappear,
-   * and an item-level title alone must not make an unknown shape appear.
-   */
-  recognized: boolean;
-  title?: string;
-  description?: string;
-  series_launch_year?: number;
-}
 
 /**
  * Resolve title/description/series extras from whichever shape the item uses.
@@ -668,103 +643,14 @@ interface NormalizedDiscoverItem {
  * (live shape) are used. An unrecognized shape yields an empty view, which
  * callers handle exactly as they already handled missing metadata.
  */
-function normalizeDiscoverItem(item: DiscoverItem): NormalizedDiscoverItem {
-  const legacy = item.series_meta ?? item.movie_listing_meta;
-  const live = item.series_metadata ?? item.movie_listing_metadata;
-  const extras = (legacy ?? live) as Partial<CrunchyrollSeries> | undefined;
-  return {
-    recognized: legacy !== undefined || live !== undefined,
-    title: legacy?.title ?? item.title,
-    description: legacy?.description ?? item.description,
-    series_launch_year: extras?.series_launch_year,
-  };
-}
 
-interface SearchResult {
-  items: Array<{
-    type: string;
-    count: number;
-    items: DiscoverItem[];
-  }>;
-}
 
-export async function searchAnime(
-  query: string,
-  options: { type?: "series" | "movie_listing" | ""; n?: number; locale?: string } = {}
-): Promise<Array<{ type: string; id: string; title: string; description: string }>> {
-  const { token } = await getValidToken();
-  const params = new URLSearchParams({
-    q: query,
-    n: String(options.n ?? 20),
-    locale: options.locale ?? DEFAULT_LOCALE,
-    ...(options.type ? { type: options.type } : {}),
-  });
-
-  const data = await request<{ data: SearchResult["items"] }>(
-    `${API_BASE}/content/v2/discover/search?${params}`,
-    { token }
-  );
-
-  const results: Array<{ type: string; id: string; title: string; description: string }> = [];
-  for (const group of data.data ?? []) {
-    for (const item of group.items ?? []) {
-      const meta = normalizeDiscoverItem(item);
-      if (meta.recognized) {
-        results.push({
-          type: item.type,
-          id: item.id,
-          title: meta.title ?? "",
-          description: meta.description?.slice(0, 300) ?? "",
-        });
-      }
-    }
-  }
-  return results;
-}
 
 // ── Series / Movies ───────────────────────────────────────────────────────────
 
-export async function getSeriesDetails(seriesId: string): Promise<CrunchyrollSeries> {
-  const { token } = await getValidToken();
-  const params = new URLSearchParams({ locale: DEFAULT_LOCALE });
-  const data = await request<{ data: CrunchyrollSeries[] }>(
-    `${API_BASE}/content/v2/cms/series/${seriesId}?${params}`,
-    { token }
-  );
-  if (!data.data?.[0]) throw new Error(`Series ${seriesId} not found`);
-  return data.data[0];
-}
 
-export async function getSeasons(seriesId: string): Promise<CrunchyrollSeason[]> {
-  const { token } = await getValidToken();
-  const params = new URLSearchParams({ locale: DEFAULT_LOCALE, series_id: seriesId });
-  const data = await request<{ data: CrunchyrollSeason[] }>(
-    `${API_BASE}/content/v2/cms/series/${seriesId}/seasons?${params}`,
-    { token }
-  );
-  return data.data ?? [];
-}
 
-export async function getEpisodes(seasonId: string): Promise<CrunchyrollEpisode[]> {
-  const { token } = await getValidToken();
-  const params = new URLSearchParams({ locale: DEFAULT_LOCALE });
-  const data = await request<{ data: CrunchyrollEpisode[] }>(
-    `${API_BASE}/content/v2/cms/seasons/${seasonId}/episodes?${params}`,
-    { token }
-  );
-  return data.data ?? [];
-}
 
-export async function getEpisodeDetails(episodeId: string): Promise<CrunchyrollEpisode> {
-  const { token } = await getValidToken();
-  const params = new URLSearchParams({ locale: DEFAULT_LOCALE });
-  const data = await request<{ data: CrunchyrollEpisode[] }>(
-    `${API_BASE}/content/v2/cms/episodes/${episodeId}?${params}`,
-    { token }
-  );
-  if (!data.data?.[0]) throw new Error(`Episode ${episodeId} not found`);
-  return data.data[0];
-}
 
 // ── Watchlist ─────────────────────────────────────────────────────────────────
 
@@ -884,64 +770,9 @@ export async function getSimilar(seriesId: string, options: { n?: number } = {})
 
 // ── Simulcast / Browse ────────────────────────────────────────────────────────
 
-export async function getSimulcastSeasons(): Promise<SimulcastSeason[]> {
-  const { token } = await getValidToken();
-  const params = new URLSearchParams({ locale: DEFAULT_LOCALE });
-  const data = await request<{ data: SimulcastSeason[] }>(
-    `${API_BASE}/content/v2/discover/seasonal_tags?${params}`,
-    { token }
-  );
-  return data.data ?? [];
-}
 
-interface BrowseOptions {
-  sort_by?: "popularity" | "newly_added" | "updated" | "alphabetical";
-  categories?: string;
-  seasonal_tag?: string;
-  is_subbed?: boolean;
-  is_dubbed?: boolean;
-  n?: number;
-  start?: number;
-  locale?: string;
-}
 
-export interface BrowseItem {
-  id: string;
-  title: string;
-  type: string;
-  description?: string;
-  series_launch_year?: number;
-}
 
-export async function browse(options: BrowseOptions = {}): Promise<BrowseItem[]> {
-  const { token } = await getValidToken();
-  const params = new URLSearchParams({
-    n: String(options.n ?? 20),
-    start: String(options.start ?? 0),
-    locale: options.locale ?? DEFAULT_LOCALE,
-    ...(options.sort_by ? { sort_by: options.sort_by } : {}),
-    ...(options.categories ? { categories: options.categories } : {}),
-    ...(options.seasonal_tag ? { seasonal_tag: options.seasonal_tag } : {}),
-    ...(options.is_subbed !== undefined ? { is_subbed: String(options.is_subbed) } : {}),
-    ...(options.is_dubbed !== undefined ? { is_dubbed: String(options.is_dubbed) } : {}),
-  });
-
-  const data = await request<{ data: DiscoverItem[] }>(
-    `${API_BASE}/content/v2/discover/browse?${params}`,
-    { token }
-  );
-
-  return (data.data ?? []).map((item) => {
-    const meta = normalizeDiscoverItem(item);
-    return {
-      id: item.id,
-      title: meta.title ?? item.id,
-      type: item.type,
-      description: meta.description?.slice(0, 300) ?? "",
-      series_launch_year: meta.series_launch_year,
-    };
-  });
-}
 
 // BT5: getCategories moved to the Operation Registry (GET_CATEGORIES) and the
 // browser transport. Its path literal left this module in the same commit the
