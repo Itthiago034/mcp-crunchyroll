@@ -317,3 +317,112 @@ implements ACCOUNT as satisfiable at `ACCOUNT_READY`.
 ## 18. Status
 
 BT5-FIX1 is a candidate for external review. BT5 is **not** declared closed.
+
+---
+
+# Part III — BT5-R2: the scope / auth-derived cross-field invariant
+
+Append-only. Parts I and II stand as written.
+
+## 19. Correction to an earlier handoff number
+
+The BT5-FIX1 handoff message reported the FIX1 diff as "9 files, +407/−18".
+The packet's own stat is authoritative: **10 files, +410/−21**. The discrepancy
+was in the spoken summary, not in the artifacts; the history is unchanged and
+this is the factual correction of record.
+
+## 20. The finding
+
+External review found that FIX1 separated the two dimensions but did not make
+them agree. `createOperationRegistry()` rejected only `ACCOUNT + NONE`, so two
+contradictory shapes remained representable:
+
+| Shape | Why it is wrong |
+|---|---|
+| `PUBLIC` + any auth + **non-empty** `authDerivedParams` | `bind()` resolves whatever a descriptor declares, independently of scope. Such an operation would consume `accountId`/`profileId` from the current record while its label claimed to address nobody's account. |
+| `ACCOUNT` + `BEARER` + **empty** `authDerivedParams` | the pre-FIX1 overload — ACCOUNT used only as a way to obtain a bearer — wearing the new label. It is exactly the ambiguity FIX1 existed to remove, and it would leave BT7's `PROFILE_READY` rule unenforceable. |
+
+Neither was reachable in production: `PRODUCTION_OPERATIONS` holds one
+descriptor and it is correct. The defect was that the policy was documented
+rather than mechanical.
+
+## 21. RED, exactly as observed
+
+Three failures before the fix, and only three:
+
+| Test | RED |
+|---|---|
+| PUBLIC + NONE may not declare an identity parameter | accepted |
+| PUBLIC + BEARER may not declare an identity parameter either | accepted |
+| ACCOUNT + BEARER with no identity parameter is refused | accepted |
+
+**Born-green, recorded as such:** the three valid shapes, the production-table
+invariant check, and the caller-supplied-identity refusal all passed before the
+fix — the first three because they were already legal, the last because
+`resolveCall`'s allow-list has rejected caller identity since BT1.
+
+## 22. The fix
+
+Confined to `createOperationRegistry()`, which owns descriptor policy. Two
+closed checks, before capture, beside the existing ones:
+
+- `scope === "PUBLIC"` with any auth-derived param → `INVALID_ARGUMENTS`;
+- `scope === "ACCOUNT"` with none → `INVALID_ARGUMENTS`.
+
+No second validation was added in the backend or anywhere else, and
+`src/transport/auth-context.ts` is untouched: the registry proved sufficient in
+the reachable production graph, so no RED justified touching BT3.
+
+## 23. The complete matrix, mechanically proved
+
+Exercised against the real registry (`scope-invariant-proof.txt`):
+
+| Shape | Result |
+|---|---|
+| `PUBLIC + NONE + {}` | ACCEPTED |
+| `PUBLIC + BEARER + {}` | ACCEPTED — this is `GET_CATEGORIES` |
+| `ACCOUNT + BEARER + {accountId}` | ACCEPTED |
+| `ACCOUNT + NONE + {accountId}` | REJECTED — account-scoped but declares no auth material |
+| `PUBLIC + NONE + {accountId}` | REJECTED — public but resolves authenticated identity |
+| `PUBLIC + BEARER + {accountId}` | REJECTED — public but resolves authenticated identity |
+| `ACCOUNT + BEARER + {}` | REJECTED — account-scoped but resolves no identity |
+| `PUBLIC + <unknown auth>` | REJECTED — no closed auth requirement |
+
+A genuinely account-scoped endpoint with no identity parameter would require an
+explicit future decision. The invariant is not weakened now for a hypothetical.
+
+## 24. Unchanged by this FIX
+
+`GET_CATEGORIES` is byte-identical: `PUBLIC` + `BEARER` + zero auth-derived
+params + `mutation: false`. No browser, CDP, auth-lifecycle, transport-pipeline
+or public-schema change; no new operation; no new CDP surface. The FIX1 live
+evidence therefore still applies and was not repeated.
+
+## 25. Authorized test cleanup
+
+Four descriptor literals in `test/transport-registry.test.ts` carried a
+duplicate `auth` key introduced by the FIX1 patch. Last-key-wins meant they
+asserted what was intended, but the source did not say so plainly; each now has
+exactly one. The stale comment in `test/browser-api-transport.test.ts`
+describing `GET_CATEGORIES` as ACCOUNT-with-zero-identity now describes what it
+is.
+
+## 26. Verification
+
+| Check | Result |
+|---|---|
+| Focused (10 suites incl. registry, auth-context, dispatcher, backend, cutover, harness) | 295/295 on the six named; all ten green |
+| Full suite | **800 pass, 0 fail, 0 skipped** |
+| Zero-egress (`bwrap --unshare-net`, `BT2_NET_ISOLATED=1`) | **800 pass, 0 fail**; TCP and a real `fetch` both `ENETUNREACH` |
+| Typecheck / build | exit 0 / exit 0 |
+| Public contract | 21 tools; fixture and package files unchanged since `c229b31` |
+| `PRODUCTION_OPERATIONS` | exactly `GET_CATEGORIES` |
+| Node Crunchyroll attempts | 0 |
+| BT2 real-browser flake | did not recur in this stage's runs |
+
+Raw logs for every row above are in the packet — including the zero-egress and
+typecheck/build logs the FIX1 packet omitted.
+
+## 27. Status
+
+BT5-FIX2 is a candidate for external review. BT5 is **not** declared closed.
