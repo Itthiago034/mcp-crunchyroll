@@ -26,7 +26,7 @@ Place `manifest.yaml` into the `optional-mcps/crunchyroll/` directory of your he
 hermes mcp install crunchyroll
 ```
 
-The manifest handles cloning, dependency installation, and the launch command. After installation, log in once through the `crunchyroll_login` tool (ask Hermes to do it — it will request your email and password, and tokens are saved locally).
+The manifest handles cloning, dependency installation, and the launch command. After installation, sign in once — see [Authentication](#authentication). You will type your credentials into Crunchyroll's own page in a browser; the agent never asks for them and never receives them.
 
 ### Option B — Manual stdio config
 
@@ -53,7 +53,7 @@ mcp_servers:
     args: ["${userHome}/path/to/mcp-crunchyroll/dist/index.js"]
 ```
 
-Restart Hermes (or run `/reload-mcp`) and log in through `crunchyroll_login`.
+Restart Hermes (or run `/reload-mcp`) and sign in as described in [Authentication](#authentication).
 
 ## Usage with other MCP hosts
 
@@ -76,13 +76,85 @@ npm install -g @striderlabs/mcp-crunchyroll
 
 ## Authentication
 
-Log in once with your Crunchyroll credentials via the `crunchyroll_login` tool:
+**This server never accepts your Crunchyroll email or password.** The login tool
+takes no arguments at all:
 
 ```
-crunchyroll_login(email: "you@example.com", password: "your-password")
+crunchyroll_login({})
 ```
 
-Tokens are saved to `~/.strider/crunchyroll/` and automatically refreshed. You only need to log in again if tokens expire or after calling `crunchyroll_logout`.
+It opens a dedicated, managed browser on Crunchyroll's own login page. You type
+your credentials there, in Crunchyroll's UI, exactly as you would normally. The
+agent does not ask for them, does not see them, and cannot pass them on.
+
+If the agent ever asks you for your Crunchyroll password, something is wrong —
+no supported flow needs it.
+
+### What "logged in" means here
+
+Readiness is granted **only** when the server observes a real authentication
+response from Crunchyroll and validates it. A browser page that merely *looks*
+signed in grants nothing. `crunchyroll_status` reports what is actually true:
+
+| Field | Meaning |
+|---|---|
+| `authenticated` / `logged_in` | authenticated work is permitted right now |
+| `auth_state` | `LOGIN_REQUIRED`, `AUTHENTICATING`, `ACCOUNT_READY`, `PROFILE_READY`, `REAUTH_REQUIRED`, `LOGGING_OUT` or `DEGRADED` |
+| `browser_running` / `browser_connected` | the managed browser's lifecycle |
+| `profile_ready` | the session is scoped to a Crunchyroll profile |
+| `player_ready` | always `false` for now — playback is a later stage |
+
+Nothing you type is stored by this server: the credential goes to Crunchyroll,
+and the bearer the server observes is held in memory only, never written to
+disk. What persists is the browser's own session, inside the dedicated profile
+at `~/.strider/crunchyroll/browser-profile` (created `0700`, used by nothing
+else). That is why you usually do not need to sign in again after a restart.
+
+Human verification (CAPTCHA or similar) is always solved by you, in the
+browser. It is never automated, worked around, or answered on your behalf.
+
+### Supported Human Onboarding (first use, or after the session expires)
+
+Sometimes Crunchyroll's human verification will not complete inside the managed
+window. When that happens the login attempt ends honestly at `LOGIN_REQUIRED` —
+nothing is faked and nothing is bypassed. The supported fallback is to
+establish the browser session yourself, **in the same dedicated profile**:
+
+1. Make sure the managed browser is not running.
+2. Open that profile directly, with no automation:
+
+   ```bash
+   /usr/bin/brave \
+     --user-data-dir="$HOME/.strider/crunchyroll/browser-profile" \
+     --no-first-run \
+     --no-default-browser-check \
+     --disable-background-networking \
+     --disable-background-mode \
+     https://www.crunchyroll.com/login
+   ```
+
+   Use the same browser binary the server uses (Chromium, Chrome or Brave —
+   whichever it finds first, or `CRUNCHYROLL_BROWSER_EXECUTABLE` if you set
+   it). Do **not** add a remote-debugging port: this window is not automated.
+3. Solve the verification and sign in normally.
+4. **Decline any offer to import or sync data from your normal browser.** This
+   profile is deliberately separate; nothing is ever copied into it.
+5. Close the window normally.
+
+Then use `crunchyroll_login({})` as usual. The server reuses that same profile,
+observes a real authentication response, and only then reports ready. Your
+personal browser profile is never opened, read, or copied, and no cookie or
+stored credential is ever extracted, injected, or exported.
+
+### Signing out
+
+`crunchyroll_logout` invalidates the server's authenticated session
+immediately, and clears what it stored. It does **not** yet clear the browser's
+own session inside the dedicated profile — a later stage owns that. Until then,
+sign out of Crunchyroll in the browser too if that matters to you. Note that a
+leftover browser session never re-authenticates the server on its own: only an
+explicit `crunchyroll_login({})` that observes a fresh authentication response
+can do that.
 
 ## Tools
 
@@ -90,9 +162,9 @@ Tokens are saved to `~/.strider/crunchyroll/` and automatically refreshed. You o
 
 | Tool | Description |
 |------|-------------|
-| `crunchyroll_login` | Log in with email + password |
-| `crunchyroll_logout` | Clear saved session |
-| `crunchyroll_status` | Check login status and account info |
+| `crunchyroll_login` | Start interactive sign-in in the managed browser — **takes no arguments** |
+| `crunchyroll_logout` | Invalidate the current session and clear what the server stored |
+| `crunchyroll_status` | Report readiness: `authenticated`, `auth_state`, browser lifecycle, `profile_ready` |
 
 ### Search & Browse
 
@@ -154,7 +226,10 @@ Tokens are saved to `~/.strider/crunchyroll/` and automatically refreshed. You o
 ## Notes
 
 - Uses the Crunchyroll web API (same endpoints as the website)
-- Tokens are stored locally in `~/.strider/crunchyroll/` and auto-refreshed
+- Sign-in is interactive and browser-based; this server never accepts an email
+  or a password, and the bearer it observes is never written to disk
+- The dedicated browser profile at `~/.strider/crunchyroll/browser-profile`
+  (`0700`) holds the browser's own session and is used by nothing else
 - Content IDs can be found in search results or Crunchyroll URLs
 - API endpoints are subject to change by Crunchyroll
 
