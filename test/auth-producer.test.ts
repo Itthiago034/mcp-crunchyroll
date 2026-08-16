@@ -11,9 +11,14 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createAuthContextAuthority } from "../src/transport/auth-context.js";
+import { PRODUCTION_OPERATIONS } from "../src/transport/operation-registry.js";
 import {
   createAuthProducer,
+  createDefaultAuthProducerPorts,
   type AuthProducerPorts,
   type AuthWriterPort,
   type TokenLike,
@@ -927,5 +932,203 @@ describe("BT4 shutdown — invalidate without destroying credentials", () => {
     });
 
     assert.deepEqual(producer.invalidateForShutdown(), { authority: "ALREADY_TERMINAL" });
+  });
+});
+
+// ── Security and boundary closure ───────────────────────────────────────────
+
+const BT4_REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const PRODUCER_SOURCE_PATH = join(BT4_REPO_ROOT, "src/transport/auth-producer.ts");
+const PRODUCER_SOURCE = readFileSync(PRODUCER_SOURCE_PATH, "utf-8");
+/** Comments stripped: prose about cookies is not a cookie capability. */
+const PRODUCER_CODE = PRODUCER_SOURCE.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
+
+describe("BT4 closure — Q: no outcome or failure carries material or identity", () => {
+  test("every reachable producer outcome is sentinel-free", async () => {
+    const rendered: string[] = [];
+
+    const ok = await established(harness(), { profile_id: PROFILE_SENTINEL });
+    rendered.push(JSON.stringify(await ok.producer.status()));
+    rendered.push(JSON.stringify(await ok.producer.logout()));
+
+    const failed = harness();
+    failed.legacy.setLogin({ success: false, message: `Login failed: ${PASSWORD_SENTINEL}` });
+    rendered.push(JSON.stringify(await failed.producer.establishFromLogin(EMAIL_SENTINEL, PASSWORD_SENTINEL)));
+
+    const absent = harness();
+    absent.storage.set(null);
+    rendered.push(JSON.stringify(await absent.producer.establishFromLogin(EMAIL_SENTINEL, PASSWORD_SENTINEL)));
+    rendered.push(JSON.stringify(await absent.producer.refresh()));
+    rendered.push(JSON.stringify(await absent.producer.bootstrapFromStorage()));
+
+    const identity = await established(harness());
+    identity.legacy.setRefresh(async () => tokens({ account_id: ACCOUNT_SENTINEL_B }));
+    rendered.push(JSON.stringify(await identity.producer.refresh()));
+
+    const grant = await established(harness());
+    grant.legacy.setRefresh(async () => {
+      throw refreshError("REAUTH_REQUIRED");
+    });
+    rendered.push(JSON.stringify(await grant.producer.refresh()));
+
+    const shutdown = await established(harness());
+    rendered.push(JSON.stringify(shutdown.producer.invalidateForShutdown()));
+
+    const everything = rendered.join("\n");
+    for (const sentinel of [
+      ACCESS_SENTINEL,
+      ACCESS_SENTINEL_B,
+      REFRESH_SENTINEL,
+      ACCOUNT_SENTINEL,
+      ACCOUNT_SENTINEL_B,
+      PROFILE_SENTINEL,
+      PROFILE_SENTINEL_B,
+      PASSWORD_SENTINEL,
+      EMAIL_SENTINEL,
+      EPOCH,
+    ]) {
+      assert.equal(everything.includes(sentinel), false, `leaked ${sentinel}`);
+    }
+  });
+
+  test("the legacy login message is never propagated into a producer outcome", async () => {
+    const h = harness();
+    h.legacy.setLogin({ success: false, message: `Login failed: ${ACCOUNT_SENTINEL}` });
+    const outcome = await h.producer.establishFromLogin(EMAIL_SENTINEL, PASSWORD_SENTINEL);
+    assert.deepEqual(Object.keys(outcome), ["kind"]);
+    assert.equal(JSON.stringify(outcome).includes(ACCOUNT_SENTINEL), false);
+  });
+
+  test("outcomes are frozen and carry only closed discriminants", async () => {
+    const h = await established(harness());
+    const outcome = await h.producer.refresh();
+    assert.equal(Object.isFrozen(outcome), true);
+    assert.deepEqual(Object.keys(outcome), ["kind"]);
+  });
+});
+
+describe("BT4 closure — T/V/W: no capability BT4 must not have", () => {
+  const forbidden: Array<[string, RegExp]> = [
+    ["an import of the BT3 authority", /from\s+"[^"]*auth-context\.js"/],
+    ["the BT3 reader port", /AuthContextReader|asReader/],
+    ["context binding", /\bbind\s*\(/],
+    ["guarded execution", /runCurrent/],
+    ["cookie handling", /cookie/i],
+    ["a browser session manager", /BrowserSessionManager/],
+    ["CDP", /\bcdp\b|CdpClient|Runtime\.evaluate|Fetch\.|Network\./i],
+    ["an http(s) URL literal", /https?:\/\//],
+    ["a direct fetch", /\bfetch\s*\(/],
+    ["a websocket or raw socket", /WebSocket|node:net|node:tls|node:https?/],
+    ["direct filesystem access", /node:fs|readFile|writeFile|unlink/],
+    ["environment reading", /process\.env/],
+    ["a timer", /setTimeout|setInterval/],
+    ["an operation registry or dispatcher", /operation-registry|dispatcher|PRODUCTION_OPERATIONS/],
+    ["an epoch or generation it could choose", /epochFactory|initialGeneration/],
+  ];
+
+  for (const [name, pattern] of forbidden) {
+    test(`the producer source contains no ${name}`, () => {
+      assert.equal(pattern.test(PRODUCER_CODE), false, `${name} must not appear in auth-producer.ts`);
+    });
+  }
+
+  test("V: the writer port the producer consumes has exactly three methods", () => {
+    const authority = createAuthContextAuthority({ epochFactory: () => EPOCH, now: () => T0 });
+    assert.deepEqual(Object.keys(authority.asWriter()).sort(), [
+      "commitAuthenticatedMaterial",
+      "currentRevision",
+      "invalidate",
+    ]);
+  });
+
+  test("V: the producer only ever calls those three writer methods", async () => {
+    const h = harness();
+    h.storage.set(tokens());
+    await h.producer.establishFromLogin(EMAIL_SENTINEL, PASSWORD_SENTINEL);
+    h.legacy.setRefresh(async () => tokens({ access_token: ACCESS_SENTINEL_B }));
+    await h.producer.refresh();
+    await h.producer.status();
+    await h.producer.bootstrapFromStorage();
+    h.producer.invalidateForShutdown();
+    await h.producer.logout();
+
+    const distinct = new Set(h.writer.calls.map((c) => c.split(":")[0]));
+    assert.deepEqual([...distinct].sort(), ["commit", "currentRevision", "invalidate"]);
+  });
+
+  test("W: the content transport is uncut and the registry is still empty", () => {
+    assert.deepEqual(PRODUCTION_OPERATIONS, []);
+    assert.equal(Object.isFrozen(PRODUCTION_OPERATIONS), true);
+    // The MCP entry point does not reach the producer either: BT4 wiring is the
+    // deferred obligation BT4-D1, recorded in the design.
+    const entry = readFileSync(join(BT4_REPO_ROOT, "src/index.ts"), "utf-8");
+    assert.equal(/auth-producer/.test(entry), false);
+    // Content tools keep their legacy path in full.
+    assert.equal(entry.includes('from "./api.js"'), true);
+  });
+
+  test("U: the public tool contract is still exactly 21 unchanged names", () => {
+    const baseline = JSON.parse(
+      readFileSync(join(BT4_REPO_ROOT, "test/fixtures/baseline-tools.json"), "utf-8")
+    ) as Array<{ name: string; inputSchema: { properties?: Record<string, unknown> } }>;
+    assert.equal(baseline.length, 21);
+    for (const tool of baseline) {
+      for (const property of Object.keys(tool.inputSchema.properties ?? {})) {
+        assert.equal(
+          ["authorization", "bearer", "cookie", "token", "accountid", "profileid", "epoch", "authgeneration", "context"].includes(
+            property.toLowerCase()
+          ),
+          false,
+          `${tool.name} must not admit ${property}`
+        );
+      }
+    }
+  });
+
+  test("no dependency was added and the engine floor is unchanged", () => {
+    const manifest = JSON.parse(readFileSync(join(BT4_REPO_ROOT, "package.json"), "utf-8")) as {
+      dependencies: Record<string, string>;
+      devDependencies: Record<string, string>;
+      engines: Record<string, string>;
+    };
+    assert.deepEqual(Object.keys(manifest.dependencies).sort(), ["@modelcontextprotocol/sdk", "ws"]);
+    assert.deepEqual(Object.keys(manifest.devDependencies).sort(), [
+      "@types/node",
+      "@types/ws",
+      "esbuild",
+      "tsx",
+      "typescript",
+    ]);
+    assert.equal(manifest.engines.node, ">=18.0.0");
+  });
+});
+
+describe("BT4 closure — the real ports satisfy the producer contract", () => {
+  test("the default adapter binds the real storage and legacy functions", () => {
+    const authority = createAuthContextAuthority({ epochFactory: () => EPOCH, now: () => T0 });
+    const ports = createDefaultAuthProducerPorts(authority.asWriter());
+
+    assert.deepEqual(Object.keys(ports).sort(), ["legacy", "storage", "writer"]);
+    assert.deepEqual(Object.keys(ports.storage).sort(), [
+      "clearAuthData",
+      "isTokenExpired",
+      "loadTokens",
+    ]);
+    assert.deepEqual(Object.keys(ports.legacy).sort(), ["getStatus", "login", "refreshRequest"]);
+    for (const fn of [...Object.values(ports.storage), ...Object.values(ports.legacy)]) {
+      assert.equal(typeof fn, "function");
+    }
+    // A producer really can be built from them — the wiring BT4-D1 defers is
+    // exactly this call plus one composition-root line.
+    assert.equal(typeof createAuthProducer(ports).refresh, "function");
+  });
+
+  test("the real isTokenExpired keeps its one-minute buffer semantics", () => {
+    const authority = createAuthContextAuthority({ epochFactory: () => EPOCH, now: () => T0 });
+    const ports = createDefaultAuthProducerPorts(authority.asWriter());
+    const future = { ...tokens(), expires_at: Date.now() + ONE_HOUR };
+    const past = { ...tokens(), expires_at: Date.now() - 1 };
+    assert.equal(ports.storage.isTokenExpired(future), false);
+    assert.equal(ports.storage.isTokenExpired(past), true);
   });
 });

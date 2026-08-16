@@ -12,7 +12,9 @@
 //
 // Frozen design: CRUNCHYROLL-BT4-DESIGN.md.
 
+import { clearAuthData, isTokenExpired, loadTokens } from "../auth.js";
 import type { LogoutResult, TokenData } from "../auth.js";
+import { getStatus, login, refreshRequest } from "../api.js";
 
 // ── The injected ports (design §5) ──────────────────────────────────────────
 
@@ -508,6 +510,35 @@ const EMPTY_TOKEN: TokenLike = Object.freeze({
 
 export function createAuthProducer(ports: AuthProducerPorts): AuthProducer {
   return new AuthProducerImpl(ports);
+}
+
+/**
+ * Bind the storage and legacy ports to the real project functions.
+ *
+ * This is the concrete adapter, not a placeholder: it is a compile-time proof
+ * that `src/auth.ts` and `src/api.ts` genuinely satisfy the consumed contracts,
+ * and it reduces the deferred composition wiring (BT4-D1) to instantiating one
+ * authority and calling this with its `asWriter()` port.
+ *
+ * The network-facing auth logic is ADAPTED, never duplicated: login, the
+ * single-flight refresh and status remain owned by `src/api.ts`, and hardened
+ * persistence remains owned by `src/auth.ts`. There is no second competing
+ * implementation of either.
+ */
+export function createDefaultAuthProducerPorts(writer: AuthWriterPort): AuthProducerPorts {
+  return Object.freeze({
+    writer,
+    storage: Object.freeze({
+      loadTokens,
+      clearAuthData,
+      isTokenExpired,
+    }),
+    legacy: Object.freeze({
+      login,
+      refreshRequest,
+      getStatus,
+    }),
+  });
 }
 
 /** Compile-time proof that auth.ts's TokenData satisfies the consumed shape. */
