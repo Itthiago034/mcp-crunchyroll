@@ -221,6 +221,13 @@ function launchArguments(
     "--no-default-browser-check",
     "--disable-background-networking",
     "--disable-background-mode",
+    // DIAGNOSTIC-ONLY (CI sandbox experiment, diagnostic/bt6-ci-chromium-stderr):
+    // Added to establish causality for the GitHub-runner Chromium SIGABRT.
+    // This flag REDUCES Chromium isolation (disables the sandbox) and is NOT a
+    // proposed permanent fix — it is CI-only observability. Production and
+    // normal local runs are unaffected: the flag is appended only when
+    // running inside CI. See BT6-CI-CHROMIUM-SANDBOX-EXPERIMENT.md.
+    ...(process.env.CI === "true" ? ["--no-sandbox"] : []),
   ];
   return Object.freeze(
     config.launchMode === "headless" ? [...common, "--headless=new"] : common,
