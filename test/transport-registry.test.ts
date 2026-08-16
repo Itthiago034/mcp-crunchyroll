@@ -22,6 +22,7 @@ export const SYNTHETIC_PUBLIC: OperationDescriptor = {
   callerParams: { query: nonEmptyString, n: optionalIntegerInRange(1, 100) },
   authDerivedParams: {},
   scope: "PUBLIC",
+  auth: "NONE",
   mutation: false,
 };
 
@@ -32,6 +33,7 @@ export const SYNTHETIC_ACCOUNT: OperationDescriptor = {
   callerParams: { n: optionalIntegerInRange(1, 100) },
   authDerivedParams: { accountId: { source: "accountId" } },
   scope: "ACCOUNT",
+  auth: "BEARER",
   mutation: false,
 };
 
@@ -201,6 +203,7 @@ describe("BT1 registry — immutability of captured policy", () => {
       callerParams: { q: spec },
       authDerivedParams: {},
       scope: "PUBLIC",
+  auth: "NONE",
       mutation: false,
     };
     const registry = createOperationRegistry([descriptor]);
@@ -224,6 +227,7 @@ describe("BT1 registry — immutability of captured policy", () => {
       callerParams,
       authDerivedParams: {},
       scope: "PUBLIC",
+  auth: "NONE",
       mutation: false,
     };
     const registry = createOperationRegistry([descriptor]);
@@ -246,6 +250,7 @@ describe("BT1 registry — immutability of captured policy", () => {
       callerParams: {},
       authDerivedParams: {},
       scope: "PUBLIC",
+  auth: "NONE",
       mutation: false,
     };
     const registry = createOperationRegistry([descriptor]);
@@ -264,6 +269,7 @@ describe("BT1 registry — immutability of captured policy", () => {
       callerParams: {},
       authDerivedParams,
       scope: "ACCOUNT",
+  auth: "BEARER",
       mutation: false,
     };
     const registry = createOperationRegistry([descriptor]);
@@ -285,5 +291,81 @@ describe("BT1 registry — immutability of captured policy", () => {
       () => resolveCall(registry, "SYNTHETIC_PUBLIC", { query: "x", url: "https://evil.example" }),
       (e: unknown) => e instanceof TransportError && e.kind === "INVALID_ARGUMENTS"
     );
+  });
+});
+
+// ── BT5-FIX1: auth requirement is a dimension of its own ────────────────────
+
+describe("BT5-FIX1 registry — scope and auth are orthogonal", () => {
+  const base = {
+    method: "GET" as const,
+    pathTemplate: "/synthetic/v1/thing",
+    callerParams: {},
+    authDerivedParams: {},
+    mutation: false as const,
+  };
+
+  test("ACCOUNT + NONE is rejected at construction as a meaningless combination", () => {
+    assert.throws(
+      () =>
+        createOperationRegistry([
+          { ...base, id: "SYNTH_ACCOUNT_NONE" as OperationId, scope: "ACCOUNT",
+  auth: "BEARER", auth: "NONE" },
+        ]),
+      (e: unknown) => e instanceof TransportError && e.kind === "INVALID_ARGUMENTS"
+    );
+  });
+
+  test("an unknown or missing auth requirement is rejected, never defaulted", () => {
+    for (const auth of [undefined, "MAYBE", "", null]) {
+      assert.throws(
+        () =>
+          createOperationRegistry([
+            {
+              ...base,
+              id: "SYNTH_BAD_AUTH" as OperationId,
+              scope: "PUBLIC",
+  auth: "NONE",
+              auth: auth as never,
+            },
+          ]),
+        (e: unknown) => e instanceof TransportError && e.kind === "INVALID_ARGUMENTS",
+        `auth=${String(auth)} must be refused`
+      );
+    }
+  });
+
+  test("the three meaningful combinations are accepted", () => {
+    const registry = createOperationRegistry([
+      { ...base, id: "SYNTH_PUBLIC_NONE" as OperationId, scope: "PUBLIC",
+  auth: "NONE", auth: "NONE" },
+      { ...base, id: "SYNTH_PUBLIC_BEARER" as OperationId, scope: "PUBLIC",
+  auth: "NONE", auth: "BEARER" },
+      {
+        ...base,
+        id: "SYNTH_ACCOUNT_BEARER" as OperationId,
+        pathTemplate: "/synthetic/v1/{accountId}/thing",
+        authDerivedParams: { accountId: { source: "accountId" as const } },
+        scope: "ACCOUNT",
+  auth: "BEARER",
+        auth: "BEARER",
+      },
+    ]);
+    assert.deepEqual(
+      [...registry.ids()].sort(),
+      ["SYNTH_ACCOUNT_BEARER", "SYNTH_PUBLIC_BEARER", "SYNTH_PUBLIC_NONE"]
+    );
+  });
+
+  test("the captured descriptor keeps the auth requirement immutably", () => {
+    const mutable = {
+      ...base,
+      id: "SYNTH_CAPTURE" as OperationId,
+      scope: "PUBLIC" as const,
+      auth: "BEARER" as const,
+    };
+    const registry = createOperationRegistry([mutable]);
+    (mutable as { auth: string }).auth = "NONE";
+    assert.equal(registry.get("SYNTH_CAPTURE")!.auth, "BEARER", "registry policy is a copy");
   });
 });

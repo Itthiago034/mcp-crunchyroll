@@ -40,6 +40,7 @@ function captureDescriptor(d: OperationDescriptor): OperationDescriptor {
     callerParams: Object.freeze(callerParams),
     authDerivedParams: Object.freeze(authDerivedParams),
     scope: d.scope,
+    auth: d.auth,
     mutation: d.mutation,
   });
 }
@@ -54,6 +55,27 @@ export function createOperationRegistry(
 ): OperationRegistry {
   const byId = new Map<string, OperationDescriptor>();
   for (const d of descriptors) {
+    // BT5-FIX1. The two dimensions are closed at runtime, not merely typed:
+    // tsconfig checks src/ only, and an unknown value must never fall through
+    // to a default that grants or withholds material by accident.
+    if (d.auth !== "NONE" && d.auth !== "BEARER") {
+      throw new TransportError(
+        "INVALID_ARGUMENTS",
+        `operation ${String(d.id)} declares no closed auth requirement`
+      );
+    }
+    if (d.scope !== "PUBLIC" && d.scope !== "ACCOUNT") {
+      throw new TransportError("INVALID_ARGUMENTS", `operation ${String(d.id)} declares no closed scope`);
+    }
+    // An account-scoped endpoint resolves identity from the current record, so
+    // it cannot be served without material. The combination has no meaning and
+    // is refused rather than silently reinterpreted.
+    if (d.scope === "ACCOUNT" && d.auth === "NONE") {
+      throw new TransportError(
+        "INVALID_ARGUMENTS",
+        `operation ${String(d.id)} is account-scoped but declares no auth material`
+      );
+    }
     if (byId.has(d.id)) {
       throw new TransportError("INVALID_ARGUMENTS", `duplicate operation id: ${d.id}`);
     }
@@ -134,18 +156,14 @@ export function resolveCall(
  * `OPERATION_NOT_MIGRATED` and can no longer reach Node.
  *
  * `GET_CATEGORIES` declares no caller params — the tool takes none — and no
- * auth-derived params: it needs a bearer, not an identity.
+ * auth-derived params: it needs a bearer, not an identity. BT5-FIX1 gives that
+ * its own field, so the descriptor states both facts without either standing in
+ * for the other: `scope: PUBLIC` (addresses nobody's account) and
+ * `auth: BEARER` (still needs a live AuthContext).
  *
- * DEVIATION, DECLARED: the external ruling labelled this operation
- * `scope: PUBLIC` while stating that PUBLIC does not mean anonymous and that a
- * bearer is still required. In BT3's closed vocabulary those two things cannot
- * both be true: `bind()` answers a PUBLIC descriptor with no context and no
- * material at all, so a PUBLIC operation is unable to carry a bearer. ACCOUNT
- * with ZERO auth-derived params is the shape that means exactly what the ruling
- * described — a live AuthContext is required, no identity is resolved, and
- * ACCOUNT_READY suffices because nothing here needs a profile id. Choosing
- * PUBLIC instead would have meant reading material outside BT3's reader and
- * duplicating the §13A commit check, which is worse. Submitted for review.
+ * BT5-FIX1 superseded the earlier ACCOUNT-with-no-identity shape, which
+ * overloaded ACCOUNT and would have made PROFILE_READY enforcement ambiguous
+ * for the real account operations arriving at BT7.
  */
 export const PRODUCTION_OPERATIONS: readonly OperationDescriptor[] = Object.freeze([
   Object.freeze({
@@ -154,7 +172,8 @@ export const PRODUCTION_OPERATIONS: readonly OperationDescriptor[] = Object.free
     pathTemplate: "/content/v2/discover/categories?locale=en-US",
     callerParams: Object.freeze({}),
     authDerivedParams: Object.freeze({}),
-    scope: "ACCOUNT",
+    scope: "PUBLIC",
+    auth: "BEARER",
     mutation: false,
   }) as OperationDescriptor,
 ]);

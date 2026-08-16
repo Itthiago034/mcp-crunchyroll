@@ -183,3 +183,137 @@ methods, no new dependency, no schema change, no push, no merge, no `main`
 change, no BT6.
 
 BT5 is **not** declared closed here.
+
+---
+
+# Part II — BT5-FIX1: bearer requirement separated from endpoint scope
+
+Append-only. Part I stands as written, including its declared deviation, which
+this part supersedes rather than erases.
+
+## 11. Correction to Part I
+
+Part I §9 listed "BT4-N2, N3, N4, N5" as open. That is wrong: **BT4-N5 and
+BT4-N6 were both CLOSED at BT4's formal closure.** The correct state is:
+
+| Item | State |
+|---|---|
+| BT4-R1 | CLOSED |
+| BT4-N5 (Supported Human Onboarding) | **CLOSED** |
+| BT4-N6 (operator documentation) | **CLOSED** |
+| BT4-N2, BT4-N3, BT4-N4 | open, non-blocking |
+
+## 12. What was wrong, and why it mattered
+
+BT5 shipped `GET_CATEGORIES` as `scope: "ACCOUNT"` with zero auth-derived
+params, because BT3's `bind()` keyed the wrapper on `scope` and only an ACCOUNT
+descriptor could obtain a bearer. The endpoint addresses nobody's account, so
+that label overloaded ACCOUNT — and it would have made the readiness rule
+ambiguous exactly when it starts to matter: BT7's account operations must
+require `PROFILE_READY`, and a stage cannot enforce that if ACCOUNT already
+means "sometimes ACCOUNT_READY is enough".
+
+The defect was one of vocabulary, not of behaviour: two independent questions
+were being answered by one field.
+
+## 13. The two dimensions
+
+| | `auth: NONE` | `auth: BEARER` |
+|---|---|---|
+| **`scope: PUBLIC`** | truly unauthenticated: PUBLIC wrapper, no AuthContext, nothing to render | **`GET_CATEGORIES`.** AuthContext required, AuthorizedCall, `runCurrent`, empty identity, `ACCOUNT_READY` suffices |
+| **`scope: ACCOUNT`** | **refused at registry construction** — an account-scoped path resolves identity from the record and cannot be served without material | account-scoped: AuthContext required, identity from the SAME snapshot, **`PROFILE_READY` required before these become caller-reachable (BT7 obligation)** |
+
+`GET_CATEGORIES` final descriptor:
+
+```
+id                 GET_CATEGORIES
+method             GET
+pathTemplate       /content/v2/discover/categories?locale=en-US
+callerParams       {}
+authDerivedParams  {}
+scope              PUBLIC
+auth               BEARER
+mutation           false
+```
+
+## 14. The change to `src/transport/auth-context.ts`
+
+24 insertions, 1 deletion, and nothing else in that file:
+
+- a runtime allowlist `AUTH_MATERIAL_REQUIREMENTS = ["NONE","BEARER"]`, in the
+  same style as the existing `AUTH_COMMIT_MODES` — an unknown value fails
+  closed rather than defaulting, because defaulting either way is a security
+  answer given by accident;
+- `bind()` decides on `descriptor.auth` instead of `descriptor.scope`. `NONE`
+  still yields the PUBLIC wrapper with no context; `BEARER` yields an
+  `AuthorizedCall` whose identity resolution loop is simply empty when the
+  descriptor declares no auth-derived params.
+
+Preserved, untouched: one authority, the current record as the only root of
+material, the issuance `WeakSet`, `runCurrent` as the only guarded use that
+releases a bearer, the pre-check, the `AbortSignal`, the post-check, redaction
+registration at bind, and the absence of any other read path.
+
+**No second bearer reader exists.** Asserted mechanically: `runCurrent` has
+exactly one production consumer (`browser-api-backend.ts`), `asReader()` is
+derived once (the composition root), no module calls `inspectForTest`, and
+there is no `getCurrentBearer`-style accessor anywhere — `AuthContextReader`
+still exposes exactly `bind` and `runCurrent`.
+
+## 15. RED, exactly as observed
+
+Eight failures before the fix:
+
+| Test | RED |
+|---|---|
+| a PUBLIC descriptor that needs a bearer produces an AuthorizedCall | got `PUBLIC` |
+| it releases the bearer only through runCurrent, with both checks | no context to run |
+| without a usable context, PUBLIC + BEARER fails closed | bound happily with no material |
+| an unknown auth requirement fails closed rather than defaulting | silently treated as public |
+| ACCOUNT + NONE is rejected at construction | accepted |
+| an unknown or missing auth requirement is rejected, never defaulted | accepted |
+| the captured descriptor keeps the auth requirement immutably | field did not exist |
+| `PRODUCTION_OPERATIONS` descriptor is PUBLIC + BEARER | was ACCOUNT |
+
+**Born-green, recorded as such:** two of the new tests — the generation-change
+discard and the wrapper-serialization sweep — passed before the fix, but for
+the wrong reason (a PUBLIC wrapper has no context to leak and no `runCurrent`
+to reach). They became meaningful only after `bind()` changed, which is why
+they are kept.
+
+## 16. Verification
+
+| Check | Result |
+|---|---|
+| Focused: auth-context, registry, dispatcher, BT5 cutover, browser backend | 268/268 |
+| Full suite | **794 pass, 0 fail, 0 skipped** |
+| Zero-egress (`bwrap --unshare-net`) | **794 pass, 0 fail** |
+| Typecheck / build | exit 0 / exit 0 |
+| Public contract | 21 tools, schemas byte-equivalent, fixture untouched |
+| `PRODUCTION_OPERATIONS` | exactly `GET_CATEGORIES`, now PUBLIC + BEARER |
+| Second bearer reader | none (§14) |
+
+**Flake observed and reported, not hidden.** Two full-suite runs each showed a
+single failure in the REAL-browser BT2 integration suite — a different test
+each time (`the profile and its ownership record survive across stop`, then
+`cleanup runs even when the body fails`), 15 s and 0.3 s. The suite passes 8/8
+in isolation and the third full run was 794/794 clean. It is contention in the
+real-browser suite under parallel load, aggravated by an orphaned browser from
+the earlier smoke; it is not caused by this change, which touches no lifecycle
+code. Recorded as a known test-infrastructure weakness rather than explained
+away.
+
+## 17. Readiness obligation carried forward
+
+BT3's reader knows nothing about the `ACCOUNT_READY`/`PROFILE_READY` enum, and
+this FIX deliberately did not build that: it would be a BT4-wide refactor for
+an operation that does not need it.
+
+**Obligation recorded for BT7:** before any `scope: ACCOUNT` operation becomes
+caller-reachable, the gateway must require `PROFILE_READY`. `ACCOUNT_READY` is
+sufficient only for `PUBLIC + BEARER`. Nothing in this stage documents or
+implements ACCOUNT as satisfiable at `ACCOUNT_READY`.
+
+## 18. Status
+
+BT5-FIX1 is a candidate for external review. BT5 is **not** declared closed.

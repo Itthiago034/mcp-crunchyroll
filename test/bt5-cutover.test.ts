@@ -97,10 +97,10 @@ describe("BT5 cutover — exactly one migrated operation", () => {
     assert.equal(descriptor.pathTemplate, "/content/v2/discover/categories?locale=en-US");
     assert.deepEqual(Object.keys(descriptor.callerParams), []);
     assert.deepEqual(Object.keys(descriptor.authDerivedParams), []);
-    // DECLARED DEVIATION from the ruling's literal label: see the registry
-    // comment. ACCOUNT with zero auth-derived params is BT3's shape for
-    // "needs a bearer, resolves no identity, ACCOUNT_READY suffices".
-    assert.equal(descriptor.scope, "ACCOUNT");
+    // BT5-FIX1: the two dimensions are separate. The endpoint is not
+    // account-scoped (no identity in its path), and it still requires a bearer.
+    assert.equal(descriptor.scope, "PUBLIC");
+    assert.equal(descriptor.auth, "BEARER");
     assert.deepEqual(Object.keys(descriptor.authDerivedParams), []);
     assert.equal(descriptor.mutation, false);
   });

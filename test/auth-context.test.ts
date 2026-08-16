@@ -50,6 +50,19 @@ const PUBLIC_DESCRIPTOR: OperationDescriptor = {
   callerParams: { query: nonEmptyString },
   authDerivedParams: {},
   scope: "PUBLIC",
+  auth: "NONE",
+  mutation: false,
+};
+
+/** BT5-FIX1: needs a bearer, resolves no identity. PUBLIC + BEARER. */
+const PUBLIC_BEARER_DESCRIPTOR: OperationDescriptor = {
+  id: "BT3_SYNTHETIC_PUBLIC_BEARER" as OperationId,
+  method: "GET",
+  pathTemplate: "/synthetic/v1/catalog",
+  callerParams: {},
+  authDerivedParams: {},
+  scope: "PUBLIC",
+  auth: "BEARER",
   mutation: false,
 };
 
@@ -60,6 +73,7 @@ const ACCOUNT_DESCRIPTOR: OperationDescriptor = {
   callerParams: {},
   authDerivedParams: { accountId: { source: "accountId" } },
   scope: "ACCOUNT",
+  auth: "BEARER",
   mutation: false,
 };
 
@@ -70,6 +84,7 @@ const PROFILE_DESCRIPTOR: OperationDescriptor = {
   callerParams: {},
   authDerivedParams: { accountId: { source: "accountId" }, profileId: { source: "profileId" } },
   scope: "ACCOUNT",
+  auth: "BEARER",
   mutation: false,
 };
 
@@ -2087,5 +2102,98 @@ describe("BT3 opacity — a caller cannot construct an AuthContext", () => {
 
   test("AuthContext is a type-only export with no runtime value", () => {
     assert.equal((authContextModule as Record<string, unknown>).AuthContext, undefined);
+  });
+});
+
+// ── BT5-FIX1: bearer requirement is orthogonal to endpoint scope ────────────
+
+describe("BT5-FIX1 — PUBLIC + BEARER binds to an authorized call", () => {
+  /** A READY authority holding synthetic material. */
+  function readyAuthority(): Authority {
+    const a = authority();
+    establish(a);
+    return a;
+  }
+
+  const publicBearerCall: ResolvedCall = Object.freeze({
+    descriptor: PUBLIC_BEARER_DESCRIPTOR,
+    callerParams: Object.freeze({}),
+  });
+
+  test("a PUBLIC descriptor that needs a bearer produces an AuthorizedCall", () => {
+    const authority = readyAuthority();
+    const bound = authority.asReader().bind(publicBearerCall);
+
+    assert.equal(bound.kind, "AUTHENTICATED", "PUBLIC+BEARER must carry a context");
+    // No identity is resolved: the endpoint is not account-scoped.
+    assert.deepEqual((bound as { authDerivedParams: unknown }).authDerivedParams, {});
+  });
+
+  test("it releases the bearer only through runCurrent, with both checks", async () => {
+    const authority = readyAuthority();
+    const reader = authority.asReader();
+    const bound = reader.bind(publicBearerCall);
+    assert.equal(bound.kind, "AUTHENTICATED");
+
+    let seen: string | undefined;
+    const result = await reader.runCurrent(bound as never, async (view) => {
+      seen = view.accessToken;
+      assert.equal(view.signal.aborted, false, "the pre-check passed a live signal");
+      return "released";
+    });
+
+    assert.equal(result, "released");
+    assert.equal(seen, TOKEN_SENTINEL);
+  });
+
+  test("a generation change during the call discards the result", async () => {
+    const authority = readyAuthority();
+    const reader = authority.asReader();
+    const bound = reader.bind(publicBearerCall);
+
+    await assert.rejects(
+      reader.runCurrent(bound as never, async () => {
+        authority.invalidate("LOGOUT");
+        return "must not be released";
+      }),
+      (error: unknown) => (error as { name?: string }).name === "AuthContextError"
+    );
+  });
+
+  test("the wrapper never serializes the context or the bearer", () => {
+    const authority = readyAuthority();
+    const bound = authority.asReader().bind(publicBearerCall);
+    const rendered = `${JSON.stringify(bound)}|${Object.keys(bound).join(",")}`;
+    assert.equal(rendered.includes(TOKEN_SENTINEL), false);
+    assert.equal(rendered.includes("context"), false);
+  });
+
+  test("without a usable context, PUBLIC + BEARER fails closed", () => {
+    const authority = createAuthContextAuthority();
+    assert.throws(
+      () => authority.asReader().bind(publicBearerCall),
+      (error: unknown) => (error as { name?: string }).name === "AuthContextError"
+    );
+  });
+
+  test("PUBLIC + NONE still binds with no context at all", () => {
+    const authority = readyAuthority();
+    const bound = authority.asReader().bind(
+      Object.freeze({ descriptor: PUBLIC_DESCRIPTOR, callerParams: Object.freeze({ query: "x" }) })
+    );
+    assert.equal(bound.kind, "PUBLIC");
+    assert.equal("context" in bound, false);
+  });
+
+  test("an unknown auth requirement fails closed rather than defaulting", () => {
+    const authority = readyAuthority();
+    const hostile = Object.freeze({
+      descriptor: Object.freeze({ ...PUBLIC_BEARER_DESCRIPTOR, auth: "MAYBE" as never }),
+      callerParams: Object.freeze({}),
+    });
+    assert.throws(
+      () => authority.asReader().bind(hostile),
+      (error: unknown) => (error as { name?: string }).name === "AuthContextError"
+    );
   });
 });

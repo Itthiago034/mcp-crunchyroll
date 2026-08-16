@@ -37,7 +37,8 @@ const GET_CATEGORIES: OperationDescriptor = Object.freeze({
   authDerivedParams: Object.freeze({}),
   // ACCOUNT with zero auth-derived params: a bearer is required, no identity
   // is resolved. See the registry's declared deviation.
-  scope: "ACCOUNT" as const,
+  scope: "PUBLIC" as const,
+  auth: "BEARER" as const,
   mutation: false as const,
 });
 

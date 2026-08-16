@@ -19,6 +19,7 @@ const OP: OperationDescriptor = {
   callerParams: { query: nonEmptyString },
   authDerivedParams: {},
   scope: "PUBLIC",
+  auth: "NONE",
   mutation: false,
 };
 
@@ -29,6 +30,7 @@ const ACCOUNT_OP: OperationDescriptor = {
   callerParams: {},
   authDerivedParams: { accountId: { source: "accountId" } },
   scope: "ACCOUNT",
+  auth: "BEARER",
   mutation: false,
 };
 

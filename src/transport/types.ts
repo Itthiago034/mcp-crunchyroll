@@ -8,7 +8,26 @@
 export type OperationId = string & { readonly __brand: "OperationId" };
 
 export type HttpMethod = "GET" | "POST" | "DELETE";
+
+/**
+ * WHOSE data an endpoint addresses — an identity question.
+ *
+ * `PUBLIC`: the path carries no account or profile identity.
+ * `ACCOUNT`: it does, and BT7 will require PROFILE_READY before such an
+ * operation becomes caller-reachable.
+ */
 export type AuthScope = "PUBLIC" | "ACCOUNT";
+
+/**
+ * WHETHER the request needs authentication material — a separate question
+ * (BT5-FIX1).
+ *
+ * Conflating the two is what made `GET_CATEGORIES` look account-scoped: it
+ * addresses nobody's account, yet every Crunchyroll API call carries a bearer.
+ * `PUBLIC + BEARER` says exactly that, and `ACCOUNT + NONE` is meaningless and
+ * refused at registry construction.
+ */
+export type AuthMaterialRequirement = "NONE" | "BEARER";
 export type MutationClass = false | "ACCOUNT" | "PROGRESS";
 
 /**
@@ -37,6 +56,7 @@ export interface OperationDescriptor {
   readonly callerParams: Readonly<Record<string, ParamSpec>>;
   readonly authDerivedParams: Readonly<Record<string, AuthDerivedParamSpec>>;
   readonly scope: AuthScope;
+  readonly auth: AuthMaterialRequirement;
   readonly mutation: MutationClass;
 }
 

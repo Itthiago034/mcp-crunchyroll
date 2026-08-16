@@ -186,6 +186,15 @@ export type AuthInvalidationCause =
 
 const AUTH_COMMIT_MODES: readonly string[] = Object.freeze(["ESTABLISH", "REFRESH"]);
 
+/**
+ * BT5-FIX1. A descriptor states its auth requirement separately from its
+ * scope, and this is the runtime allowlist for that field: an unknown value
+ * must fail closed rather than default to either answer. Defaulting to NONE
+ * would serve an authenticated endpoint with no bearer; defaulting to BEARER
+ * would demand material a genuinely public endpoint does not need.
+ */
+const AUTH_MATERIAL_REQUIREMENTS: readonly string[] = Object.freeze(["NONE", "BEARER"]);
+
 const AUTH_INVALIDATION_CAUSES: readonly string[] = Object.freeze([
   "LOGOUT",
   "INVALID_GRANT",
@@ -249,6 +258,9 @@ export interface AuthExecutionView {
 // ── Execution wrappers (design §13, §14) ────────────────────────────────────
 
 /**
+ * BT5-FIX1: which wrapper a call gets is decided by `descriptor.auth`, not by
+ * `descriptor.scope` — a PUBLIC endpoint may still require a bearer.
+ *
  * `ResolvedCall` is NOT extended with an optional auth field. An optional field
  * would let invalid combinations exist (an account call with no context, a
  * public call carrying one) and would drag mutable-stage concerns into BT1's
@@ -615,7 +627,18 @@ export class AuthContextAuthority {
    * — never from caller input, never from a different generation.
    */
   bind(call: ResolvedCall): ExecutionCall {
-    if (call.descriptor.scope === "PUBLIC") {
+    // BT5-FIX1: the question here is whether MATERIAL is required, which is not
+    // the same question as whose data the endpoint addresses. A PUBLIC endpoint
+    // that still needs a bearer (every Crunchyroll read) binds to an authorized
+    // call and goes through runCurrent exactly like an account-scoped one; only
+    // its identity resolution is empty.
+    const requirement = call.descriptor.auth;
+    if (!AUTH_MATERIAL_REQUIREMENTS.includes(requirement as string)) {
+      throw new AuthContextError("AUTH_CONTEXT_UNAVAILABLE");
+    }
+    if (requirement === "NONE") {
+      // A truly unauthenticated operation. It carries no context, and BT3
+      // hands it nothing it could accidentally render.
       return Object.freeze({ kind: "PUBLIC" as const, call });
     }
 
