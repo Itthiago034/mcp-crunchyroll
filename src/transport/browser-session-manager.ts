@@ -51,6 +51,13 @@ export type LifecycleEvent =
 
 export interface BrowserSessionManager {
   state(): BrowserLifecycleState;
+  /**
+   * BT4-R1: the CURRENT connection generation, or `undefined` when no
+   * connection is live. Read-only evidence of identity — it grants no
+   * capability and exposes nothing about the session — so a consumer holding
+   * material observed on an older connection can refuse to act on it.
+   */
+  connectionGeneration(): number | undefined;
   start(): Promise<void>;
   stop(): Promise<void>;
   restart(): Promise<void>;
@@ -688,6 +695,10 @@ export function createBrowserSessionManager(
 
   const manager: BrowserSessionManager = {
     state: () => lifecycleState,
+    // Zero is the module's own "no live connection" sentinel: generations start
+    // at one and are reset to zero when the connection is disposed.
+    connectionGeneration: () =>
+      activeConnectionGeneration === 0 ? undefined : activeConnectionGeneration,
     start() {
       if (lifecycleState === "BROWSER_READY") return Promise.resolve();
       if (startFlight) return startFlight;

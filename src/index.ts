@@ -148,6 +148,9 @@ const authOrchestrator = createAuthOrchestrator({
   },
   browser: {
     lifecycleState: () => browserSession?.state(),
+    // BT4-R1: read-only connection identity, so material observed on a
+    // connection that has since been replaced can never be installed.
+    connectionGeneration: () => browserSession?.connectionGeneration(),
     openLoginSurface: async () => {
       const session = managedBrowser();
       await session.start();

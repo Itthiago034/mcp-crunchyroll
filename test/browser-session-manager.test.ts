@@ -123,7 +123,11 @@ describe("BT2 session manager — start and stop", () => {
     // closed channel (paused notification, bounded body read, continue, close)
     // and is NOT a generic CDP surface — there is still no `send`, no method
     // string, no evaluate and no cookie access on this object.
+    //
+    // BT4-R1 adds `connectionGeneration`: read-only evidence of connection
+    // identity. It answers with a number and grants no capability at all.
     assert.deepEqual(Object.keys(manager).sort(), [
+      "connectionGeneration",
       "ensureManagedPage",
       "managedPageId",
       "onLifecycleEvent",
@@ -141,6 +145,33 @@ describe("BT2 session manager — start and stop", () => {
         `the manager must not expose ${forbidden}`
       );
     }
+  });
+
+  test("BT4-R1: the connection generation is undefined until a connection is live", async () => {
+    const { manager } = wireFakes();
+    assert.equal(manager.connectionGeneration(), undefined, "nothing is live yet");
+
+    await manager.start();
+    const live = manager.connectionGeneration();
+    assert.equal(typeof live, "number");
+    assert.ok((live as number) > 0, "a live connection has a positive generation");
+
+    await manager.stop();
+    assert.equal(manager.connectionGeneration(), undefined, "stopped means no generation");
+  });
+
+  test("BT4-R1: a reconnect produces a NEW generation, never the old one", async () => {
+    const { manager, connector, clock } = wireFakes();
+    await manager.start();
+    const before = manager.connectionGeneration();
+
+    connector.connections[0].emitClose();
+    await clock.drain();
+
+    assert.equal(manager.state(), "BROWSER_READY");
+    const after = manager.connectionGeneration();
+    assert.notEqual(after, before, "material observed on the old connection must not match");
+    assert.equal(typeof after, "number");
   });
 
   test("createRealBrowserSessionSeams returns all production seams", () => {

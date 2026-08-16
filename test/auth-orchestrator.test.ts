@@ -33,6 +33,14 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+/** The live BT2 connection generation the fake browser reports by default. */
+const GENERATION = 7;
+
+/** An OBSERVED outcome always carries the generation it was observed on. */
+function observedOn(generation: number, material: ObservedAuthMaterial = MATERIAL) {
+  return { kind: "OBSERVED" as const, material, connectionGeneration: generation };
+}
+
 interface Harness {
   ports: AuthOrchestratorPorts;
   orchestrator: ReturnType<typeof createAuthOrchestrator>;
@@ -40,11 +48,16 @@ interface Harness {
   setAvailability(value: "READY" | "UNAVAILABLE"): void;
   setProfile(has: boolean): void;
   setBrowser(state: "STOPPED" | "BROWSER_STARTING" | "BROWSER_READY" | "DEGRADED" | undefined): void;
+  setConnectionGeneration(value: number | undefined): void;
   setObservation(handler: () => Promise<unknown>): void;
   setLoginSurface(handler: () => Promise<void>): void;
   setLogout(handler: () => Promise<{ persistence: unknown }>): void;
   loginSurfaceOpens: number;
   installs: ObservedAuthMaterial[];
+  /** Every signal the orchestrator handed to the observer, in order. */
+  observerSignals: (AbortSignal | undefined)[];
+  /** Resolves when the observer has actually been entered — a barrier, not a sleep. */
+  observing: Promise<void>;
 }
 
 function harness(): Harness {
@@ -52,8 +65,14 @@ function harness(): Harness {
   let hasProfile = false;
   let browserState: Harness extends never ? never : ReturnType<AuthOrchestratorPorts["browser"]["lifecycleState"]> =
     "STOPPED";
+  let connectionGeneration: number | undefined = GENERATION;
   const events: string[] = [];
   const installs: ObservedAuthMaterial[] = [];
+  const observerSignals: (AbortSignal | undefined)[] = [];
+  let observingResolve!: () => void;
+  const observing = new Promise<void>((resolve) => {
+    observingResolve = resolve;
+  });
   const state = { loginSurfaceOpens: 0 };
 
   let observation: () => Promise<unknown> = async () => ({ kind: "TIMED_OUT" });
@@ -69,6 +88,7 @@ function harness(): Harness {
     },
     browser: {
       lifecycleState: () => browserState,
+      connectionGeneration: () => connectionGeneration,
       openLoginSurface: async () => {
         state.loginSurfaceOpens += 1;
         events.push("openLoginSurface");
@@ -90,8 +110,10 @@ function harness(): Harness {
       },
     },
     observer: {
-      observeNextAuthMaterial: async () => {
+      observeNextAuthMaterial: async (options) => {
         events.push("observe");
+        observerSignals.push(options?.signal);
+        observingResolve();
         return observation() as never;
       },
     },
@@ -103,6 +125,8 @@ function harness(): Harness {
     orchestrator,
     events,
     installs,
+    observerSignals,
+    observing,
     get loginSurfaceOpens() {
       return state.loginSurfaceOpens;
     },
@@ -114,6 +138,9 @@ function harness(): Harness {
     },
     setBrowser: (value) => {
       browserState = value;
+    },
+    setConnectionGeneration: (value) => {
+      connectionGeneration = value;
     },
     setObservation: (handler) => {
       observation = handler;
@@ -210,7 +237,7 @@ describe("BT4 readiness — browser liveness is never authentication", () => {
 describe("BT4 login — interactive, idempotent, never racing a logout", () => {
   test("H: a login enters AUTHENTICATING exactly once and installs the material", async () => {
     const h = harness();
-    h.setObservation(async () => ({ kind: "OBSERVED", material: MATERIAL }));
+    h.setObservation(async () => observedOn(GENERATION));
 
     const outcome = await h.orchestrator.login();
 
@@ -230,7 +257,7 @@ describe("BT4 login — interactive, idempotent, never racing a logout", () => {
     assert.equal(h.orchestrator.readiness().auth_state, "AUTHENTICATING");
     assert.equal(h.orchestrator.readiness().authenticated, false);
 
-    gate.resolve({ kind: "OBSERVED", material: MATERIAL });
+    gate.resolve(observedOn(GENERATION));
     await pending;
   });
 
@@ -243,7 +270,7 @@ describe("BT4 login — interactive, idempotent, never racing a logout", () => {
     await Promise.resolve();
     const second = h.orchestrator.login();
 
-    gate.resolve({ kind: "OBSERVED", material: MATERIAL });
+    gate.resolve(observedOn(GENERATION));
     const [a, b] = await Promise.all([first, second]);
 
     assert.equal(h.loginSurfaceOpens, 1, "exactly one login window");
@@ -348,7 +375,7 @@ describe("BT4 LOGGING_OUT — exclusive, honest, never resurrecting", () => {
     assert.deepEqual(a, b);
   });
 
-  test("K: an observation arriving after a logout cannot reinstall the session", async () => {
+  test("K: an observation arriving during a logout cannot reinstall the session", async () => {
     const h = harness();
     const observation = deferred<unknown>();
     const logoutGate = deferred<{ persistence: unknown }>();
@@ -362,7 +389,7 @@ describe("BT4 LOGGING_OUT — exclusive, honest, never resurrecting", () => {
     await Promise.resolve();
 
     // The human finished typing after the logout began.
-    observation.resolve({ kind: "OBSERVED", material: MATERIAL });
+    observation.resolve(observedOn(GENERATION));
     const loginOutcome = await login;
 
     assert.equal(loginOutcome.accepted, false, "a stale observation installs nothing");
@@ -414,6 +441,210 @@ describe("BT4 LOGGING_OUT — exclusive, honest, never resurrecting", () => {
   });
 });
 
+// ── BT4-R1 (external review blocker) ────────────────────────────────────────
+//
+// A login attempt owns an explicit local identity. An observation may only
+// install if it still belongs to the CURRENT attempt and to the CURRENT BT2
+// connection — checked after every await, never before one.
+//
+// The sibling test above ("K") only covers an observation landing WHILE the
+// logout gate is held. The gate is released when the logout finishes, so it
+// could not catch an observation that lands afterwards. That is this family.
+
+describe("BT4-R1 — a stale observation can never install", () => {
+  test("an observation from a login cancelled by a COMPLETED logout installs nothing", async () => {
+    const h = harness();
+    const observation = deferred<unknown>();
+    h.setObservation(() => observation.promise);
+
+    // A. login A is in flight, the human is still typing.
+    const loginA = h.orchestrator.login();
+    await Promise.resolve();
+    assert.equal(h.orchestrator.readiness().auth_state, "AUTHENTICATING");
+
+    // B. a logout begins AND completes, end to end.
+    await h.orchestrator.logout();
+
+    // C. the logout is fully over: the gate is released and the state is honest.
+    assert.equal(h.orchestrator.readiness().auth_state, "LOGIN_REQUIRED");
+    assert.equal(h.orchestrator.readiness().authenticated, false);
+
+    // D. only now does the observation from attempt A arrive.
+    observation.resolve(observedOn(GENERATION));
+    const outcome = await loginA;
+
+    // E/F/G.
+    assert.equal(outcome.accepted, false, "a cancelled attempt must not be accepted");
+    assert.equal(h.installs.length, 0, "nothing may be installed");
+    assert.equal(h.ports.diagnostics.availability(), "UNAVAILABLE");
+    assert.equal(h.orchestrator.readiness().auth_state, "LOGIN_REQUIRED");
+    assert.equal(h.orchestrator.readiness().authenticated, false);
+  });
+
+  test("a logout aborts the pending observation synchronously", async () => {
+    const h = harness();
+    const observation = deferred<unknown>();
+    h.setObservation(() => observation.promise);
+
+    const loginA = h.orchestrator.login();
+    await h.observing;
+    const signal = h.observerSignals[0];
+    assert.ok(signal, "the orchestrator must hand the observer a signal");
+    assert.equal(signal.aborted, false, "not aborted while the attempt is live");
+
+    // No await between the call and the assertion: cancellation must be
+    // synchronous, so no observation can slip through the gap.
+    const loggingOut = h.orchestrator.logout();
+    assert.equal(signal.aborted, true, "the pending attempt is cancelled at once");
+
+    observation.resolve({ kind: "CANCELLED" });
+    await Promise.all([loginA, loggingOut]);
+    assert.equal(h.installs.length, 0);
+  });
+
+  test("a late observation from a superseded attempt installs nothing", async () => {
+    const h = harness();
+    const first = deferred<unknown>();
+    h.setObservation(() => first.promise);
+
+    const loginA = h.orchestrator.login();
+    await Promise.resolve();
+
+    // A logout cancels attempt A and releases the login gate.
+    await h.orchestrator.logout();
+
+    // A newer attempt B starts and is waiting on its own observation.
+    const second = deferred<unknown>();
+    h.setObservation(() => second.promise);
+    const loginB = h.orchestrator.login();
+    await Promise.resolve();
+
+    // A's material finally arrives — it belongs to a dead attempt.
+    first.resolve(observedOn(GENERATION));
+    const outcomeA = await loginA;
+    assert.equal(outcomeA.accepted, false);
+    assert.equal(h.installs.length, 0, "the dead attempt installed something");
+
+    // B is untouched by A's arrival and still installs exactly once.
+    second.resolve(observedOn(GENERATION, MATERIAL));
+    const outcomeB = await loginB;
+    assert.equal(outcomeB.accepted, true);
+    assert.deepEqual(h.installs, [MATERIAL], "exactly one install, from B");
+  });
+
+  test("an attempt that timed out cannot install; only the newer attempt does", async () => {
+    const h = harness();
+    h.setObservation(async () => ({ kind: "TIMED_OUT" }));
+
+    const outcomeA = await h.orchestrator.login();
+    assert.equal(outcomeA.accepted, false);
+    assert.equal(h.installs.length, 0);
+
+    h.setObservation(async () => observedOn(GENERATION));
+    const outcomeB = await h.orchestrator.login();
+
+    assert.equal(outcomeB.accepted, true);
+    assert.deepEqual(h.installs, [MATERIAL], "exactly one install, from the live attempt");
+  });
+
+  test("material observed on a stale BT2 connection generation is discarded", async () => {
+    const h = harness();
+    // Observed on generation 7; the browser has since reconnected as 8.
+    h.setObservation(async () => {
+      h.setConnectionGeneration(GENERATION + 1);
+      return observedOn(GENERATION);
+    });
+
+    const outcome = await h.orchestrator.login();
+
+    assert.equal(outcome.accepted, false, "old-generation material must not ESTABLISH");
+    assert.equal(h.installs.length, 0);
+    assert.equal(h.ports.diagnostics.availability(), "UNAVAILABLE");
+  });
+
+  test("a reconnect racing the commit still discards the old generation", async () => {
+    const h = harness();
+    const observation = deferred<unknown>();
+    h.setObservation(() => observation.promise);
+
+    const login = h.orchestrator.login();
+    await Promise.resolve();
+
+    // The connection dies and comes back as a new generation while the
+    // observation is still travelling.
+    h.setConnectionGeneration(GENERATION + 1);
+    observation.resolve(observedOn(GENERATION));
+
+    const outcome = await login;
+    assert.equal(outcome.accepted, false);
+    assert.equal(h.installs.length, 0);
+  });
+
+  test("material cannot install while there is no live connection at all", async () => {
+    const h = harness();
+    h.setObservation(async () => {
+      h.setConnectionGeneration(undefined);
+      return observedOn(GENERATION);
+    });
+
+    const outcome = await h.orchestrator.login();
+
+    assert.equal(outcome.accepted, false, "no live connection, no install");
+    assert.equal(h.installs.length, 0);
+  });
+
+  test("a logout whose cleanup FAILED still blocks reinstallation", async () => {
+    const h = harness();
+    const observation = deferred<unknown>();
+    h.setObservation(() => observation.promise);
+    h.setLogout(async () => ({
+      persistence: { state: "FAILED", tokens: { state: "FAILED" }, session: { state: "FAILED" } },
+    }));
+
+    const loginA = h.orchestrator.login();
+    await Promise.resolve();
+
+    const logoutOutcome = await h.orchestrator.logout();
+    assert.equal((logoutOutcome.persistence as { state: string }).state, "FAILED");
+
+    observation.resolve(observedOn(GENERATION));
+    const outcome = await loginA;
+
+    // A partial or failed clear is exactly when resurrection would be worst.
+    assert.equal(outcome.accepted, false);
+    assert.equal(h.installs.length, 0);
+    assert.equal(h.orchestrator.readiness().authenticated, false);
+    assert.equal(h.orchestrator.readiness().auth_state, "LOGIN_REQUIRED");
+  });
+
+  test("the happy path is untouched: exactly one install, on the live generation", async () => {
+    const h = harness();
+    h.setObservation(async () => observedOn(GENERATION));
+
+    const outcome = await h.orchestrator.login();
+
+    assert.equal(outcome.accepted, true);
+    assert.deepEqual(h.installs, [MATERIAL]);
+    assert.equal(h.orchestrator.readiness().auth_state, "ACCOUNT_READY");
+    assert.deepEqual(h.events, ["openLoginSurface", "observe", "install"]);
+  });
+
+  test("no cancellation path leaks material, identity or a signal into the report", async () => {
+    const h = harness();
+    const observation = deferred<unknown>();
+    h.setObservation(() => observation.promise);
+    const loginA = h.orchestrator.login();
+    await Promise.resolve();
+    await h.orchestrator.logout();
+    observation.resolve(observedOn(GENERATION));
+
+    const rendered = JSON.stringify(await loginA);
+    for (const sentinel of [ACCESS_SENTINEL, ACCOUNT_SENTINEL, PROFILE_SENTINEL, "generation", "signal", "attempt"]) {
+      assert.equal(rendered.includes(sentinel), false, `leaked ${sentinel}`);
+    }
+  });
+});
+
 describe("BT4 REAUTH_REQUIRED — an explicit signal, never mere unavailability", () => {
   test("an unavailable authority alone is LOGIN_REQUIRED, not REAUTH_REQUIRED", () => {
     const h = harness();
@@ -452,7 +683,7 @@ describe("BT4 REAUTH_REQUIRED — an explicit signal, never mere unavailability"
   test("a successful login clears the signal", async () => {
     const h = harness();
     h.orchestrator.signalReauthRequired();
-    h.setObservation(async () => ({ kind: "OBSERVED", material: MATERIAL }));
+    h.setObservation(async () => observedOn(GENERATION));
 
     await h.orchestrator.login();
     h.setAvailability("UNAVAILABLE");
