@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { hostname } from "node:os";
+import { join } from "node:path";
 import type {
   AdoptedBrowserProcessHandle,
   BrowserLifecycleState,
@@ -1042,11 +1044,39 @@ const REAL_CLOCK: Clock = {
   },
 };
 
+const DIAGNOSTIC_SECRET_PATTERNS: readonly RegExp[] = [
+  /\bauthorization\b/i,
+  /\bcookie\b/i,
+  /\btoken\b/i,
+  /\bpassword\b/i,
+];
+
+function diagnosticSanitize(text: string): readonly string[] {
+  return text
+    .split(/\r?\n/)
+    .filter((line) => line.trim().length > 0)
+    .filter((line) => !DIAGNOSTIC_SECRET_PATTERNS.some((pattern) => pattern.test(line)))
+    .slice(-8);
+}
+
+/**
+ * Diagnostic-only (read-only): when running under GitHub Actions (CI=true),
+ * the Chromium child's stdout/stderr are collected and reported on exit so
+ * the runner log names the cause of a premature browser exit. Production and
+ * local runs keep the original stdio: ignore behavior byte-for-byte.
+ * No lifecycle, ownership, retry, timeout, or flag changes.
+ */
 const REAL_SPAWNER: ProcessSpawner = {
   spawn(executable, args) {
-    const child = spawn(executable, [...args], { stdio: "ignore", detached: false });
+    const isDiagnostic = process.env.CI === "true";
+    const stdio = isDiagnostic
+      ? ("pipe" as const)
+      : ("ignore" as const);
+    const child = spawn(executable, [...args], { stdio, detached: false });
     let terminal: BrowserProcessExit | undefined;
     const listeners = new Set<(exit: BrowserProcessExit) => void>();
+    let stdoutCollected: Buffer = Buffer.alloc(0);
+    let stderrCollected: Buffer = Buffer.alloc(0);
     const finish = (code: number | null, signal: string | null) => {
       if (terminal) return;
       terminal = { source: "spawned", code, signal };
@@ -1054,6 +1084,33 @@ const REAL_SPAWNER: ProcessSpawner = {
     };
     child.on("exit", finish);
     child.on("error", () => finish(null, "SPAWN_ERROR"));
+    if (isDiagnostic) {
+      if (child.stdout) child.stdout.on("data", (chunk) => { stdoutCollected = Buffer.concat([stdoutCollected, chunk as Buffer]); });
+      if (child.stderr) child.stderr.on("data", (chunk) => { stderrCollected = Buffer.concat([stderrCollected, chunk as Buffer]); });
+      child.on("exit", (code, signal) => {
+        const profileArg = [...args].find((arg) => arg.startsWith("--user-data-dir="));
+        const profileDir = profileArg?.slice("--user-data-dir=".length);
+        const devToolsActivePort = profileDir
+          ? existsSync(join(profileDir, "DevToolsActivePort"))
+          : undefined;
+        const versionMatch = stdoutCollected.toString("utf8").match(/(\d+\.\d+\.\d+\.\d+)/);
+        process.stderr.write(
+          [
+            "[bt6-diagnostic] chromium exit observed",
+            `executable=${executable}`,
+            `version=${versionMatch ? versionMatch[1] : "unknown"}`,
+            `args=[${[...args].join(" ")}]`,
+            `exit_code=${code}`,
+            `exit_signal=${signal}`,
+            `devtools_active_port=${devToolsActivePort}`,
+            `stdout_tail=${JSON.stringify(diagnosticSanitize(stdoutCollected.toString("utf8")))}`,
+            `stderr_tail=${JSON.stringify(diagnosticSanitize(stderrCollected.toString("utf8")))}`,
+            "[bt6-diagnostic] end",
+            "",
+          ].join("\n"),
+        );
+      });
+    }
     return {
       source: "spawned",
       get pid() { return child.pid ?? -1; },
