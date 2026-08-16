@@ -139,7 +139,61 @@ export interface AuthDiagnostics {
   readonly availability: AuthAvailability;
   readonly generation: number;
   readonly reason?: AuthUnavailableReason;
+  readonly cause?: AuthInvalidationCause;
   readonly hasProfileId: boolean;
+}
+
+// ── The trusted producer's closed candidate (design §27) ────────────────────
+
+/**
+ * The ONLY shape a producer may submit. There is deliberately no refresh-token
+ * and no cookie field: refresh material stays with the refresh producer and
+ * hardened storage, and cookies are outside BT3 entirely (design §6, OQ-1).
+ *
+ * The authority copies these fields one by one — never by spread — so an extra
+ * property on a producer's object cannot ride into the private record.
+ */
+export interface AuthMaterialCandidate {
+  readonly accessToken: string;
+  readonly tokenType: string;
+  readonly expiresAt: number;
+  readonly accountId: string;
+  readonly profileId?: string;
+}
+
+/**
+ * REFRESH demands exact account/profile continuity; ESTABLISH is the explicit
+ * new-session path that may carry a different identity. A refresh that changed
+ * identity is an anomaly, not a login (design §15, §27).
+ */
+export type AuthCommitMode = "ESTABLISH" | "REFRESH";
+
+export type AuthInvalidationCause =
+  | "LOGOUT"
+  | "INVALID_GRANT"
+  | "AUTH_MATERIAL_LOST"
+  | "PROCESS_SHUTDOWN";
+
+/**
+ * Test-only view. Safe revision/identity metadata as permitted by design §9.2:
+ * it deliberately has NO accessToken field, so no test can come to depend on
+ * reading the secret out of the authority.
+ */
+export interface AuthAuthorityInspection {
+  readonly availability: AuthAvailability;
+  readonly generation: number;
+  readonly epoch: string;
+  readonly reason?: AuthUnavailableReason;
+  readonly cause?: AuthInvalidationCause;
+  readonly accountId?: string;
+  readonly profileId?: string;
+  readonly tokenType?: string;
+  readonly expiresAt?: number;
+  readonly signal?: AbortSignal;
+}
+
+function isUsableString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 // ── Deterministic seams (design §7.10, §11, §24) ────────────────────────────
@@ -167,6 +221,9 @@ export class AuthContextAuthority {
   private readonly issuedContexts = new WeakSet<AuthContext>();
 
   private state: AuthorityState;
+
+  /** Closed diagnostic enum only — the last mutation cause (design §19). */
+  private lastCause?: AuthInvalidationCause;
 
   private readonly epoch: string;
   private readonly now: () => number;
@@ -200,6 +257,7 @@ export class AuthContextAuthority {
       return Object.freeze({
         availability: "READY" as const,
         generation: this.state.record.revision.generation,
+        cause: this.lastCause,
         hasProfileId: this.state.record.profileId !== undefined,
       });
     }
@@ -207,8 +265,207 @@ export class AuthContextAuthority {
       availability: "UNAVAILABLE" as const,
       generation: this.state.revision.generation,
       reason: this.state.reason,
+      cause: this.lastCause,
       hasProfileId: false,
     });
+  }
+
+  /**
+   * TEST ONLY. Never called by production code and never placed on the writer
+   * or reader port, so neither BT4 nor BT5 can reach it. It exposes revision
+   * and identity metadata plus the invalidation signal — never the token.
+   */
+  inspectForTest(): AuthAuthorityInspection {
+    if (this.state.kind === "READY") {
+      const record = this.state.record;
+      return Object.freeze({
+        availability: "READY" as const,
+        generation: record.revision.generation,
+        epoch: record.revision.epoch,
+        cause: this.lastCause,
+        accountId: record.accountId,
+        profileId: record.profileId,
+        tokenType: record.tokenType,
+        expiresAt: record.expiresAt,
+        signal: record.abortController.signal,
+      });
+    }
+    return Object.freeze({
+      availability: "UNAVAILABLE" as const,
+      generation: this.state.revision.generation,
+      epoch: this.state.revision.epoch,
+      reason: this.state.reason,
+      cause: this.lastCause,
+    });
+  }
+
+  /**
+   * The acquisition linearization point (design §16.2): one synchronous read of
+   * the current READY record. It never installs, never refreshes and never
+   * increments — acquisition is not a transition (design §10).
+   */
+  acquire(): AuthContext {
+    return this.currentUsableRecord().context;
+  }
+
+  /**
+   * Install or replace the current material under an expected revision.
+   *
+   * BT3 TASK 2 SCOPE: the `expected` revision is part of the frozen writer
+   * signature and is accepted here, but the compare-and-swap REJECTION is
+   * Task 3 work (design §25) — that is the RED which proves a late producer
+   * cannot overwrite a newer commit.
+   */
+  commitAuthenticatedMaterial(
+    expected: AuthRevisionView,
+    mode: AuthCommitMode,
+    candidate: Readonly<AuthMaterialCandidate>
+  ): AuthContext {
+    void expected;
+
+    // EXHAUSTED is terminal: an authority that ran out of generations can never
+    // be reopened, only restarted into a different epoch (design §16.3).
+    if (this.state.kind === "UNAVAILABLE" && this.state.reason === "EXHAUSTED") {
+      throw new AuthContextError("AUTH_CONTEXT_UNAVAILABLE");
+    }
+
+    // A trusted producer is not treated as infallible: every string and the
+    // expiration are validated again here (design §27). A rejected candidate is
+    // NOT a transition — no publication, no increment, no abort (design §10).
+    this.validateCandidate(candidate);
+
+    if (mode === "REFRESH") {
+      if (this.state.kind !== "READY") {
+        // Nothing to continue: a refresh cannot bootstrap an identity.
+        throw new AuthContextError("AUTH_CONTEXT_UNAVAILABLE");
+      }
+      const current = this.state.record;
+      if (current.accountId !== candidate.accountId || current.profileId !== candidate.profileId) {
+        // Fail closed (design §15, §21.4): the candidate is never installed as
+        // continuity. The old context is invalidated at the next generation
+        // FIRST, and only then is the anomaly reported to the producer.
+        const { exhausted } = this.publishUnavailable("INVALIDATED");
+        throw new AuthContextError(exhausted ? "AUTH_CONTEXT_UNAVAILABLE" : "AUTH_IDENTITY_CHANGED");
+      }
+    }
+
+    const currentGeneration = this.currentRevision().generation;
+    if (currentGeneration >= MAX_AUTH_GENERATION) {
+      // Overflow is not an error to be thrown before the state settles: the
+      // terminal state is published, THEN the old controller is aborted, and
+      // only then does the rejection escape (FIX1 §8).
+      this.publishUnavailable("EXHAUSTED");
+      throw new AuthContextError("AUTH_CONTEXT_UNAVAILABLE");
+    }
+
+    // ── The frozen mutation order (FIX1 §8) ───────────────────────────────
+    // 1. capture the old controller;
+    const oldController =
+      this.state.kind === "READY" ? this.state.record.abortController : undefined;
+
+    // 2. build the next immutable state COMPLETELY;
+    const revision = freezeRevision(this.epoch, currentGeneration + 1);
+    const context = this.issueContext();
+    const record: ActiveAuthRecord = Object.freeze({
+      revision,
+      accountId: candidate.accountId,
+      profileId: candidate.profileId,
+      accessToken: candidate.accessToken,
+      tokenType: candidate.tokenType,
+      expiresAt: candidate.expiresAt,
+      abortController: new AbortController(),
+      context,
+    });
+
+    // 3. publish — this assignment is the state/generation linearization point;
+    this.state = { kind: "READY", record };
+
+    // 4. only now notify the previous generation. abort() may synchronously run
+    //    listeners, and they must observe the ALREADY-published G+1 state.
+    oldController?.abort();
+
+    return context;
+  }
+
+  /**
+   * Explicit invalidation by a trusted producer. Publishes UNAVAILABLE at the
+   * next generation BEFORE notifying the old controller, and before any caller
+   * may begin asynchronous storage work (design §15, §16.2).
+   *
+   * An invalidation while already unavailable still advances the generation: it
+   * is an ordering barrier for concurrent mutation attempts (design §10).
+   */
+  invalidate(cause: AuthInvalidationCause): AuthRevisionView {
+    if (this.state.kind === "UNAVAILABLE" && this.state.reason === "EXHAUSTED") {
+      throw new AuthContextError("AUTH_CONTEXT_UNAVAILABLE");
+    }
+    this.lastCause = cause;
+    const { exhausted, revision } = this.publishUnavailable("INVALIDATED");
+    if (exhausted) {
+      throw new AuthContextError("AUTH_CONTEXT_UNAVAILABLE");
+    }
+    return revision;
+  }
+
+  /**
+   * The single place that publishes an UNAVAILABLE state, so publish-before-
+   * abort holds for logout, identity anomaly and overflow alike.
+   */
+  private publishUnavailable(
+    reason: AuthUnavailableReason
+  ): { exhausted: boolean; revision: AuthRevisionView } {
+    const oldController =
+      this.state.kind === "READY" ? this.state.record.abortController : undefined;
+
+    const currentGeneration = this.currentRevision().generation;
+    const exhausted = currentGeneration >= MAX_AUTH_GENERATION;
+    const revision = freezeRevision(
+      this.epoch,
+      exhausted ? MAX_AUTH_GENERATION : currentGeneration + 1
+    );
+
+    this.state = { kind: "UNAVAILABLE", revision, reason: exhausted ? "EXHAUSTED" : reason };
+    oldController?.abort();
+
+    return { exhausted, revision };
+  }
+
+  /**
+   * The current record, or a fail-closed rejection. Expiry is checked here and
+   * NOT treated as a transition: only a trusted producer mutates the authority
+   * (design §10, §15).
+   */
+  private currentUsableRecord(): ActiveAuthRecord {
+    if (this.state.kind !== "READY") {
+      throw new AuthContextError("AUTH_CONTEXT_UNAVAILABLE");
+    }
+    const record = this.state.record;
+    if (record.abortController.signal.aborted || !this.recordRemainsUsable(record)) {
+      throw new AuthContextError("AUTH_CONTEXT_UNAVAILABLE");
+    }
+    return record;
+  }
+
+  private recordRemainsUsable(record: ActiveAuthRecord): boolean {
+    return record.expiresAt > this.now();
+  }
+
+  /** Closed validation. Rejection carries the fixed unavailable message only. */
+  private validateCandidate(candidate: Readonly<AuthMaterialCandidate>): void {
+    const usable =
+      candidate !== null &&
+      typeof candidate === "object" &&
+      isUsableString(candidate.accessToken) &&
+      isUsableString(candidate.tokenType) &&
+      isUsableString(candidate.accountId) &&
+      (candidate.profileId === undefined || isUsableString(candidate.profileId)) &&
+      typeof candidate.expiresAt === "number" &&
+      Number.isFinite(candidate.expiresAt) &&
+      candidate.expiresAt > this.now();
+
+    if (!usable) {
+      throw new AuthContextError("AUTH_CONTEXT_UNAVAILABLE");
+    }
   }
 
   /**
