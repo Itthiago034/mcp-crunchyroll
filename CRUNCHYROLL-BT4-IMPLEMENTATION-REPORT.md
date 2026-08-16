@@ -361,6 +361,57 @@ production source for URL literals ran against comment-stripped code, and the
 stripper treats `//` inside a URL literal as a line comment. The new
 fixed-origin assertion reads raw source instead.
 
+## 16b. Live interactive smoke — attempted twice, blocked upstream
+
+Run on the operator's own machine, against the real site, with the operator
+typing into the browser. Both attempts ended on the honest timeout path. The
+agent never requested, read, typed or logged a credential; every value below is
+safe metadata the tools already publish.
+
+| | Attempt 1 | Attempt 2 |
+|---|---|---|
+| Duration to timeout | 301 s | 300 s |
+| Browser | launched (Brave, `/usr/bin/brave`, dedicated 0700 profile) | **adopted the still-running browser from attempt 1, same PID** |
+| Observed states | `LOGIN_REQUIRED` → `AUTHENTICATING` (`browser_running`/`browser_connected` true) → `LOGIN_REQUIRED` | identical |
+| Login outcome | `accepted: false` | `accepted: false` |
+| Material installed | none | none |
+| Token store after the run | nothing written — only `browser-profile` exists under `~/.strider/crunchyroll/` | unchanged |
+
+**What this verifies.** The whole path BT4 owns, up to the human step, works
+against the real world: the composition root builds one authority and one
+browser lazily, the managed browser launches on the fixed login surface, CDP
+connects, the single-flight login gate holds for five minutes without reopening
+a window, concurrent `status` calls stay read-only and truthful throughout, the
+deadline expires into `LOGIN_REQUIRED` with `accepted: false`, no state is
+fabricated, nothing crashes, and — because a browser-observed bearer is
+deliberately never persisted — the hardened store is untouched. Attempt 2 also
+exercised BT2 adoption in production: the second server process adopted the
+orphaned browser instead of launching a second one.
+
+**What blocked it.** The operator reports reaching the legitimate Crunchyroll
+login page, then being held in a Cloudflare human-verification loop that never
+completed, so no login was ever performed and no token was ever minted. The
+observation channel therefore had nothing to observe. This is consistent with
+the project's earlier finding that Crunchyroll's bot mitigation is per client
+context, and with the launch profile being brand new and history-free; the
+launcher itself carries no automation flags (`--enable-automation` is not
+passed, `navigator.webdriver` is not set).
+
+**What remains unverified.** Exactly one link: an observed mint being validated
+and installed through the producer. Its unit-level behaviour is fully tested
+offline, but it has never run against a real provider response. Live candidate
+readiness is therefore **not** claimed, and BT4-N1 (the frozen endpoint
+constant) remains unconfirmed by live evidence — the two runs produced no
+evidence for or against it, because no mint occurred at all.
+
+**BT4-N5 (new, material for the next stage).** Interactive login in a
+freshly-created managed profile may be unable to complete at all when the site's
+bot mitigation challenges it. That is an availability property of the chosen
+architecture, not a defect in this code, and it belongs to whoever owns the
+browser strategy: it decides whether the managed profile must be seeded from a
+human-used browser, whether a different Chromium build is required, or whether
+the login surface should be opened in the operator's ordinary browser instead.
+
 ## 17. Not done, deliberately
 
 No BT5 work of any kind: `PRODUCTION_OPERATIONS` stays empty, no content or
@@ -397,7 +448,10 @@ or `src/redact.ts` change, no push, no merge, no `main` change.
   and the redaction are correct — and deliberately not repaired here, because
   the fix touches a security-hardened boundary for a presentation defect at the
   end of the macrophase.
-- **Interactive smoke: PENDING.** The automated suite is complete, offline and
-  network-isolated. The interactive login smoke requires a human to type
-  credentials into the browser (errata §15) and has not been run. Formal
-  candidate readiness is therefore **not** claimed for the live path.
+- **BT4-N5** (new): see §16b — a fresh managed profile may be unable to clear
+  the site's human-verification challenge, which blocks interactive login as an
+  availability matter rather than a code defect.
+- **Interactive smoke: PENDING.** It was attempted twice against the live site
+  (§16b) and blocked upstream in a human-verification loop, so the final link —
+  installing an observed mint — is still unproven. Formal candidate readiness
+  is **not** claimed for the live path.
