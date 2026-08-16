@@ -361,12 +361,17 @@ production source for URL literals ran against comment-stripped code, and the
 stripper treats `//` inside a URL literal as a line comment. The new
 fixed-origin assertion reads raw source instead.
 
-## 16b. Live interactive smoke — attempted twice, blocked upstream
+## 16b. Live smoke — three runs, and what each one proves
 
-Run on the operator's own machine, against the real site, with the operator
-typing into the browser. Both attempts ended on the honest timeout path. The
-agent never requested, read, typed or logged a credential; every value below is
-safe metadata the tools already publish.
+Run on the operator's own machine, against the real site. The agent never
+requested, read, typed or logged a credential, never opened or read the browser
+profile's cookies or storage, and never touched BT2's control files by hand;
+every value below is safe metadata the tools already publish.
+
+Runs 1 and 2 attempted a fresh interactive login inside the managed browser and
+were blocked upstream. Run 3, after the operator seeded the **same dedicated
+profile** by hand, obtained the complete chain. Both outcomes are recorded; the
+first is not retroactively excused by the second.
 
 | | Attempt 1 | Attempt 2 |
 |---|---|---|
@@ -397,19 +402,94 @@ context, and with the launch profile being brand new and history-free; the
 launcher itself carries no automation flags (`--enable-automation` is not
 passed, `navigator.webdriver` is not set).
 
-**What remains unverified.** Exactly one link: an observed mint being validated
-and installed through the producer. Its unit-level behaviour is fully tested
-offline, but it has never run against a real provider response. Live candidate
-readiness is therefore **not** claimed, and BT4-N1 (the frozen endpoint
-constant) remains unconfirmed by live evidence — the two runs produced no
-evidence for or against it, because no mint occurred at all.
+**What runs 1 and 2 left unverified.** Exactly one link: an observed mint being
+validated and installed through the producer. Runs 1 and 2 produced no evidence
+for or against BT4-N1 either, because no mint occurred at all. Run 3 closes
+both, below.
 
-**BT4-N5 (new, material for the next stage).** Interactive login in a
+### Run 3 — the human-seeded dedicated profile
+
+The operator seeded **the same dedicated profile** by hand: plain Brave, the
+same `/usr/bin/brave`, the same `--user-data-dir`, the benign BT2 flags, and
+**no `--remote-debugging-port`, no MCP, no CDP**. They cleared the Cloudflare
+challenge themselves, logged in themselves, declined any import prompt, and
+closed the window normally. No credential was given to the agent; no cookie or
+storage was copied, extracted or read; no personal browser profile was
+involved; BT2's control files were left for BT2's own logic to invalidate.
+
+Preconditions verified before the run: no process held the profile;
+`SingletonLock` was gone (the signature of a graceful close); the stale
+`DevToolsActivePort` and the dead-pid `.mcp-browser-owner.json` were left
+untouched; `dist/index.js` hashed identical to the packet copy
+(`3f7350878514ea9d3e24ceed7c04978f05e20d5ca5c2d8016dd287bcb0b14316`) with a
+clean worktree, so the run used the unmodified production bundle.
+
+| | Run 3 |
+|---|---|
+| Status before login | `LOGIN_REQUIRED`, `browser_running: false` |
+| Time to outcome | **3 s** |
+| Login outcome | **`accepted: true`** |
+| Final state | **`auth_state: "PROFILE_READY"`, `authenticated: true`, `logged_in: true`, `profile_ready: true`, `player_ready: false`** |
+| Browser | relaunched fresh (pid 1770414): BT2 rejected the dead-pid ownership record, cleared it and the stale endpoint, then wrote a new 0600 record |
+| Token store after the run | **nothing written** — only `browser-profile` exists under `~/.strider/crunchyroll/` |
+
+**E2 — the complete BT4 chain is proven live.** The authority was `UNAVAILABLE`
+at the start of this very process (`LOGIN_REQUIRED` at step 1, and there is no
+`tokens.json` for bootstrap to load), so the only reachable path to
+`PROFILE_READY` is the one under test: managed browser on the fixed login
+surface → response-stage interception of the fixed token endpoint → bounded
+body → validated closed candidate → `establishFromObservedMaterial` → BT3
+`ESTABLISH` compare-and-swap. Nothing else in the process can make the
+authority ready.
+
+Three consequences follow from that single transition:
+
+- **BT4-N1 is CONFIRMED live.** `isTokenEndpoint()` requires an exact
+  protocol/host/path match, so an install proves the mint happened at exactly
+  `https://www.crunchyroll.com/auth/v1/token`. The frozen constant is right.
+- `profile_ready: true` proves the observed payload carried a `profile_id` and
+  that the authority's `hasProfileId` diagnostic reflects the installed record —
+  the `ACCOUNT_READY`/`PROFILE_READY` distinction is real, not theoretical.
+- The hardened store stayed empty, live: a browser-observed bearer is genuinely
+  never persisted, exactly as designed.
+
+**E1 — session continuity, recorded separately and NOT promoted.** The
+dedicated profile did carry the human-seeded session across the manual →
+managed handoff. This is *inferred* from the mint (a profile-scoped token was
+minted seconds after load with no human logging in), not observed directly: the
+agent did not read cookies or storage, and the visual confirmation of the
+logged-in page belongs to the operator. E1 is browser-level continuity; E2
+above is the authority-level proof. They are recorded as separate facts.
+
+**What run 3 does NOT prove.** A human completing a *fresh* login inside the
+managed browser — that is exactly what runs 1 and 2 failed to do, and run 3
+bypassed the question rather than answering it, because the session already
+existed. BT4-N5 therefore stays open. It also does not close BT4-N2: the
+arm-after-load race did not materialise here (arming beat the mint by enough
+margin, and the app mints repeatedly anyway), but one favourable observation
+does not close a race.
+
+### A/B diagnostic record
+
+| | Configuration | Cloudflare + login |
+|---|---|---|
+| A | same dedicated profile, plain Brave, **no CDP**, human at the keyboard | **PASS** |
+| B | same dedicated profile, managed browser with `--remote-debugging-port` + CDP attached, human at the keyboard | **FAIL** — challenge loop, twice, 301 s and 300 s |
+
+Read this as a diagnostic lead, not a conclusion. The comparison is n=1 against
+n=2, unblinded, and confounded: A ran on a profile already warmed by the two
+earlier sessions, and A and B differ in more than CDP (window provenance,
+timing, interaction pattern). It is **not** authorization to alter fingerprint,
+suppress automation signals, bypass a bot-management control, or redesign the
+browser layer. It is evidence to hand to whoever owns the browser strategy.
+
+**BT4-N5 (open, material for the next stage).** Interactive login in a
 freshly-created managed profile may be unable to complete at all when the site's
-bot mitigation challenges it. That is an availability property of the chosen
-architecture, not a defect in this code, and it belongs to whoever owns the
-browser strategy: it decides whether the managed profile must be seeded from a
-human-used browser, whether a different Chromium build is required, or whether
+bot mitigation challenges it, while the same profile seeded by a human works.
+That is an availability property of the chosen architecture, not a defect in
+this code, and it belongs to whoever owns the browser strategy: it decides
+whether the managed profile must be seeded by a human first, whether a
+different Chromium build is required, or whether
 the login surface should be opened in the operator's ordinary browser instead.
 
 ## 17. Not done, deliberately
@@ -425,10 +505,11 @@ or `src/redact.ts` change, no push, no merge, no `main` change.
 
 **Blocking: 0.**
 
-- **BT4-N1** (carried forward): the observed token endpoint is
-  `https://www.crunchyroll.com/auth/v1/token`, from the evidence baseline. If a
-  live smoke shows a different exact path, only the frozen constant changes.
-- **BT4-N2** (new): the interception is armed *after* the managed page is
+- **BT4-N1 — CLOSED by live evidence.** The frozen token endpoint
+  `https://www.crunchyroll.com/auth/v1/token` is correct: run 3 (§16b) observed
+  and installed a real mint through an exact protocol/host/path match, so no
+  other URL could have produced that transition.
+- **BT4-N2** (open, one favourable observation): the interception is armed *after* the managed page is
   created on the login surface. A mint that completes during that first page
   load — possible only when the browser profile already holds a live
   Crunchyroll session — is missed, and the attempt ends as an honest timeout
@@ -448,10 +529,15 @@ or `src/redact.ts` change, no push, no merge, no `main` change.
   and the redaction are correct — and deliberately not repaired here, because
   the fix touches a security-hardened boundary for a presentation defect at the
   end of the macrophase.
-- **BT4-N5** (new): see §16b — a fresh managed profile may be unable to clear
-  the site's human-verification challenge, which blocks interactive login as an
-  availability matter rather than a code defect.
-- **Interactive smoke: PENDING.** It was attempted twice against the live site
-  (§16b) and blocked upstream in a human-verification loop, so the final link —
-  installing an observed mint — is still unproven. Formal candidate readiness
-  is **not** claimed for the live path.
+- **BT4-N5** (open): see §16b — a freshly created managed profile could not
+  clear the site's human-verification challenge, while the same profile seeded
+  by a human could. Interactive first login is therefore an availability
+  question for the browser strategy, not a defect in this code. The A/B record
+  is a diagnostic lead only.
+- **Live smoke: the observation chain is PROVEN; first-login is not.** Run 3
+  (§16b) took the authority from `LOGIN_REQUIRED` to `PROFILE_READY` in 3 s
+  through a real response-stage observation and
+  `establishFromObservedMaterial`, with nothing persisted. What remains
+  unproven live is a human completing a *fresh* login inside the managed
+  browser (BT4-N5). Readiness for the seeded path is evidenced; readiness for
+  cold first login is not claimed.
