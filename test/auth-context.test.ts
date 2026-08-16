@@ -19,6 +19,54 @@ import {
   MAX_AUTH_GENERATION,
 } from "../src/transport/auth-context.js";
 import { withRedactionScope, redactSecrets, REDACTED_MARKER } from "../src/redact.js";
+import { createOperationRegistry, resolveCall } from "../src/transport/operation-registry.js";
+import { createTransportDispatcher } from "../src/transport/dispatcher.js";
+import { TransportError } from "../src/transport/transport-error.js";
+import {
+  nonEmptyString,
+  type OperationDescriptor,
+  type OperationId,
+  type ResolvedCall,
+  type TransportResult,
+} from "../src/transport/types.js";
+
+// ── Synthetic descriptors ───────────────────────────────────────────────────
+//
+// Declared here rather than imported from another test file: importing a suite
+// would run it twice. PRODUCTION_OPERATIONS stays empty — BT3 migrates no
+// endpoint and owns no path literal.
+
+const PUBLIC_DESCRIPTOR: OperationDescriptor = {
+  id: "BT3_SYNTHETIC_PUBLIC" as OperationId,
+  method: "GET",
+  pathTemplate: "/synthetic/v1/public",
+  callerParams: { query: nonEmptyString },
+  authDerivedParams: {},
+  scope: "PUBLIC",
+  mutation: false,
+};
+
+const ACCOUNT_DESCRIPTOR: OperationDescriptor = {
+  id: "BT3_SYNTHETIC_ACCOUNT" as OperationId,
+  method: "GET",
+  pathTemplate: "/synthetic/v1/{accountId}/items",
+  callerParams: {},
+  authDerivedParams: { accountId: { source: "accountId" } },
+  scope: "ACCOUNT",
+  mutation: false,
+};
+
+const PROFILE_DESCRIPTOR: OperationDescriptor = {
+  id: "BT3_SYNTHETIC_PROFILE" as OperationId,
+  method: "GET",
+  pathTemplate: "/synthetic/v1/{accountId}/{profileId}/items",
+  callerParams: {},
+  authDerivedParams: { accountId: { source: "accountId" }, profileId: { source: "profileId" } },
+  scope: "ACCOUNT",
+  mutation: false,
+};
+
+const REGISTRY = createOperationRegistry([PUBLIC_DESCRIPTOR, ACCOUNT_DESCRIPTOR, PROFILE_DESCRIPTOR]);
 
 // ── Symbolic material (never a real credential) ─────────────────────────────
 
@@ -503,16 +551,25 @@ function deferred<T>(): Deferred<T> {
 }
 
 /**
- * Guarded execution entry point used by the tests. Task 4 replaces the handle
- * with the frozen AuthorizedCall wrapper; keeping the indirection here means
- * that change is one edit, not thirty.
+ * Guarded execution entry point used by the tests.
+ *
+ * The wrapper is hand-built here rather than obtained from `bind`, precisely so
+ * that a forged, stale or cross-authority handle can be smuggled in. Acceptance
+ * must come from issuance membership plus current-record identity — never from
+ * trusting the provenance of the wrapper that carries the handle.
  */
 function runGuarded<T>(
   a: Authority,
   context: unknown,
   execute: (view: { accessToken: string; tokenType: string; signal: AbortSignal }) => Promise<T>
 ): Promise<T> {
-  return a.runCurrent(context as never, execute as never) as Promise<T>;
+  const smuggled = Object.freeze({
+    kind: "AUTHENTICATED",
+    call: resolveCall(REGISTRY, "BT3_SYNTHETIC_ACCOUNT", {}),
+    context,
+    authDerivedParams: Object.freeze({}),
+  });
+  return a.runCurrent(smuggled as never, execute as never) as Promise<T>;
 }
 
 function isStale(e: unknown): boolean {
@@ -921,6 +978,333 @@ describe("BT3 authority — access material redaction (design §19)", () => {
     // No active scope: registerSensitiveValue is a documented no-op, so the
     // literal is not held in some parallel global registry.
     assert.equal(redactSecrets(`plain ${TOKEN_SENTINEL}`), `plain ${TOKEN_SENTINEL}`);
+  });
+});
+
+// ── Binding helpers ─────────────────────────────────────────────────────────
+
+function resolved(operation: string, params: Record<string, unknown> = {}): ResolvedCall {
+  return resolveCall(REGISTRY, operation, params);
+}
+
+function bindAccount(a: Authority, operation = "BT3_SYNTHETIC_ACCOUNT") {
+  return a.bind(resolved(operation)) as {
+    kind: string;
+    call: ResolvedCall;
+    context: unknown;
+    authDerivedParams: Record<string, string>;
+  };
+}
+
+describe("BT3 binding — public and authenticated execution wrappers", () => {
+  test("a public descriptor binds to an explicit PUBLIC wrapper with no context", () => {
+    const a = authority();
+    establish(a);
+    const call = resolved("BT3_SYNTHETIC_PUBLIC", { query: "frieren" });
+    const wrapper = a.bind(call);
+
+    assert.equal(wrapper.kind, "PUBLIC");
+    assert.equal(wrapper.call, call, "the resolved call is preserved by identity");
+    assert.equal("context" in wrapper, false);
+    assert.equal("authDerivedParams" in wrapper, false);
+    assert.equal(Object.isFrozen(wrapper), true);
+  });
+
+  test("a public descriptor binds even when the authority is unavailable", () => {
+    const a = authority();
+    const wrapper = a.bind(resolved("BT3_SYNTHETIC_PUBLIC", { query: "frieren" }));
+    assert.equal(wrapper.kind, "PUBLIC");
+  });
+
+  test("an account descriptor binds to the current handle and its declared identity", () => {
+    const a = authority();
+    const context = establish(a);
+    const call = resolved("BT3_SYNTHETIC_ACCOUNT");
+    const wrapper = a.bind(call) as never as { kind: string; call: ResolvedCall; context: unknown; authDerivedParams: Record<string, string> };
+
+    assert.equal(wrapper.kind, "AUTHENTICATED");
+    assert.equal(wrapper.call, call, "ResolvedCall is wrapped, never rebuilt or extended");
+    assert.equal(wrapper.context, context);
+    assert.deepEqual({ ...wrapper.authDerivedParams }, { accountId: SENSITIVE_ACCOUNT_SENTINEL });
+  });
+
+  test("only DECLARED auth-derived sources are resolved", () => {
+    const a = authority();
+    establish(a, { profileId: SENSITIVE_PROFILE_SENTINEL });
+
+    // The record holds a profile id, but this descriptor never declared one.
+    const accountOnly = bindAccount(a);
+    assert.deepEqual(Object.keys(accountOnly.authDerivedParams), ["accountId"]);
+
+    const both = bindAccount(a, "BT3_SYNTHETIC_PROFILE");
+    assert.deepEqual({ ...both.authDerivedParams }, {
+      accountId: SENSITIVE_ACCOUNT_SENTINEL,
+      profileId: SENSITIVE_PROFILE_SENTINEL,
+    });
+  });
+
+  test("a descriptor requiring an absent profile id fails closed", () => {
+    const a = authority();
+    establish(a); // no profile id in the record
+    assert.throws(
+      () => a.bind(resolved("BT3_SYNTHETIC_PROFILE")),
+      (e: unknown) => e instanceof AuthContextError && e.kind === "AUTH_CONTEXT_UNAVAILABLE"
+    );
+    // The caller cannot supply what the authority lacks: binding simply fails.
+    assert.throws(() => resolved("BT3_SYNTHETIC_PROFILE", { profileId: "caller-supplied" }), TransportError);
+  });
+
+  test("an account descriptor cannot bind while the authority is unavailable", () => {
+    const a = authority();
+    assert.throws(
+      () => a.bind(resolved("BT3_SYNTHETIC_ACCOUNT")),
+      (e: unknown) => e instanceof AuthContextError && e.kind === "AUTH_CONTEXT_UNAVAILABLE"
+    );
+  });
+
+  test("an account descriptor cannot bind to expired material", () => {
+    let clock = T0;
+    const a = createAuthContextAuthority({ epochFactory: () => EPOCH_A, now: () => clock });
+    a.commitAuthenticatedMaterial(a.currentRevision(), "ESTABLISH", candidate());
+    clock = T0 + ONE_HOUR + 1;
+    assert.throws(
+      () => a.bind(resolved("BT3_SYNTHETIC_ACCOUNT")),
+      (e: unknown) => e instanceof AuthContextError && e.kind === "AUTH_CONTEXT_UNAVAILABLE"
+    );
+  });
+
+  test("binding is not a transition and does not increment", () => {
+    const a = authority();
+    establish(a);
+    bindAccount(a);
+    bindAccount(a);
+    assert.equal(a.currentRevision().generation, 1);
+  });
+
+  test("a mutation between resolution and binding yields the NEWLY current context", () => {
+    const a = authority();
+    establish(a);
+    // Registry resolution captured no auth, so this call is not yet bound to G1.
+    const call = resolved("BT3_SYNTHETIC_ACCOUNT");
+    const g2 = a.commitAuthenticatedMaterial(a.currentRevision(), "REFRESH", candidate({
+      accessToken: TOKEN_SENTINEL_B,
+    }));
+    const wrapper = a.bind(call) as never as { context: unknown };
+    assert.equal(wrapper.context, g2);
+  });
+
+  test("a bound call executes against its own generation and is accepted", async () => {
+    const a = authority();
+    establish(a);
+    const wrapper = a.bind(resolved("BT3_SYNTHETIC_ACCOUNT"));
+    const observed = await a.runCurrent(wrapper as never, async (view) => view.accessToken);
+    assert.equal(observed, TOKEN_SENTINEL);
+  });
+
+  test("a bound call whose generation was replaced is rejected before the backend", async () => {
+    const a = authority();
+    establish(a);
+    const wrapper = a.bind(resolved("BT3_SYNTHETIC_ACCOUNT"));
+    a.commitAuthenticatedMaterial(a.currentRevision(), "REFRESH", candidate({ accessToken: TOKEN_SENTINEL_B }));
+
+    let invoked = 0;
+    await assert.rejects(
+      a.runCurrent(wrapper as never, async () => {
+        invoked += 1;
+        return "never";
+      }),
+      isStale
+    );
+    assert.equal(invoked, 0);
+  });
+});
+
+describe("BT3 binding — sensitive identity is mechanically contained (FIX1 §11)", () => {
+  test("context and auth-derived identity are non-enumerable, read-only own properties", () => {
+    const a = authority();
+    establish(a, { profileId: SENSITIVE_PROFILE_SENTINEL });
+    const wrapper = bindAccount(a, "BT3_SYNTHETIC_PROFILE");
+
+    assert.deepEqual(Object.keys(wrapper).sort(), ["call", "kind"]);
+    for (const property of ["context", "authDerivedParams"]) {
+      const descriptor = Object.getOwnPropertyDescriptor(wrapper, property);
+      assert.ok(descriptor, `${property} must be an own property`);
+      assert.equal(descriptor.enumerable, false, `${property} must not be enumerable`);
+      assert.equal(descriptor.writable, false, `${property} must be read-only`);
+      assert.equal(descriptor.configurable, false, `${property} must not be reconfigurable`);
+    }
+    assert.equal(Object.isFrozen(wrapper), true);
+    assert.equal(Object.isFrozen(wrapper.authDerivedParams), true);
+  });
+
+  test("generic serialization of the wrapper emits no identity and no handle", () => {
+    const a = authority();
+    establish(a, { profileId: SENSITIVE_PROFILE_SENTINEL });
+    const wrapper = bindAccount(a, "BT3_SYNTHETIC_PROFILE");
+
+    const rendered = JSON.stringify(wrapper);
+    assert.equal(rendered.includes(SENSITIVE_ACCOUNT_SENTINEL), false);
+    assert.equal(rendered.includes(SENSITIVE_PROFILE_SENTINEL), false);
+    assert.equal(rendered.includes(TOKEN_SENTINEL), false);
+    assert.equal(rendered.includes(EPOCH_A), false);
+    assert.equal(rendered.includes("context"), false);
+
+    // The same holds for a generic debug dump of its own enumerable entries.
+    assert.equal(JSON.stringify({ ...wrapper }).includes(SENSITIVE_ACCOUNT_SENTINEL), false);
+  });
+
+  test("auth-derived identity never enters callerParams", () => {
+    const a = authority();
+    establish(a, { profileId: SENSITIVE_PROFILE_SENTINEL });
+    const wrapper = bindAccount(a, "BT3_SYNTHETIC_PROFILE");
+
+    assert.deepEqual(Object.keys(wrapper.call.callerParams), []);
+    assert.equal("accountId" in wrapper.call.callerParams, false);
+    assert.equal("profileId" in wrapper.call.callerParams, false);
+    assert.equal(JSON.stringify(wrapper.call).includes(SENSITIVE_ACCOUNT_SENTINEL), false);
+  });
+
+  test("the auth-derived map cannot be widened or rewritten by its receiver", () => {
+    const a = authority();
+    establish(a);
+    const wrapper = bindAccount(a);
+    assert.throws(() => {
+      (wrapper.authDerivedParams as Record<string, string>).accountId = "attacker";
+    }, TypeError);
+    assert.throws(() => {
+      (wrapper.authDerivedParams as Record<string, string>).injected = "attacker";
+    }, TypeError);
+    assert.equal(wrapper.authDerivedParams.accountId, SENSITIVE_ACCOUNT_SENTINEL);
+  });
+
+  test("a bind failure carries no identity in its message or fields", () => {
+    const a = authority();
+    establish(a);
+    try {
+      a.bind(resolved("BT3_SYNTHETIC_PROFILE"));
+      assert.fail("expected a fail-closed rejection");
+    } catch (error) {
+      const rendered = `${(error as Error).message} ${JSON.stringify(error)} ${(error as Error).stack ?? ""}`;
+      assert.equal(rendered.includes(SENSITIVE_ACCOUNT_SENTINEL), false);
+      assert.equal(rendered.includes(SENSITIVE_PROFILE_SENTINEL), false);
+      assert.equal(rendered.includes(TOKEN_SENTINEL), false);
+      assert.equal(rendered.includes(EPOCH_A), false);
+    }
+  });
+
+  test("diagnostics and inspection never render the epoch or the token", () => {
+    const a = authority();
+    establish(a, { profileId: SENSITIVE_PROFILE_SENTINEL });
+    const diagnostics = JSON.stringify(a.diagnostics());
+    assert.equal(diagnostics.includes(EPOCH_A), false);
+    assert.equal(diagnostics.includes(SENSITIVE_ACCOUNT_SENTINEL), false);
+    assert.equal(diagnostics.includes(SENSITIVE_PROFILE_SENTINEL), false);
+    assert.equal(diagnostics.includes(TOKEN_SENTINEL), false);
+  });
+
+  test("D0-H1: bound identity is registered for redaction before any rendering", async () => {
+    const a = authority();
+    establish(a, { profileId: SENSITIVE_PROFILE_SENTINEL });
+
+    await withRedactionScope(async () => {
+      const wrapper = bindAccount(a, "BT3_SYNTHETIC_PROFILE");
+      // Whatever BT5 later renders these into is already covered: registration
+      // happens at bind time, which is strictly before any rendering can occur.
+      const url = `/synthetic/v1/${wrapper.authDerivedParams.accountId}/${wrapper.authDerivedParams.profileId}/items`;
+      const rendered = redactSecrets(url);
+      assert.equal(rendered.includes(SENSITIVE_ACCOUNT_SENTINEL), false);
+      assert.equal(rendered.includes(SENSITIVE_PROFILE_SENTINEL), false);
+      assert.equal(rendered.includes(REDACTED_MARKER), true);
+    });
+  });
+});
+
+describe("BT3 binding — T1/T2: caller injection is rejected before any backend", () => {
+  const injections: Array<[string, Record<string, unknown>]> = [
+    ["accountId", { accountId: "attacker-account" }],
+    ["profileId", { profileId: "attacker-profile" }],
+    ["Authorization", { Authorization: "Bearer attacker" }],
+    ["authorization", { authorization: "Bearer attacker" }],
+    ["bearer", { bearer: "attacker" }],
+    ["token", { token: "attacker" }],
+    ["access_token", { access_token: "attacker" }],
+    ["cookie", { cookie: "session=attacker" }],
+    ["authGeneration", { authGeneration: 99 }],
+    ["epoch", { epoch: EPOCH_B }],
+    ["context", { context: {} }],
+  ];
+
+  for (const [name, params] of injections) {
+    test(`${name} never reaches a backend`, async () => {
+      let backendCalls = 0;
+      const backend = {
+        async executeResolved(): Promise<TransportResult> {
+          backendCalls += 1;
+          return { status: 200, contentType: "application/json", json: {} };
+        },
+      };
+      const transport = createTransportDispatcher(REGISTRY, backend);
+
+      await assert.rejects(
+        transport.execute("BT3_SYNTHETIC_PROFILE" as OperationId, params),
+        TransportError
+      );
+      assert.equal(backendCalls, 0);
+    });
+  }
+
+  test("the identity rejection is precise, not a generic unexpected argument", async () => {
+    const transport = createTransportDispatcher(REGISTRY, {
+      async executeResolved(): Promise<TransportResult> {
+        throw new Error("unreachable");
+      },
+    });
+    await assert.rejects(
+      transport.execute("BT3_SYNTHETIC_ACCOUNT" as OperationId, { accountId: "attacker" }),
+      (e: unknown) => e instanceof TransportError && e.kind === "CALLER_SUPPLIED_IDENTITY"
+    );
+  });
+});
+
+describe("BT3 ports — BT4 writes, BT5 reads, neither does both", () => {
+  test("the writer port exposes only the three producer methods", () => {
+    const writer = authority().asWriter();
+    assert.deepEqual(
+      Object.keys(writer).sort(),
+      ["commitAuthenticatedMaterial", "currentRevision", "invalidate"]
+    );
+    for (const forbidden of ["bind", "runCurrent", "acquire", "inspectForTest", "diagnostics"]) {
+      assert.equal((writer as Record<string, unknown>)[forbidden], undefined, forbidden);
+    }
+    assert.equal(Object.isFrozen(writer), true);
+  });
+
+  test("the reader port exposes only bind and guarded execution", () => {
+    const reader = authority().asReader();
+    assert.deepEqual(Object.keys(reader).sort(), ["bind", "runCurrent"]);
+    for (const forbidden of [
+      "commitAuthenticatedMaterial",
+      "invalidate",
+      "currentRevision",
+      "acquire",
+      "inspectForTest",
+    ]) {
+      assert.equal((reader as Record<string, unknown>)[forbidden], undefined, forbidden);
+    }
+    assert.equal(Object.isFrozen(reader), true);
+  });
+
+  test("the ports operate on the same single authority", () => {
+    const a = authority();
+    const writer = a.asWriter();
+    const reader = a.asReader();
+
+    writer.commitAuthenticatedMaterial(writer.currentRevision(), "ESTABLISH", candidate() as never);
+    const wrapper = reader.bind(resolved("BT3_SYNTHETIC_ACCOUNT"));
+    assert.equal(wrapper.kind, "AUTHENTICATED");
+
+    writer.invalidate("LOGOUT");
+    assert.throws(() => reader.bind(resolved("BT3_SYNTHETIC_ACCOUNT")), AuthContextError);
   });
 });
 

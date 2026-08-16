@@ -11,6 +11,9 @@
 
 import { randomBytes } from "node:crypto";
 import { registerSensitiveValue } from "../redact.js";
+// Type-only: BT3 wraps ResolvedCall, it never rebuilds or extends it, and it
+// adds no runtime dependency on the registry or the dispatcher.
+import type { ResolvedCall } from "./types.js";
 
 // ── Closed error vocabulary (design §20) ────────────────────────────────────
 
@@ -205,6 +208,55 @@ export interface AuthExecutionView {
   readonly accessToken: string;
   readonly tokenType: string;
   readonly signal: AbortSignal;
+}
+
+// ── Execution wrappers (design §13, §14) ────────────────────────────────────
+
+/**
+ * `ResolvedCall` is NOT extended with an optional auth field. An optional field
+ * would let invalid combinations exist (an account call with no context, a
+ * public call carrying one) and would drag mutable-stage concerns into BT1's
+ * caller-only resolution. The discriminated wrapper makes both illegal states
+ * unrepresentable, and a public call carries an explicit PUBLIC marker rather
+ * than an absent context (design §14, option B).
+ */
+export interface PublicCall {
+  readonly kind: "PUBLIC";
+  readonly call: ResolvedCall;
+}
+
+export interface AuthorizedCall {
+  readonly kind: "AUTHENTICATED";
+  readonly call: ResolvedCall;
+  readonly context: AuthContext;
+  readonly authDerivedParams: Readonly<Record<string, string>>;
+}
+
+export type ExecutionCall = PublicCall | AuthorizedCall;
+
+// ── The two stage-scoped ports (design §27, §28) ────────────────────────────
+
+/**
+ * BT4's port. It cannot choose an epoch or generation, read current material,
+ * create handles, resolve calls or suppress an invalidation.
+ */
+export interface AuthContextWriter {
+  currentRevision(): AuthRevisionView;
+  commitAuthenticatedMaterial(
+    expected: AuthRevisionView,
+    mode: AuthCommitMode,
+    candidate: Readonly<AuthMaterialCandidate>
+  ): AuthContext;
+  invalidate(cause: AuthInvalidationCause): AuthRevisionView;
+}
+
+/**
+ * BT5's port. No mutation method exists on it at all, so a backend cannot
+ * install or invalidate material merely because it executes requests.
+ */
+export interface AuthContextReader {
+  bind(call: ResolvedCall): ExecutionCall;
+  runCurrent<T>(call: AuthorizedCall, execute: (view: AuthExecutionView) => Promise<T>): Promise<T>;
 }
 
 function isUsableString(value: unknown): value is string {
@@ -454,10 +506,13 @@ export class AuthContextAuthority {
    * never replayed or reissued under a newer generation.
    */
   async runCurrent<T>(
-    context: AuthContext,
+    call: AuthorizedCall,
     execute: (view: AuthExecutionView) => Promise<T>
   ): Promise<T> {
-    const record = this.assertUsableCurrentContext(context);
+    // The wrapper is never trusted for provenance: only the handle it carries
+    // is checked, so a hand-built wrapper around a forged, stale or foreign
+    // handle is rejected exactly like the handle itself.
+    const record = this.assertUsableCurrentContext(call.context);
 
     // Registered BEFORE the callback so that a backend rendering the token into
     // a failure string is covered from its very first instruction (design §19).
@@ -472,9 +527,90 @@ export class AuthContextAuthority {
     const result = await execute(view);
 
     // Post-check. A stale result is discarded, never returned and never retried.
-    this.assertStillCurrent(context);
+    this.assertStillCurrent(call.context);
 
     return result;
+  }
+
+  /**
+   * The auth-acquisition linearization point for one call (design §13.4).
+   *
+   * A PUBLIC descriptor gets an explicit public wrapper and no context. An
+   * ACCOUNT descriptor gets the current handle plus ONLY the identity its own
+   * descriptor declared, resolved from the SAME private record the handle names
+   * — never from caller input, never from a different generation.
+   */
+  bind(call: ResolvedCall): ExecutionCall {
+    if (call.descriptor.scope === "PUBLIC") {
+      return Object.freeze({ kind: "PUBLIC" as const, call });
+    }
+
+    const record = this.currentUsableRecord();
+
+    const resolvedIdentity: Record<string, string> = {};
+    for (const [name, spec] of Object.entries(call.descriptor.authDerivedParams)) {
+      const value = spec.source === "accountId" ? record.accountId : record.profileId;
+      if (!isUsableString(value)) {
+        // A descriptor that needs a profile id the authority does not have
+        // fails closed. Caller input cannot supply it: the registry already
+        // rejects an auth-derived key as CALLER_SUPPLIED_IDENTITY (design §21.5).
+        throw new AuthContextError("AUTH_CONTEXT_UNAVAILABLE");
+      }
+      resolvedIdentity[name] = value;
+    }
+    const authDerivedParams = Object.freeze(resolvedIdentity);
+
+    // D0-H1 (FIX1 §11). The design obliges the eventual renderer to register
+    // these values before they can surface in request material. Registering
+    // them HERE discharges that obligation mechanically at the earliest
+    // possible point — bind strictly precedes any rendering — instead of
+    // relying on a future stage to remember. Outside an operation scope this
+    // is a documented no-op and retains nothing.
+    registerSensitiveValue(...Object.values(authDerivedParams));
+
+    // `context` and `authDerivedParams` are defined as read-only,
+    // non-enumerable own properties BEFORE freezing: nominal internal access
+    // works, while Object.keys, spread and JSON.stringify emit neither the
+    // handle nor the sensitive identity (design §13.5).
+    const wrapper = { kind: "AUTHENTICATED" as const, call };
+    Object.defineProperty(wrapper, "context", {
+      value: record.context,
+      enumerable: false,
+      writable: false,
+      configurable: false,
+    });
+    Object.defineProperty(wrapper, "authDerivedParams", {
+      value: authDerivedParams,
+      enumerable: false,
+      writable: false,
+      configurable: false,
+    });
+
+    return Object.freeze(wrapper) as unknown as AuthorizedCall;
+  }
+
+  /** The restricted producer port handed to BT4 (design §27). */
+  asWriter(): AuthContextWriter {
+    return Object.freeze({
+      currentRevision: (): AuthRevisionView => this.currentRevision(),
+      commitAuthenticatedMaterial: (
+        expected: AuthRevisionView,
+        mode: AuthCommitMode,
+        candidate: Readonly<AuthMaterialCandidate>
+      ): AuthContext => this.commitAuthenticatedMaterial(expected, mode, candidate),
+      invalidate: (cause: AuthInvalidationCause): AuthRevisionView => this.invalidate(cause),
+    });
+  }
+
+  /** The restricted execution port handed to BT5 (design §28). */
+  asReader(): AuthContextReader {
+    return Object.freeze({
+      bind: (call: ResolvedCall): ExecutionCall => this.bind(call),
+      runCurrent: <T>(
+        call: AuthorizedCall,
+        execute: (view: AuthExecutionView) => Promise<T>
+      ): Promise<T> => this.runCurrent(call, execute),
+    });
   }
 
   /**
