@@ -134,6 +134,15 @@ export type BootstrapOutcome =
 
 export interface AuthProducer {
   establishFromLogin(email: string, password: string): Promise<LoginOutcome>;
+  establishFromObservedMaterial(
+    observed: Readonly<{
+      accessToken: string;
+      tokenType: string;
+      expiresAt: number;
+      accountId: string;
+      profileId?: string;
+    }>
+  ): Promise<LoginOutcome>;
   refresh(): Promise<RefreshOutcome>;
   logout(): Promise<LogoutOutcome>;
   bootstrapFromStorage(): Promise<BootstrapOutcome>;
@@ -242,6 +251,49 @@ class AuthProducerImpl implements AuthProducer {
     const expected = this.ports.writer.currentRevision();
 
     const material = await this.readValidatedMaterial();
+    if (material.kind !== "OK") {
+      return Object.freeze({ kind: "MATERIAL_UNAVAILABLE" as const });
+    }
+
+    const rejection = this.commit(expected, "ESTABLISH", material.candidate);
+    return rejection === null
+      ? Object.freeze({ kind: "ESTABLISHED" as const })
+      : Object.freeze({ kind: "AUTHORITY_REJECTED" as const, reason: rejection });
+  }
+
+  /**
+   * BT4 completion: install material the human's own browser login produced.
+   *
+   * The material arrived already validated from the bounded observation, but a
+   * producer is never treated as infallible, so it is snapshotted once more and
+   * re-validated here before it can become a candidate.
+   *
+   * Deliberately NOT persisted: a browser-observed bearer carries no refresh
+   * token, hardened storage requires one, and writing a durable secret nothing
+   * may consume would be liability without benefit. Continuity across restarts
+   * comes from the browser profile's own session, not from us.
+   */
+  async establishFromObservedMaterial(
+    observed: Readonly<{
+      accessToken: string;
+      tokenType: string;
+      expiresAt: number;
+      accountId: string;
+      profileId?: string;
+    }>
+  ): Promise<LoginOutcome> {
+    // Captured before the untrusted read, exactly as the login path does.
+    const expected = this.ports.writer.currentRevision();
+
+    const material = this.validateMaterial({
+      access_token: observed.accessToken,
+      token_type: observed.tokenType,
+      expires_at: observed.expiresAt,
+      account_id: observed.accountId,
+      profile_id: observed.profileId,
+      refresh_token: "",
+    } as TokenLike);
+
     if (material.kind !== "OK") {
       return Object.freeze({ kind: "MATERIAL_UNAVAILABLE" as const });
     }

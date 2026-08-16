@@ -455,6 +455,191 @@ describe("BT4 login — a hostile storage document cannot smuggle a second value
   });
 });
 
+// ── Material observed in the human's own browser (completion errata §7, §9) ──
+
+/** Exactly the closed observation shape; never a refresh token, never a cookie. */
+function observed(overrides: Record<string, unknown> = {}) {
+  return {
+    accessToken: ACCESS_SENTINEL,
+    tokenType: "Bearer",
+    expiresAt: T0 + ONE_HOUR,
+    accountId: ACCOUNT_SENTINEL,
+    ...overrides,
+  } as Parameters<
+    ReturnType<typeof createAuthProducer>["establishFromObservedMaterial"]
+  >[0];
+}
+
+describe("BT4 completion — observed material installs through the same CAS", () => {
+  test("an observation establishes exactly one generation and touches no storage", async () => {
+    const h = harness();
+
+    const outcome = await h.producer.establishFromObservedMaterial(observed());
+
+    assert.deepEqual(outcome, { kind: "ESTABLISHED" });
+    assert.equal(h.authority.diagnostics().availability, "READY");
+    assert.equal(h.authority.currentRevision().generation, 1);
+    assert.deepEqual(h.writer.calls, ["currentRevision", "commit:ESTABLISH"]);
+    assert.equal(h.storage.calls.load, 0, "the browser path reads no stored document");
+    assert.equal(h.storage.calls.clear, 0);
+    assert.equal(h.legacy.calls.login, 0, "no credential grant is performed");
+  });
+
+  test("the installed record carries exactly the observed identity", async () => {
+    const h = harness();
+
+    await h.producer.establishFromObservedMaterial(
+      observed({ profileId: PROFILE_SENTINEL })
+    );
+
+    const seen = h.authority.inspectForTest();
+    assert.equal(seen.accountId, ACCOUNT_SENTINEL);
+    assert.equal(seen.profileId, PROFILE_SENTINEL);
+    assert.equal(seen.tokenType, "Bearer");
+    assert.equal(seen.expiresAt, T0 + ONE_HOUR);
+  });
+
+  test("the candidate carries the five closed fields and no refresh token", async () => {
+    const h = harness();
+    const captured: Record<string, unknown>[] = [];
+    const producer = createAuthProducer({
+      writer: {
+        currentRevision: () => h.writer.port.currentRevision(),
+        commitAuthenticatedMaterial: (expected, mode, candidate) => {
+          captured.push(candidate as Record<string, unknown>);
+          return h.writer.port.commitAuthenticatedMaterial(expected, mode, candidate);
+        },
+        invalidate: (cause) => h.writer.port.invalidate(cause),
+      },
+      storage: h.storage.port,
+      legacy: h.legacy.port,
+    });
+
+    await producer.establishFromObservedMaterial(
+      observed({ profileId: PROFILE_SENTINEL, refreshToken: REFRESH_SENTINEL } as never)
+    );
+
+    const candidate = captured[0];
+    assert.deepEqual(Object.keys(candidate).sort(), [
+      "accessToken",
+      "accountId",
+      "expiresAt",
+      "profileId",
+      "tokenType",
+    ]);
+    assert.equal("refreshToken" in candidate, false);
+    assert.equal("refresh_token" in candidate, false);
+    assert.equal(JSON.stringify(candidate).includes(REFRESH_SENTINEL), false);
+    assert.equal(Object.isFrozen(candidate), true);
+  });
+
+  test("a malformed observation is never committed", async () => {
+    for (const broken of [
+      observed({ accessToken: "   " }),
+      observed({ tokenType: "" }),
+      observed({ accountId: "" }),
+      observed({ profileId: "" }),
+      observed({ expiresAt: Number.NaN }),
+      observed({ expiresAt: "soon" as never }),
+    ]) {
+      const h = harness();
+      const outcome = await h.producer.establishFromObservedMaterial(broken);
+      assert.deepEqual(outcome, { kind: "MATERIAL_UNAVAILABLE" });
+      assert.equal(h.authority.currentRevision().generation, 0);
+      assert.deepEqual(h.writer.calls, ["currentRevision"], "revision captured, nothing committed");
+    }
+  });
+
+  test("an already-expired observation is never installed", async () => {
+    const h = harness();
+
+    const outcome = await h.producer.establishFromObservedMaterial(
+      observed({ expiresAt: T0 - ONE_HOUR })
+    );
+
+    assert.deepEqual(outcome, { kind: "MATERIAL_UNAVAILABLE" });
+    assert.equal(h.authority.diagnostics().availability, "UNAVAILABLE");
+  });
+
+  test("each authorized field is read at most once from the observation", async () => {
+    const h = harness();
+    const reads: Record<string, number> = {
+      accessToken: 0,
+      tokenType: 0,
+      expiresAt: 0,
+      accountId: 0,
+      profileId: 0,
+    };
+    const answers: Record<string, unknown> = {
+      accessToken: ACCESS_SENTINEL,
+      tokenType: "Bearer",
+      expiresAt: T0 + ONE_HOUR,
+      accountId: ACCOUNT_SENTINEL,
+      profileId: PROFILE_SENTINEL,
+    };
+    const hostile: Record<string, unknown> = {};
+    for (const field of Object.keys(reads)) {
+      Object.defineProperty(hostile, field, {
+        enumerable: true,
+        get() {
+          reads[field] += 1;
+          return answers[field];
+        },
+      });
+    }
+
+    await h.producer.establishFromObservedMaterial(hostile as never);
+
+    for (const [field, count] of Object.entries(reads)) {
+      assert.ok(count <= 1, `${field} was read ${count} times`);
+    }
+  });
+
+  test("a terminal authority answers AUTHORITY_REJECTED and never throws", async () => {
+    const terminal = createAuthContextAuthority({
+      epochFactory: () => EPOCH,
+      now: () => T0,
+      initialGeneration: Number.MAX_SAFE_INTEGER,
+    });
+    const producer = createAuthProducer({
+      writer: recordingWriter(terminal).port,
+      storage: storageFake().port,
+      legacy: legacyFake().port,
+    });
+
+    const outcome = await producer.establishFromObservedMaterial(observed());
+
+    assert.deepEqual(outcome, { kind: "AUTHORITY_REJECTED", reason: "UNAVAILABLE" });
+  });
+
+  test("logging in as a different account is an explicit new session", async () => {
+    const h = harness();
+    await h.producer.establishFromObservedMaterial(observed());
+
+    const outcome = await h.producer.establishFromObservedMaterial(
+      observed({ accessToken: ACCESS_SENTINEL_B, accountId: ACCOUNT_SENTINEL_B })
+    );
+
+    // ESTABLISH is BT3's explicit new-session path; only REFRESH demands
+    // identity continuity. BT4 compares no identity of its own.
+    assert.deepEqual(outcome, { kind: "ESTABLISHED" });
+    assert.equal(h.authority.currentRevision().generation, 2);
+    assert.equal(h.authority.inspectForTest().accountId, ACCOUNT_SENTINEL_B);
+  });
+
+  test("no observed outcome carries material or identity", async () => {
+    const h = harness();
+    const rendered = [
+      JSON.stringify(await h.producer.establishFromObservedMaterial(observed({ profileId: PROFILE_SENTINEL }))),
+      JSON.stringify(await h.producer.establishFromObservedMaterial(observed({ accessToken: "" }))),
+    ].join("\n");
+
+    for (const sentinel of [ACCESS_SENTINEL, ACCOUNT_SENTINEL, PROFILE_SENTINEL, REFRESH_SENTINEL]) {
+      assert.equal(rendered.includes(sentinel), false, `leaked ${sentinel}`);
+    }
+  });
+});
+
 // ── Refresh ─────────────────────────────────────────────────────────────────
 
 /** A RefreshError-shaped rejection, exactly as src/api.ts produces it. */
