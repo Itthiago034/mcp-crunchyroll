@@ -18,6 +18,7 @@ import {
   AuthContextError,
   MAX_AUTH_GENERATION,
 } from "../src/transport/auth-context.js";
+import { withRedactionScope, redactSecrets, REDACTED_MARKER } from "../src/redact.js";
 
 // ── Symbolic material (never a real credential) ─────────────────────────────
 
@@ -476,6 +477,450 @@ describe("BT3 authority — generation overflow is terminal, never wrapped", () 
     );
     assert.equal(a.currentRevision().generation, MAX_AUTH_GENERATION);
     assert.equal(a.diagnostics().availability, "UNAVAILABLE");
+  });
+});
+
+// ── Deterministic async barriers ────────────────────────────────────────────
+//
+// Every race below is expressed as an explicit ordering, never as a timeout:
+// the test decides exactly when a producer completes and when a backend
+// settles.
+
+interface Deferred<T> {
+  readonly promise: Promise<T>;
+  resolve(value: T): void;
+  reject(error: unknown): void;
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+/**
+ * Guarded execution entry point used by the tests. Task 4 replaces the handle
+ * with the frozen AuthorizedCall wrapper; keeping the indirection here means
+ * that change is one edit, not thirty.
+ */
+function runGuarded<T>(
+  a: Authority,
+  context: unknown,
+  execute: (view: { accessToken: string; tokenType: string; signal: AbortSignal }) => Promise<T>
+): Promise<T> {
+  return a.runCurrent(context as never, execute as never) as Promise<T>;
+}
+
+function isStale(e: unknown): boolean {
+  return e instanceof AuthContextError && e.kind === "AUTH_CONTEXT_STALE";
+}
+
+describe("BT3 authority — compare-and-swap commits", () => {
+  test("T11: a late producer candidate cannot overwrite a logout", async () => {
+    const a = authority();
+    establish(a);
+    const captured = a.currentRevision();
+
+    // The producer does its asynchronous validation/refresh OUTSIDE the
+    // authority, and a logout lands while it is away.
+    await Promise.resolve();
+    a.invalidate("LOGOUT");
+
+    assert.throws(
+      () => a.commitAuthenticatedMaterial(captured, "REFRESH", candidate({ accessToken: TOKEN_SENTINEL_B })),
+      isStale
+    );
+    assert.equal(a.diagnostics().availability, "UNAVAILABLE");
+    assert.equal(a.currentRevision().generation, 2, "the rejected commit is not a transition");
+  });
+
+  test("a mismatched expected revision neither mutates nor aborts", () => {
+    const a = authority();
+    establish(a);
+    const captured = a.currentRevision();
+    a.commitAuthenticatedMaterial(captured, "REFRESH", candidate({ accessToken: TOKEN_SENTINEL_B }));
+
+    const signal = signalOf(a);
+    let notified = false;
+    signal.addEventListener("abort", () => {
+      notified = true;
+    });
+
+    assert.throws(() => a.commitAuthenticatedMaterial(captured, "REFRESH", candidate()), isStale);
+    assert.equal(a.currentRevision().generation, 2);
+    assert.equal(notified, false, "a CAS mismatch must not notify the current generation");
+    assert.equal(signal.aborted, false);
+  });
+
+  test("a commit under a foreign epoch is stale even at an equal generation", () => {
+    const a = authority();
+    establish(a);
+    const foreign = { epoch: EPOCH_B, generation: a.currentRevision().generation };
+    assert.throws(() => a.commitAuthenticatedMaterial(foreign, "REFRESH", candidate()), isStale);
+    assert.equal(a.currentRevision().generation, 1);
+  });
+
+  test("a commit at the exact current revision is accepted", () => {
+    const a = authority();
+    establish(a);
+    const context = a.commitAuthenticatedMaterial(a.currentRevision(), "REFRESH", candidate({
+      accessToken: TOKEN_SENTINEL_B,
+    }));
+    assert.equal(a.acquire(), context);
+    assert.equal(a.currentRevision().generation, 2);
+  });
+
+  test("T15: an exhausted authority refuses even a same-maximum expected revision", () => {
+    const a = authority({ initialGeneration: MAX_AUTH_GENERATION - 1 });
+    establish(a);
+    const atMaximum = a.currentRevision();
+
+    assert.throws(
+      () => a.commitAuthenticatedMaterial(atMaximum, "REFRESH", candidate({ accessToken: TOKEN_SENTINEL_B })),
+      (e: unknown) => e instanceof AuthContextError && e.kind === "AUTH_CONTEXT_UNAVAILABLE"
+    );
+    assert.equal(a.diagnostics().reason, "EXHAUSTED");
+
+    // The published revision still numerically equals `atMaximum`. Terminal
+    // means terminal: it cannot be committed back into READY.
+    assert.equal(a.currentRevision().generation, atMaximum.generation);
+    assert.throws(
+      () => a.commitAuthenticatedMaterial(a.currentRevision(), "ESTABLISH", candidate()),
+      (e: unknown) => e instanceof AuthContextError && e.kind === "AUTH_CONTEXT_UNAVAILABLE"
+    );
+  });
+});
+
+describe("BT3 authority — guarded execution", () => {
+  test("the callback receives the current material and the generation signal", async () => {
+    const a = authority();
+    const context = establish(a);
+    const seen: Array<{ accessToken: string; tokenType: string; aborted: boolean }> = [];
+
+    const result = await runGuarded(a, context, async (view) => {
+      seen.push({ accessToken: view.accessToken, tokenType: view.tokenType, aborted: view.signal.aborted });
+      return "BACKEND-RESULT";
+    });
+
+    assert.equal(result, "BACKEND-RESULT");
+    assert.deepEqual(seen, [{ accessToken: TOKEN_SENTINEL, tokenType: "Bearer", aborted: false }]);
+  });
+
+  test("the execution view is frozen and carries no refresh token, cookie or identity", async () => {
+    const a = authority();
+    const context = establish(a, { profileId: SENSITIVE_PROFILE_SENTINEL });
+    await runGuarded(a, context, async (view) => {
+      assert.equal(Object.isFrozen(view), true);
+      assert.deepEqual(Object.keys(view).sort(), ["accessToken", "signal", "tokenType"]);
+      const rendered = JSON.stringify({ accessToken: "", tokenType: view.tokenType });
+      assert.equal(rendered.includes(SENSITIVE_ACCOUNT_SENTINEL), false);
+      assert.equal(rendered.includes(SENSITIVE_PROFILE_SENTINEL), false);
+      return "ok";
+    });
+  });
+
+  test("an unavailable authority never invokes the backend", async () => {
+    const a = authority();
+    const context = establish(a);
+    a.invalidate("LOGOUT");
+
+    let invoked = 0;
+    await assert.rejects(
+      runGuarded(a, context, async () => {
+        invoked += 1;
+        return "never";
+      }),
+      isStale
+    );
+    assert.equal(invoked, 0);
+  });
+
+  test("T3: a handle from a replaced generation is rejected before any side effect", async () => {
+    const a = authority();
+    const boundAtG1 = establish(a);
+    a.commitAuthenticatedMaterial(a.currentRevision(), "REFRESH", candidate({ accessToken: TOKEN_SENTINEL_B }));
+
+    let invoked = 0;
+    let observedToken: string | undefined;
+    await assert.rejects(
+      runGuarded(a, boundAtG1, async (view) => {
+        invoked += 1;
+        observedToken = view.accessToken;
+        return "never";
+      }),
+      isStale
+    );
+    assert.equal(invoked, 0, "the backend must not run at all");
+    assert.equal(observedToken, undefined, "generation 2 material is never substituted into generation 1");
+  });
+
+  test("T8: a retained stale handle retrieves no material, and current work is unaffected", async () => {
+    const a = authority();
+    const retained = establish(a);
+    a.commitAuthenticatedMaterial(a.currentRevision(), "REFRESH", candidate({ accessToken: TOKEN_SENTINEL_B }));
+    const current = a.acquire();
+
+    await assert.rejects(runGuarded(a, retained, async () => "never"), isStale);
+
+    const observed = await runGuarded(a, current, async (view) => view.accessToken);
+    assert.equal(observed, TOKEN_SENTINEL_B);
+  });
+
+  test("T13: a forged lookalike handle is rejected as stale", async () => {
+    const a = authority();
+    establish(a);
+    const forged = Object.freeze(Object.create(null));
+    let invoked = 0;
+    await assert.rejects(
+      runGuarded(a, forged, async () => {
+        invoked += 1;
+        return "never";
+      }),
+      isStale
+    );
+    assert.equal(invoked, 0);
+  });
+
+  test("T13: a handle issued by another authority is rejected as stale", async () => {
+    const authorityA = authority();
+    const authorityB = authority({ epoch: EPOCH_B });
+    establish(authorityA);
+    const fromB = establish(authorityB);
+
+    await assert.rejects(runGuarded(authorityA, fromB, async () => "never"), isStale);
+    // …and B is untouched by A's rejection.
+    assert.equal(authorityB.acquire(), fromB);
+  });
+
+  test("expired material refuses execution as unavailable, not as staleness", async () => {
+    let clock = T0;
+    const a = createAuthContextAuthority({ epochFactory: () => EPOCH_A, now: () => clock });
+    const context = a.commitAuthenticatedMaterial(a.currentRevision(), "ESTABLISH", candidate());
+    clock = T0 + ONE_HOUR + 1;
+
+    let invoked = 0;
+    await assert.rejects(
+      runGuarded(a, context, async () => {
+        invoked += 1;
+        return "never";
+      }),
+      (e: unknown) => e instanceof AuthContextError && e.kind === "AUTH_CONTEXT_UNAVAILABLE"
+    );
+    assert.equal(invoked, 0);
+  });
+});
+
+describe("BT3 authority — stale results across an await", () => {
+  test("T12: invalidation during execution aborts the signal and discards the result", async () => {
+    const a = authority();
+    const context = establish(a);
+    const gate = deferred<string>();
+    let sawAbort = false;
+
+    const pending = runGuarded(a, context, async (view) => {
+      view.signal.addEventListener("abort", () => {
+        sawAbort = true;
+      });
+      return gate.promise;
+    });
+
+    a.invalidate("LOGOUT");
+    gate.resolve("REMOTE-SIDE-EFFECT-ALREADY-SENT");
+
+    await assert.rejects(pending, isStale);
+    assert.equal(sawAbort, true, "the in-flight consumer is notified");
+  });
+
+  test("T12: a replacement during execution also discards the older result", async () => {
+    const a = authority();
+    const context = establish(a);
+    const gate = deferred<string>();
+
+    const pending = runGuarded(a, context, async () => gate.promise);
+    a.commitAuthenticatedMaterial(a.currentRevision(), "REFRESH", candidate({ accessToken: TOKEN_SENTINEL_B }));
+    gate.resolve("RESULT-FROM-GENERATION-1");
+
+    await assert.rejects(pending, isStale);
+    // No replay, no substitution: the result is dropped, not reissued under G2.
+    assert.equal(a.currentRevision().generation, 2);
+  });
+
+  test("every pending operation of one generation is aborted and rejected", async () => {
+    const a = authority();
+    const context = establish(a);
+    const gates = [deferred<string>(), deferred<string>(), deferred<string>()];
+    const aborts: boolean[] = [false, false, false];
+
+    const pending = gates.map((gate, index) =>
+      runGuarded(a, context, async (view) => {
+        view.signal.addEventListener("abort", () => {
+          aborts[index] = true;
+        });
+        return gate.promise;
+      })
+    );
+
+    a.invalidate("LOGOUT");
+    for (const gate of gates) gate.resolve("late");
+
+    const settled = await Promise.allSettled(pending);
+    assert.equal(settled.every((s) => s.status === "rejected" && isStale(s.reason)), true);
+    assert.deepEqual(aborts, [true, true, true]);
+  });
+
+  test("a backend rejection propagates unchanged, without an authority verdict", async () => {
+    const a = authority();
+    const context = establish(a);
+    const backendFailure = new Error("BACKEND-SPECIFIC-FAILURE");
+    await assert.rejects(
+      runGuarded(a, context, async () => {
+        throw backendFailure;
+      }),
+      (e: unknown) => e === backendFailure
+    );
+    assert.equal(a.currentRevision().generation, 1, "a backend failure is not an auth transition");
+  });
+
+  test("a still-current operation returns its result after settling", async () => {
+    const a = authority();
+    const context = establish(a);
+    const gate = deferred<string>();
+    const pending = runGuarded(a, context, async () => gate.promise);
+    gate.resolve("ACCEPTED");
+    assert.equal(await pending, "ACCEPTED");
+  });
+});
+
+describe("BT3 authority — reentrancy from an abort listener (FIX1 §9)", () => {
+  test("an invalidation listener observes the already-published UNAVAILABLE state", () => {
+    const a = authority();
+    const staleHandle = establish(a);
+    const signal = signalOf(a);
+
+    let observed: Record<string, unknown> | undefined;
+    signal.addEventListener("abort", () => {
+      let acquireRejected = false;
+      try {
+        a.acquire();
+      } catch {
+        acquireRejected = true;
+      }
+      observed = {
+        availability: a.diagnostics().availability,
+        reason: a.diagnostics().reason,
+        generation: a.currentRevision().generation,
+        acquireRejected,
+      };
+    });
+
+    a.invalidate("LOGOUT");
+
+    assert.deepEqual(observed, {
+      availability: "UNAVAILABLE",
+      reason: "INVALIDATED",
+      generation: 2,
+      acquireRejected: true,
+    });
+    assert.ok(staleHandle, "the old handle survives as an object but never as a capability");
+  });
+
+  test("a replacement listener observes the already-published G+1 READY state", () => {
+    const a = authority();
+    const oldHandle = establish(a);
+    const signal = signalOf(a);
+
+    let observed: Record<string, unknown> | undefined;
+    signal.addEventListener("abort", () => {
+      observed = {
+        availability: a.diagnostics().availability,
+        generation: a.currentRevision().generation,
+        currentIsOldHandle: a.acquire() === oldHandle,
+        tokenType: a.inspectForTest().tokenType,
+      };
+    });
+
+    const newHandle = a.commitAuthenticatedMaterial(a.currentRevision(), "REFRESH", candidate({
+      accessToken: TOKEN_SENTINEL_B,
+    }));
+
+    assert.deepEqual(observed, {
+      availability: "READY",
+      generation: 2,
+      currentIsOldHandle: false,
+      tokenType: "Bearer",
+    });
+    assert.notEqual(newHandle, oldHandle);
+  });
+
+  test("an overflow listener observes EXHAUSTED published before the notification", () => {
+    const a = authority({ initialGeneration: MAX_AUTH_GENERATION - 1 });
+    establish(a);
+    const signal = signalOf(a);
+
+    let observed: Record<string, unknown> | undefined;
+    signal.addEventListener("abort", () => {
+      observed = {
+        availability: a.diagnostics().availability,
+        reason: a.diagnostics().reason,
+        generation: a.currentRevision().generation,
+      };
+    });
+
+    assert.throws(
+      () => a.commitAuthenticatedMaterial(a.currentRevision(), "REFRESH", candidate({ accessToken: TOKEN_SENTINEL_B })),
+      AuthContextError
+    );
+
+    assert.deepEqual(observed, {
+      availability: "UNAVAILABLE",
+      reason: "EXHAUSTED",
+      generation: MAX_AUTH_GENERATION,
+    });
+  });
+});
+
+describe("BT3 authority — access material redaction (design §19)", () => {
+  test("the access token is registered with the operation scope before the callback runs", async () => {
+    const a = authority();
+    const context = establish(a);
+
+    await withRedactionScope(async () => {
+      await runGuarded(a, context, async (view) => {
+        // Registration must already have happened: a backend that renders the
+        // token into a failure string is covered from its first instruction.
+        const rendered = redactSecrets(`request failed for token ${view.accessToken}`);
+        assert.equal(rendered.includes(TOKEN_SENTINEL), false);
+        assert.equal(rendered.includes(REDACTED_MARKER), true);
+        return "ok";
+      });
+    });
+  });
+
+  test("registration also covers the failing path", async () => {
+    const a = authority();
+    const context = establish(a);
+
+    await withRedactionScope(async () => {
+      await assert.rejects(
+        runGuarded(a, context, async () => {
+          throw new Error("failure");
+        })
+      );
+      assert.equal(redactSecrets(`leaked ${TOKEN_SENTINEL}`).includes(TOKEN_SENTINEL), false);
+    });
+  });
+
+  test("outside any operation scope nothing is retained anywhere", async () => {
+    const a = authority();
+    const context = establish(a);
+    await runGuarded(a, context, async () => "ok");
+    // No active scope: registerSensitiveValue is a documented no-op, so the
+    // literal is not held in some parallel global registry.
+    assert.equal(redactSecrets(`plain ${TOKEN_SENTINEL}`), `plain ${TOKEN_SENTINEL}`);
   });
 });
 

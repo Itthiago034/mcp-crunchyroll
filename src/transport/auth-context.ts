@@ -10,6 +10,7 @@
 // CRUNCHYROLL-BT3-DESIGN-GATE0-FIX1-ERRATA.md.
 
 import { randomBytes } from "node:crypto";
+import { registerSensitiveValue } from "../redact.js";
 
 // ── Closed error vocabulary (design §20) ────────────────────────────────────
 
@@ -192,6 +193,20 @@ export interface AuthAuthorityInspection {
   readonly signal?: AbortSignal;
 }
 
+/**
+ * The short-lived view handed to ONE guarded callback. A consumer must not
+ * return it, log it, retain it or copy its token. JavaScript cannot prevent a
+ * determined internal module from copying a string; what enforces the boundary
+ * is code ownership, this narrow API, redaction registration and tests.
+ *
+ * There is no refresh token and no cookie here, and there never will be in BT3.
+ */
+export interface AuthExecutionView {
+  readonly accessToken: string;
+  readonly tokenType: string;
+  readonly signal: AbortSignal;
+}
+
 function isUsableString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
@@ -311,22 +326,31 @@ export class AuthContextAuthority {
   /**
    * Install or replace the current material under an expected revision.
    *
-   * BT3 TASK 2 SCOPE: the `expected` revision is part of the frozen writer
-   * signature and is accepted here, but the compare-and-swap REJECTION is
-   * Task 3 work (design §25) — that is the RED which proves a late producer
-   * cannot overwrite a newer commit.
+   * The producer captures a revision, performs its asynchronous validation or
+   * refresh OUTSIDE the authority, and then commits synchronously. The commit
+   * succeeds only if the authority is still at exactly that revision, so a late
+   * completion can never overwrite a logout, another refresh or a newer login
+   * (design §16.3).
    */
   commitAuthenticatedMaterial(
     expected: AuthRevisionView,
     mode: AuthCommitMode,
     candidate: Readonly<AuthMaterialCandidate>
   ): AuthContext {
-    void expected;
-
     // EXHAUSTED is terminal: an authority that ran out of generations can never
-    // be reopened, only restarted into a different epoch (design §16.3).
+    // be reopened, only restarted into a different epoch (design §16.3). This
+    // is checked BEFORE the CAS, so an expected revision that numerically
+    // equals the published maximum still gets UNAVAILABLE rather than a
+    // misleading staleness verdict.
     if (this.state.kind === "UNAVAILABLE" && this.state.reason === "EXHAUSTED") {
       throw new AuthContextError("AUTH_CONTEXT_UNAVAILABLE");
+    }
+
+    // The compare-and-swap gate. A mismatch performs NO state mutation, no
+    // generation increment and no controller abort (FIX1 §8) — it is checked
+    // before candidate validation so a doomed candidate is never even examined.
+    if (!revisionsEqual(expected, this.currentRevision())) {
+      throw new AuthContextError("AUTH_CONTEXT_STALE");
     }
 
     // A trusted producer is not treated as infallible: every string and the
@@ -405,6 +429,83 @@ export class AuthContextAuthority {
       throw new AuthContextError("AUTH_CONTEXT_UNAVAILABLE");
     }
     return revision;
+  }
+
+  /**
+   * Guarded execution: the only path on which the access token is ever exposed,
+   * and then only for the duration of one callback.
+   *
+   * Three checks close the await race (design §13.6–13.9):
+   *
+   * 1. a synchronous pre-check immediately before the first external side
+   *    effect — capability identity, non-aborted state AND usable expiration;
+   * 2. the generation's AbortSignal, handed to the consumer so it can attempt
+   *    cancellation;
+   * 3. a synchronous post-check after the callback settles.
+   *
+   * The post-check is deliberately a CURRENTNESS check only, not a usability
+   * check: §13.8 defines it against a generation change while the consumer was
+   * awaiting. Discarding an authorized result merely because the token expired
+   * a millisecond after the request succeeded would protect nothing and would
+   * throw away work the authority itself had already sanctioned.
+   *
+   * No claim is made that aborting retracts a request already sent. What is
+   * guaranteed is that its result is never accepted afterwards, and that it is
+   * never replayed or reissued under a newer generation.
+   */
+  async runCurrent<T>(
+    context: AuthContext,
+    execute: (view: AuthExecutionView) => Promise<T>
+  ): Promise<T> {
+    const record = this.assertUsableCurrentContext(context);
+
+    // Registered BEFORE the callback so that a backend rendering the token into
+    // a failure string is covered from its very first instruction (design §19).
+    registerSensitiveValue(record.accessToken);
+
+    const view: AuthExecutionView = Object.freeze({
+      accessToken: record.accessToken,
+      tokenType: record.tokenType,
+      signal: record.abortController.signal,
+    });
+
+    const result = await execute(view);
+
+    // Post-check. A stale result is discarded, never returned and never retried.
+    this.assertStillCurrent(context);
+
+    return result;
+  }
+
+  /**
+   * The complete runtime acceptance conjunction (FIX1 §5). Issuance membership
+   * rejects a forged or cross-authority object; current-record identity rejects
+   * a previously issued but stale handle. There is deliberately no lookup from
+   * a handle to a historical record, so nothing stale can be resolved at all.
+   */
+  private assertStillCurrent(context: AuthContext): ActiveAuthRecord {
+    if (
+      !this.issuedContexts.has(context) ||
+      this.state.kind !== "READY" ||
+      this.state.record.context !== context ||
+      this.state.record.abortController.signal.aborted
+    ) {
+      // A forged handle is reported exactly like a stale one, so the rejection
+      // does not disclose whether the object was ever issued here (design §15).
+      throw new AuthContextError("AUTH_CONTEXT_STALE");
+    }
+    return this.state.record;
+  }
+
+  /** Pre-use acceptance: currentness plus usable material (design §13.6). */
+  private assertUsableCurrentContext(context: AuthContext): ActiveAuthRecord {
+    const record = this.assertStillCurrent(context);
+    if (!this.recordRemainsUsable(record)) {
+      // Unusable material is not staleness: the handle is still the current
+      // one, there is simply nothing valid to authorize with.
+      throw new AuthContextError("AUTH_CONTEXT_UNAVAILABLE");
+    }
+    return record;
   }
 
   /**
