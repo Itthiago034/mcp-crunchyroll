@@ -19,7 +19,14 @@ import {
   MAX_AUTH_GENERATION,
 } from "../src/transport/auth-context.js";
 import { withRedactionScope, redactSecrets, REDACTED_MARKER } from "../src/redact.js";
-import { createOperationRegistry, resolveCall } from "../src/transport/operation-registry.js";
+import { readFileSync, readdirSync, existsSync } from "node:fs";
+import { join, dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  createOperationRegistry,
+  resolveCall,
+  PRODUCTION_OPERATIONS,
+} from "../src/transport/operation-registry.js";
 import { createTransportDispatcher } from "../src/transport/dispatcher.js";
 import { TransportError } from "../src/transport/transport-error.js";
 import {
@@ -1305,6 +1312,303 @@ describe("BT3 ports — BT4 writes, BT5 reads, neither does both", () => {
 
     writer.invalidate("LOGOUT");
     assert.throws(() => reader.bind(resolved("BT3_SYNTHETIC_ACCOUNT")), AuthContextError);
+  });
+});
+
+// ── Source and boundary scanning (Task 5) ───────────────────────────────────
+
+const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const AUTH_CONTEXT_SOURCE_PATH = join(REPO_ROOT, "src/transport/auth-context.ts");
+const AUTH_CONTEXT_SOURCE = readFileSync(AUTH_CONTEXT_SOURCE_PATH, "utf-8");
+
+/** Source with comments stripped: prose about cookies is not a cookie API. */
+const AUTH_CONTEXT_CODE = AUTH_CONTEXT_SOURCE.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
+
+/** Every local module reachable from an entry point, following real imports. */
+function importClosure(entry: string): Set<string> {
+  const seen = new Set<string>();
+  const queue = [entry];
+  while (queue.length > 0) {
+    const file = queue.pop() as string;
+    if (seen.has(file)) continue;
+    seen.add(file);
+    const source = readFileSync(file, "utf-8");
+    const specifiers = [
+      ...source.matchAll(/from\s+"(\.[^"]+)"/g),
+      ...source.matchAll(/import\s*\(\s*"(\.[^"]+)"\s*\)/g),
+      ...source.matchAll(/import\s+"(\.[^"]+)"/g),
+    ];
+    for (const match of specifiers) {
+      const target = resolve(dirname(file), match[1].replace(/\.js$/, ".ts"));
+      if (existsSync(target)) queue.push(target);
+    }
+  }
+  return seen;
+}
+
+describe("BT3 closure — T8: capability bookkeeping owns no secret", () => {
+  test("issuance is exactly a WeakSet of contexts", () => {
+    assert.match(AUTH_CONTEXT_CODE, /issuedContexts\s*=\s*new WeakSet<AuthContext>\(\)/);
+  });
+
+  test("no map of any kind is keyed by an AuthContext", () => {
+    assert.equal(/WeakMap/.test(AUTH_CONTEXT_CODE), false, "a WeakMap<AuthContext, …> is forbidden by FIX1 §5");
+    // The key type must be AuthContext *itself*: `Record<AuthContextErrorKind,
+    // string>` is a table of fixed messages keyed by an error kind, not a
+    // handle-to-secret association, so the boundary here is deliberate.
+    assert.equal(/(?:Map|Record)<\s*AuthContext\s*[,>]/.test(AUTH_CONTEXT_CODE), false);
+    // The only WeakSet in the module is the issuance registry itself.
+    assert.equal((AUTH_CONTEXT_CODE.match(/new WeakSet/g) ?? []).length, 1);
+  });
+
+  test("the only authority-owned root of a record is the current state", () => {
+    // A record is written to exactly one place: `this.state`. No second field,
+    // history array, cache or index may hold an ActiveAuthRecord.
+    const recordAssignments = AUTH_CONTEXT_CODE.match(/this\.state\s*=/g) ?? [];
+    assert.equal(recordAssignments.length >= 1, true);
+    assert.equal(/history|previousRecord|recordCache|byContext|records\s*[:=]/.test(AUTH_CONTEXT_CODE), false);
+  });
+});
+
+describe("BT3 closure — the module has no capability it must not have", () => {
+  const forbiddenSourceTokens: Array<[string, RegExp]> = [
+    ["refresh token", /refreshToken|refresh_token/],
+    ["cookie handling", /cookie/i],
+    ["password", /password/i],
+    ["browser session manager", /BrowserSessionManager/],
+    ["CDP client", /cdp|CdpClient/i],
+    ["Runtime.evaluate", /Runtime\.evaluate/],
+    ["Fetch domain", /Fetch\./],
+    ["Network domain", /Network\./],
+    ["an http(s) URL literal", /https?:\/\//],
+    ["fetch()", /\bfetch\s*\(/],
+    ["node:http", /node:https?/],
+    ["a websocket", /WebSocket|node:net|node:tls/],
+    ["filesystem access", /node:fs|readFile|writeFile/],
+    ["environment reading", /process\.env/],
+    ["a timer", /setTimeout|setInterval/],
+    ["dynamic require", /require\s*\(/],
+  ];
+
+  for (const [name, pattern] of forbiddenSourceTokens) {
+    test(`the authority source contains no ${name}`, () => {
+      assert.equal(pattern.test(AUTH_CONTEXT_CODE), false, `${name} must not appear in auth-context.ts`);
+    });
+  }
+
+  test("its only runtime imports are node:crypto and the existing redaction scope", () => {
+    const imports = [...AUTH_CONTEXT_SOURCE.matchAll(/^import\s+(?!type)[^;]*?from\s+"([^"]+)"/gm)].map(
+      (match) => match[1]
+    );
+    assert.deepEqual(imports.sort(), ["../redact.js", "node:crypto"]);
+  });
+
+  test("the exported runtime surface is exactly the closed set", () => {
+    assert.deepEqual(Object.keys(authContextModule).sort(), [
+      "AuthContextAuthority",
+      "AuthContextError",
+      "MAX_AUTH_GENERATION",
+      "createAuthContextAuthority",
+      "nextGeneration",
+      "revisionsEqual",
+    ]);
+  });
+});
+
+describe("BT3 closure — public unreachability (design §29)", () => {
+  test("no import path from the MCP entry point reaches the authority", () => {
+    const reachable = importClosure(join(REPO_ROOT, "src/index.ts"));
+    assert.equal(
+      reachable.has(AUTH_CONTEXT_SOURCE_PATH),
+      false,
+      "src/index.ts must not reach auth-context.ts, directly or transitively"
+    );
+    // Sanity: the walker really does follow the module graph.
+    assert.equal(reachable.has(join(REPO_ROOT, "src/redact.ts")), true);
+  });
+
+  test("no other production module imports the authority", () => {
+    const importers: string[] = [];
+    const walk = (directory: string): void => {
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        const full = join(directory, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (entry.name.endsWith(".ts") && full !== AUTH_CONTEXT_SOURCE_PATH) {
+          if (/from\s+"[^"]*auth-context\.js"/.test(readFileSync(full, "utf-8"))) importers.push(full);
+        }
+      }
+    };
+    walk(join(REPO_ROOT, "src"));
+    assert.deepEqual(importers, []);
+  });
+
+  test("the published bundle carries no trace of the authority", () => {
+    const bundle = readFileSync(join(REPO_ROOT, "dist/index.js"), "utf-8");
+    for (const marker of [
+      "Authentication context is unavailable",
+      "Authentication context is stale",
+      "Authentication identity changed unexpectedly",
+      "AuthContextAuthority",
+      "issuedContexts",
+    ]) {
+      assert.equal(bundle.includes(marker), false, `the bundle must not contain: ${marker}`);
+    }
+  });
+
+  test("PRODUCTION_OPERATIONS remains empty and frozen", () => {
+    assert.deepEqual(PRODUCTION_OPERATIONS, []);
+    assert.equal(Object.isFrozen(PRODUCTION_OPERATIONS), true);
+  });
+
+  test("the public tool contract is still exactly 21 unchanged names", () => {
+    const baseline = JSON.parse(
+      readFileSync(join(REPO_ROOT, "test/fixtures/baseline-tools.json"), "utf-8")
+    ) as Array<{ name: string; inputSchema: { properties?: Record<string, unknown> } }>;
+    assert.equal(baseline.length, 21);
+
+    const forbiddenCallerKeys = [
+      "authorization",
+      "bearer",
+      "cookie",
+      "token",
+      "accountid",
+      "profileid",
+      "epoch",
+      "authgeneration",
+      "context",
+      "cdp",
+      "browser",
+    ];
+    for (const tool of baseline) {
+      for (const property of Object.keys(tool.inputSchema.properties ?? {})) {
+        assert.equal(
+          forbiddenCallerKeys.includes(property.toLowerCase()),
+          false,
+          `${tool.name} must not admit ${property}`
+        );
+      }
+    }
+  });
+
+  test("no dependency was added, and the engine floor is unchanged", () => {
+    const manifest = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf-8")) as {
+      dependencies: Record<string, string>;
+      devDependencies: Record<string, string>;
+      engines: Record<string, string>;
+    };
+    assert.deepEqual(Object.keys(manifest.dependencies).sort(), ["@modelcontextprotocol/sdk", "ws"]);
+    assert.deepEqual(Object.keys(manifest.devDependencies).sort(), [
+      "@types/node",
+      "@types/ws",
+      "esbuild",
+      "tsx",
+      "typescript",
+    ]);
+    assert.equal(manifest.engines.node, ">=18.0.0");
+  });
+});
+
+describe("BT3 closure — no failure path leaks material or identity", () => {
+  test("every reachable rejection is one of three fixed, sentinel-free messages", async () => {
+    const collected: string[] = [];
+    const record = (error: unknown): void => {
+      const e = error as Error;
+      collected.push(`${e.name} ${e.message} ${JSON.stringify(e)} ${e.stack ?? ""}`);
+    };
+
+    // 1. acquisition with nothing installed
+    const empty = authority();
+    try {
+      empty.acquire();
+    } catch (e) {
+      record(e);
+    }
+
+    // 2. invalid candidate
+    try {
+      establish(empty, { accessToken: "" });
+    } catch (e) {
+      record(e);
+    }
+
+    // 3. identity change during refresh
+    const switched = authority();
+    establish(switched, { profileId: SENSITIVE_PROFILE_SENTINEL });
+    try {
+      switched.commitAuthenticatedMaterial(switched.currentRevision(), "REFRESH", candidate({
+        accountId: SENSITIVE_ACCOUNT_SENTINEL_B,
+        profileId: SENSITIVE_PROFILE_SENTINEL_B,
+      }));
+    } catch (e) {
+      record(e);
+    }
+
+    // 4. CAS mismatch
+    const raced = authority();
+    establish(raced);
+    const captured = raced.currentRevision();
+    raced.invalidate("LOGOUT");
+    try {
+      raced.commitAuthenticatedMaterial(captured, "REFRESH", candidate());
+    } catch (e) {
+      record(e);
+    }
+
+    // 5. stale guarded execution
+    const staleAuthority = authority();
+    const staleHandle = establish(staleAuthority);
+    staleAuthority.commitAuthenticatedMaterial(staleAuthority.currentRevision(), "REFRESH", candidate({
+      accessToken: TOKEN_SENTINEL_B,
+    }));
+    try {
+      await runGuarded(staleAuthority, staleHandle, async () => "never");
+    } catch (e) {
+      record(e);
+    }
+
+    // 6. missing required profile identity at bind
+    const noProfile = authority();
+    establish(noProfile);
+    try {
+      noProfile.bind(resolved("BT3_SYNTHETIC_PROFILE"));
+    } catch (e) {
+      record(e);
+    }
+
+    assert.equal(collected.length, 6, "every failure path must have been exercised");
+    const everything = collected.join("\n");
+    for (const sentinel of [
+      SENSITIVE_ACCOUNT_SENTINEL,
+      SENSITIVE_ACCOUNT_SENTINEL_B,
+      SENSITIVE_PROFILE_SENTINEL,
+      SENSITIVE_PROFILE_SENTINEL_B,
+      TOKEN_SENTINEL,
+      TOKEN_SENTINEL_B,
+      EPOCH_A,
+    ]) {
+      assert.equal(everything.includes(sentinel), false, `a failure path leaked ${sentinel}`);
+    }
+    for (const message of collected) {
+      assert.match(
+        message,
+        /Authentication context is unavailable|Authentication context is stale|Authentication identity changed unexpectedly/
+      );
+    }
+  });
+
+  test("a retained stale handle yields nothing through any exposed surface", async () => {
+    const a = authority();
+    const retained = establish(a);
+    a.commitAuthenticatedMaterial(a.currentRevision(), "REFRESH", candidate({ accessToken: TOKEN_SENTINEL_B }));
+
+    // Everything an internal consumer could try with a handle it kept.
+    assert.equal(JSON.stringify(retained), "{}");
+    assert.deepEqual(Object.getOwnPropertyNames(retained), []);
+    assert.equal(String(Object.keys(retained)), "");
+    await assert.rejects(runGuarded(a, retained, async () => "never"), isStale);
+    // …and the authority's own diagnostics still describe only the current one.
+    assert.equal(a.diagnostics().generation, 2);
+    assert.equal(a.inspectForTest().tokenType, "Bearer");
   });
 });
 
