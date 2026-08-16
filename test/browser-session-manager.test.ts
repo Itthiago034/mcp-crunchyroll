@@ -402,6 +402,32 @@ describe("BT2 session manager — managed page", () => {
 });
 
 describe("BT2 session manager — owned-browser reuse and orphans", () => {
+  test("distinct exact launcher and runtime identities adopt successfully", async () => {
+    const { manager, spawner } = wireFakes({
+      existingOwnedBrowser: "valid-distinct-executables",
+    });
+    await manager.start();
+    assert.equal(manager.state(), "BROWSER_READY");
+    assert.equal(spawner.launches.length, 0, "distinct identities alone do not reject adoption");
+  });
+
+  test("a launcher mismatch rejects adoption even when runtime identity matches", async () => {
+    const { manager, spawner, processInspector } = wireFakes({
+      existingOwnedBrowser: "launcher-mismatch",
+    });
+    await manager.start();
+    assert.equal(spawner.launches.length, 1);
+    assert.equal("signalIfIdentityMatches" in processInspector, false);
+  });
+
+  test("a runtime mismatch rejects adoption even when launcher identity matches", async () => {
+    const { manager, spawner } = wireFakes({
+      existingOwnedBrowser: "runtime-mismatch",
+    });
+    await manager.start();
+    assert.equal(spawner.launches.length, 1);
+  });
+
   test("all thirteen valid checks adopt with zero spawn", async () => {
     const { manager, spawner } = wireFakes({ existingOwnedBrowser: "valid" });
     await manager.start();
@@ -537,18 +563,24 @@ describe("BT2 session manager — owned-browser reuse and orphans", () => {
     assert.equal(existsSync(join(profileDir, ".mcp-browser-owner.json")), false);
   });
 
-  test("a successful fresh launch writes the canonical ownership record", async () => {
-    const { manager, profileDir, processInspector } = wireFakes();
+  test("a fresh launch records distinct launcher and post-handshake runtime identities", async () => {
+    const { manager, profileDir, processInspector } = wireFakes({
+      distinctRuntimeExecutable: true,
+    });
     await manager.start();
     const path = join(profileDir, ".mcp-browser-owner.json");
     assert.equal(statSync(path).mode & 0o777, 0o600);
     const record = JSON.parse(readFileSync(path, "utf8")) as {
       profile: string;
-      executable: string;
+      launcherExecutable: string;
+      runtimeExecutable: string;
       startTimeTicks: number;
+      executable?: string;
     };
     assert.equal(record.profile, realpathSync(profileDir));
-    assert.equal(record.executable, processInspector.canonicalExecutable);
+    assert.equal(record.launcherExecutable, processInspector.canonicalLauncherExecutable);
+    assert.equal(record.runtimeExecutable, processInspector.canonicalRuntimeExecutable);
+    assert.equal("executable" in record, false, "the ambiguous field is absent");
     assert.equal(typeof record.startTimeTicks, "number");
   });
 

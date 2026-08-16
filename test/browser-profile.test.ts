@@ -224,7 +224,8 @@ describe("BT2 ownership record", () => {
   const record = (overrides: Record<string, unknown> = {}) => ({
     version: 1,
     pid: process.pid,
-    executable: process.execPath,
+    launcherExecutable: process.execPath,
+    runtimeExecutable: process.execPath,
     profile: "/x",
     startTimeTicks: 1234,
     ...overrides,
@@ -245,6 +246,21 @@ describe("BT2 ownership record", () => {
     writeFileSync(ownerApi.ownershipRecordPath(dir), JSON.stringify({ version: 99 }), {
       mode: 0o600,
     });
+    await assert.rejects(
+      () => ownerApi.readOwnershipRecord(dir),
+      (error: unknown) =>
+        error instanceof BrowserLifecycleError && error.kind === "OWNERSHIP_INVALID",
+    );
+  }));
+
+  test("the old executable-only version 1 schema fails closed", withProfile(async (dir) => {
+    writeFileSync(ownerApi.ownershipRecordPath(dir), JSON.stringify({
+      version: 1,
+      pid: process.pid,
+      executable: process.execPath,
+      profile: dir,
+      startTimeTicks: 1234,
+    }), { mode: 0o600 });
     await assert.rejects(
       () => ownerApi.readOwnershipRecord(dir),
       (error: unknown) =>

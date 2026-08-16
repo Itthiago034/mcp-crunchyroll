@@ -268,16 +268,18 @@ export class FakeConnector {
 
 export class FakeProcessIdentityInspector implements ProcessIdentityInspector {
   readonly adoptedPid = 30_000;
-  readonly canonicalExecutable = realpathSync(process.execPath);
+  readonly canonicalLauncherExecutable = realpathSync(process.execPath);
+  readonly canonicalRuntimeExecutable: string;
   readonly inspectionCalls: string[] = [];
   private readonly startTimes = new Map<number, number | null>();
   private readonly executables = new Map<number, string | null>();
   private readonly argumentsByPid = new Map<number, readonly string[] | null>();
   private readonly alive = new Map<number, boolean>();
 
-  constructor() {
+  constructor(runtimeExecutable = realpathSync(process.execPath)) {
+    this.canonicalRuntimeExecutable = runtimeExecutable;
     this.startTimes.set(this.adoptedPid, 1_234_567);
-    this.executables.set(this.adoptedPid, this.canonicalExecutable);
+    this.executables.set(this.adoptedPid, runtimeExecutable);
     this.argumentsByPid.set(this.adoptedPid, [process.execPath]);
     this.alive.set(this.adoptedPid, true);
   }
@@ -310,7 +312,7 @@ export class FakeProcessIdentityInspector implements ProcessIdentityInspector {
   registerSpawn(pid: number, profileDir: string, executable: string): void {
     this.alive.set(pid, true);
     this.startTimes.set(pid, 2_000_000 + pid);
-    this.executables.set(pid, realpathSync(executable));
+    this.executables.set(pid, this.canonicalRuntimeExecutable);
     this.argumentsByPid.set(pid, [executable, `--user-data-dir=${realpathSync(profileDir)}`]);
   }
 }
@@ -330,6 +332,7 @@ export interface WireFakeOptions {
   closeAfterHandshake?: boolean;
   existingOwnedBrowser?: string;
   adoptedExitsOnClose?: boolean;
+  distinctRuntimeExecutable?: boolean;
 }
 
 export function wireFakes(options: WireFakeOptions = {}) {
@@ -337,7 +340,14 @@ export function wireFakes(options: WireFakeOptions = {}) {
   const profileDir = join(base, "browser-profile");
   mkdirSync(profileDir);
   chmodSync(profileDir, 0o700);
-  const processInspector = new FakeProcessIdentityInspector();
+  const distinctRuntime = options.distinctRuntimeExecutable || [
+    "valid-distinct-executables",
+    "launcher-mismatch",
+    "runtime-mismatch",
+  ].includes(options.existingOwnedBrowser ?? "");
+  const processInspector = new FakeProcessIdentityInspector(
+    distinctRuntime ? "/canonical/runtime" : undefined,
+  );
   let executablePath = process.execPath;
   if (options.existingOwnedBrowser === "valid-symlink-executable") {
     executablePath = join(base, "browser-launcher");
@@ -351,7 +361,8 @@ export function wireFakes(options: WireFakeOptions = {}) {
     mkdirSync(otherProfile);
     chmodSync(otherProfile, 0o700);
     let recordProfile = canonicalProfile;
-    let recordExecutable = canonicalExecutable;
+    let recordLauncherExecutable = canonicalExecutable;
+    let recordRuntimeExecutable = processInspector.canonicalRuntimeExecutable;
     let recordStartTime = 1_234_567;
     processInspector.setArgv(
       processInspector.adoptedPid,
@@ -387,13 +398,18 @@ export function wireFakes(options: WireFakeOptions = {}) {
       ]);
     } else if (existing === "canonical-executable-mismatch") {
       processInspector.setExecutable(processInspector.adoptedPid, "/different/browser");
+    } else if (existing === "launcher-mismatch") {
+      recordLauncherExecutable = "/different/launcher";
+    } else if (existing === "runtime-mismatch") {
+      processInspector.setExecutable(processInspector.adoptedPid, "/different/runtime");
     } else if (existing === "starttime-mismatch") {
       recordStartTime += 1;
     }
     writeFileSync(join(profileDir, ".mcp-browser-owner.json"), JSON.stringify({
       version: 1,
       pid: processInspector.adoptedPid,
-      executable: recordExecutable,
+      launcherExecutable: recordLauncherExecutable,
+      runtimeExecutable: recordRuntimeExecutable,
       profile: recordProfile,
       startTimeTicks: recordStartTime,
     }), { mode: 0o600 });

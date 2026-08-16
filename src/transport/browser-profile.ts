@@ -162,14 +162,17 @@ function isOwnershipRecord(value: unknown): value is BrowserOwnershipRecord {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
   return (
-    Object.keys(record).length === 5 &&
+    Object.keys(record).length === 6 &&
     record.version === 1 &&
     typeof record.pid === "number" &&
     Number.isSafeInteger(record.pid) &&
     record.pid > 0 &&
-    typeof record.executable === "string" &&
-    record.executable.length > 0 &&
-    isAbsolute(record.executable) &&
+    typeof record.launcherExecutable === "string" &&
+    record.launcherExecutable.length > 0 &&
+    isAbsolute(record.launcherExecutable) &&
+    typeof record.runtimeExecutable === "string" &&
+    record.runtimeExecutable.length > 0 &&
+    isAbsolute(record.runtimeExecutable) &&
     typeof record.profile === "string" &&
     record.profile.length > 0 &&
     isAbsolute(record.profile) &&

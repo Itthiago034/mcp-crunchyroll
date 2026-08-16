@@ -83,7 +83,8 @@ export interface DevToolsEndpoint {
 export interface BrowserOwnershipRecord {
   readonly version: 1;
   readonly pid: number;
-  readonly executable: string;
+  readonly launcherExecutable: string;
+  readonly runtimeExecutable: string;
   readonly profile: string;
   readonly startTimeTicks: number;
 }

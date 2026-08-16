@@ -445,7 +445,7 @@ export function createBrowserSessionManager(
 
   async function tryAdoptOwnedBrowser(
     canonicalProfile: string,
-    canonicalExecutable: string,
+    canonicalLauncherExecutable: string,
   ): Promise<{
     owned: ValidatedOwnedBrowser;
     registration: ConnectionRegistration;
@@ -455,13 +455,15 @@ export function createBrowserSessionManager(
       // Checks 1–3: schema, exact 0600 mode, and owner uid.
       const record = await readOwnershipRecord(config.profileDir);
       if (!record) return null;
-      // Checks 4–5: canonical profile and executable recorded identities.
+      // Checks 4–5: canonical profile and configured launcher identities.
       if (record.profile !== canonicalProfile) throw new Error("profile");
-      if (record.executable !== canonicalExecutable) throw new Error("executable");
-      // Checks 6–9: live pid, executable, start time, and exact live profile argv.
+      if (record.launcherExecutable !== canonicalLauncherExecutable) {
+        throw new Error("launcher-executable");
+      }
+      // Checks 6–9: live pid, recorded runtime executable, start time, and exact profile argv.
       if (!seams.processInspector.isAlive(record.pid)) throw new Error("dead");
-      if (seams.processInspector.executable(record.pid) !== canonicalExecutable) {
-        throw new Error("live-executable");
+      if (seams.processInspector.executable(record.pid) !== record.runtimeExecutable) {
+        throw new Error("runtime-executable");
       }
       if (seams.processInspector.startTimeTicks(record.pid) !== record.startTimeTicks) {
         throw new Error("start-time");
@@ -507,13 +509,13 @@ export function createBrowserSessionManager(
     emit({ type: "launch.attempt", attempt });
     await ensureBrowserProfile(config.profileDir);
     const canonicalProfile = seams.processInspector.canonicalPath(config.profileDir);
-    const canonicalExecutable = seams.processInspector.canonicalPath(config.executablePath);
-    if (!canonicalProfile || !canonicalExecutable) {
+    const canonicalLauncherExecutable = seams.processInspector.canonicalPath(config.executablePath);
+    if (!canonicalProfile || !canonicalLauncherExecutable) {
       transition("STOPPED");
       throw new BrowserLifecycleError("OWNERSHIP_INVALID");
     }
 
-    const adopted = await tryAdoptOwnedBrowser(canonicalProfile, canonicalExecutable);
+    const adopted = await tryAdoptOwnedBrowser(canonicalProfile, canonicalLauncherExecutable);
     if (adopted) {
       endpoint = adopted.owned.endpoint;
       connection = adopted.owned.connection;
@@ -563,9 +565,6 @@ export function createBrowserSessionManager(
       if (!seams.processInspector.isAlive(spawned.pid)) {
         throw new BrowserLifecycleError("BROWSER_UNAVAILABLE");
       }
-      if (seams.processInspector.executable(spawned.pid) !== canonicalExecutable) {
-        throw new BrowserLifecycleError("OWNERSHIP_INVALID");
-      }
       const startTimeTicks = seams.processInspector.startTimeTicks(spawned.pid);
       if (startTimeTicks === null || !liveProfileMatches(spawned.pid, canonicalProfile)) {
         throw new BrowserLifecycleError("OWNERSHIP_INVALID");
@@ -578,10 +577,25 @@ export function createBrowserSessionManager(
       if (candidate.handledClose) {
         throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
       }
+      if (
+        !seams.processInspector.isAlive(spawned.pid) ||
+        seams.processInspector.startTimeTicks(spawned.pid) !== startTimeTicks
+      ) {
+        throw new BrowserLifecycleError("BROWSER_UNAVAILABLE");
+      }
+      const runtimeExecutable = seams.processInspector.executable(spawned.pid);
+      if (
+        !runtimeExecutable ||
+        seams.processInspector.startTimeTicks(spawned.pid) !== startTimeTicks ||
+        !liveProfileMatches(spawned.pid, canonicalProfile)
+      ) {
+        throw new BrowserLifecycleError("OWNERSHIP_INVALID");
+      }
       const record: BrowserOwnershipRecord = {
         version: 1,
         pid: spawned.pid,
-        executable: canonicalExecutable,
+        launcherExecutable: canonicalLauncherExecutable,
+        runtimeExecutable,
         profile: canonicalProfile,
         startTimeTicks,
       };
