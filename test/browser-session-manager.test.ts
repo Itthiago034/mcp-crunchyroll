@@ -119,16 +119,28 @@ describe("BT2 session manager — start and stop", () => {
 
   test("the manager exposes only lifecycle verbs", () => {
     const { manager } = wireFakes();
+    // BT4 adds exactly ONE narrow verb: openResponseInterception. It returns a
+    // closed channel (paused notification, bounded body read, continue, close)
+    // and is NOT a generic CDP surface — there is still no `send`, no method
+    // string, no evaluate and no cookie access on this object.
     assert.deepEqual(Object.keys(manager).sort(), [
       "ensureManagedPage",
       "managedPageId",
       "onLifecycleEvent",
       "onStateChange",
+      "openResponseInterception",
       "restart",
       "start",
       "state",
       "stop",
     ]);
+    for (const forbidden of ["send", "evaluate", "cookies", "navigate", "cdp"]) {
+      assert.equal(
+        (manager as unknown as Record<string, unknown>)[forbidden],
+        undefined,
+        `the manager must not expose ${forbidden}`
+      );
+    }
   });
 
   test("createRealBrowserSessionSeams returns all production seams", () => {

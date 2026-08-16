@@ -63,10 +63,41 @@ export interface ProcessIdentityInspector {
 }
 
 export interface CdpConnection {
-  send(method: string, params?: Record<string, unknown>): Promise<unknown>;
-  on(event: string, listener: (params: unknown) => void): void;
+  /**
+   * `sessionId` is optional and additive (BT4): a flattened target session
+   * needs it, while every existing browser-level caller and every fake stays
+   * source-compatible.
+   */
+  send(method: string, params?: Record<string, unknown>, sessionId?: string): Promise<unknown>;
+  on(event: string, listener: (params: unknown, sessionId?: string) => void): void;
   close(): void;
   onClose(listener: () => void): () => void;
+}
+
+// ── BT4 — closed response-stage interception ────────────────────────────────
+
+/** A paused response, reduced to the closed fields an observer may read. */
+export interface PausedResponse {
+  readonly requestId: string;
+  readonly url: string;
+  readonly responseStatusCode?: number;
+}
+
+/**
+ * A closed interception channel on the managed page.
+ *
+ * It deliberately exposes NO generic CDP send: only the four operations a
+ * response-stage observer needs, on a URL pattern fixed when the channel is
+ * opened. The lifecycle manager gains no auth field, no token and no identity
+ * from it — it only opens and closes the channel.
+ */
+export interface ResponseInterception {
+  /** The BT2 connection generation, so a stale observation can be discarded. */
+  readonly connectionGeneration: number;
+  onPaused(listener: (event: PausedResponse) => void): void;
+  getResponseBody(requestId: string): Promise<{ body: string; base64Encoded: boolean }>;
+  continueResponse(requestId: string): Promise<void>;
+  close(): Promise<void>;
 }
 
 export interface CdpConnector {

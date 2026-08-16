@@ -15,6 +15,8 @@ import type {
   ProcessSpawner,
   SpawnedBrowserProcessHandle,
   ValidatedOwnedBrowser,
+  ResponseInterception,
+  PausedResponse,
 } from "./browser-lifecycle-types.js";
 import { BrowserLifecycleError } from "./browser-lifecycle-error.js";
 import { createCdpConnector } from "./cdp-client.js";
@@ -54,6 +56,16 @@ export interface BrowserSessionManager {
   restart(): Promise<void>;
   managedPageId(): string | undefined;
   ensureManagedPage(): Promise<string>;
+  /**
+   * BT4: open a closed response-stage interception channel on the managed page
+   * for ONE fixed URL pattern.
+   *
+   * This is not a generic CDP surface: the returned channel exposes only
+   * paused-response notification, a bounded body read, response continuation
+   * and close. The manager itself gains no auth field, no token and no
+   * identity — it opens and closes a channel and nothing more.
+   */
+  openResponseInterception(urlPattern: string): Promise<ResponseInterception>;
   onStateChange(
     listener: (from: BrowserLifecycleState, to: BrowserLifecycleState) => void,
   ): void;
@@ -698,6 +710,100 @@ export function createBrowserSessionManager(
       }
       if (managedTargetId) return managedTargetId;
       return beginManagedPageCreation(false);
+    },
+    async openResponseInterception(urlPattern: string) {
+      const active = connectionRegistration;
+      if (
+        lifecycleState !== "BROWSER_READY" ||
+        stopRequested ||
+        !active ||
+        active.generation !== activeConnectionGeneration
+      ) {
+        throw new BrowserLifecycleError("BROWSER_UNAVAILABLE");
+      }
+      const targetId = await manager.ensureManagedPage();
+      const generation = active.generation;
+
+      const attached = (await active.connection.send("Target.attachToTarget", {
+        targetId,
+        flatten: true,
+      })) as { sessionId?: unknown };
+      const sessionId = attached.sessionId;
+      if (typeof sessionId !== "string" || sessionId.length === 0) {
+        throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
+      }
+
+      const listeners = new Set<(event: PausedResponse) => void>();
+      let closed = false;
+
+      active.connection.on("Fetch.requestPaused", (params, frameSessionId) => {
+        if (closed) return;
+        if (frameSessionId !== sessionId) return;
+        if (generation !== activeConnectionGeneration) return;
+        if (typeof params !== "object" || params === null) return;
+        const paused = params as {
+          requestId?: unknown;
+          request?: { url?: unknown };
+          responseStatusCode?: unknown;
+        };
+        if (typeof paused.requestId !== "string") return;
+        const url = paused.request?.url;
+        if (typeof url !== "string") return;
+        const event: PausedResponse = Object.freeze({
+          requestId: paused.requestId,
+          url,
+          responseStatusCode:
+            typeof paused.responseStatusCode === "number" ? paused.responseStatusCode : undefined,
+        });
+        for (const listener of [...listeners]) listener(event);
+      });
+
+      // Response stage only, for exactly the pattern the caller fixed. No
+      // request-stage pause, so nothing here can modify an outgoing request.
+      await active.connection.send(
+        "Fetch.enable",
+        { patterns: [{ urlPattern, requestStage: "Response" }] },
+        sessionId
+      );
+
+      const interception: ResponseInterception = {
+        connectionGeneration: generation,
+        onPaused(listener) {
+          listeners.add(listener);
+        },
+        async getResponseBody(requestId: string) {
+          const result = (await active.connection.send(
+            "Fetch.getResponseBody",
+            { requestId },
+            sessionId
+          )) as { body?: unknown; base64Encoded?: unknown };
+          return {
+            body: typeof result.body === "string" ? result.body : "",
+            base64Encoded: result.base64Encoded === true,
+          };
+        },
+        async continueResponse(requestId: string) {
+          await active.connection.send("Fetch.continueResponse", { requestId }, sessionId);
+        },
+        async close() {
+          if (closed) return;
+          closed = true;
+          listeners.clear();
+          // Best effort: a disconnected browser is already the outcome close
+          // wants, and teardown must never throw over it.
+          try {
+            await active.connection.send("Fetch.disable", undefined, sessionId);
+          } catch {
+            // ignored
+          }
+          try {
+            await active.connection.send("Target.detachFromTarget", { sessionId });
+          } catch {
+            // ignored
+          }
+        },
+      };
+      return interception;
     },
     onStateChange(listener) { stateListeners.add(listener); },
     onLifecycleEvent(listener) { lifecycleListeners.add(listener); },
