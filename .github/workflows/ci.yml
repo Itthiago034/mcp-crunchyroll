@@ -46,13 +46,53 @@ jobs:
           unzip -q "${CFT_ZIP}" -d /opt/
           mv /opt/chrome-linux64 "${CFT_DIR}"
           rm -f "${CFT_ZIP}"
+
+          # Ubuntu 24.04 runners restrict unprivileged user namespaces via
+          # AppArmor (kernel.apparmor_restrict_unprivileged_userns), so the
+          # unprivileged namespace sandbox Chrome normally uses is unavailable
+          # and the binary exits with "No usable sandbox!" on launch. The
+          # documented safe fallback is the SUID setuid sandbox helper
+          # (chrome-sandbox), which provides a real sandbox without any
+          # --no-sandbox flag. The CfT zip ships it as "chrome_sandbox"
+          # (underscore), but Chrome looks up "chrome-sandbox" (hyphen), so
+          # it must be renamed and given the setuid bit. See:
+          # - actions/runner-images#12096
+          # - puppeteer/puppeteer#13595 (SUID helper = safest option)
+          # - GoogleChromeLabs/chrome-for-testing#38 (underscore vs hyphen)
+          CFT_SANDBOX="${CFT_DIR}/chrome_sandbox"
+          if [ -f "${CFT_SANDBOX}" ]; then
+            ln -f "${CFT_SANDBOX}" "${CFT_DIR}/chrome-sandbox"
+            sudo chown root:root "${CFT_DIR}/chrome-sandbox"
+            sudo chmod 4755 "${CFT_DIR}/chrome-sandbox"
+            echo "CHROME_DEVEL_SANDBOX=${CFT_DIR}/chrome-sandbox" >> "$GITHUB_ENV"
+          else
+            echo "ERROR: chrome_sandbox helper missing from CfT package"
+            exit 1
+          fi
           chmod -R a-w "${CFT_DIR}" >/dev/null 2>&1 || true
           echo "chrome-path=${CFT_DIR}/chrome" >> "$GITHUB_OUTPUT"
+          echo "chrome-sandbox=${CFT_DIR}/chrome-sandbox" >> "$GITHUB_OUTPUT"
 
       - name: Record provisioned browser identity
         run: |
           echo "CRUNCHYROLL_BROWSER_EXECUTABLE=${{ steps.setup-chrome.outputs.chrome-path }}" >> "$GITHUB_ENV"
           "${{ steps.setup-chrome.outputs.chrome-path }}" --version
+          # Smoke test of the sandboxed launch path (stderr visible for
+          # diagnostics). Must NOT use --no-sandbox.
+          "${{ steps.setup-chrome.outputs.chrome-path }}" \
+            --headless=new \
+            --user-data-dir=/tmp/ci-browser-smoke \
+            --remote-debugging-port=0 \
+            --no-first-run \
+            --no-default-browser-check \
+            --disable-background-networking \
+            --disable-background-mode \
+            --enable-logging=stderr \
+            --v=1 \
+            --virtual-time-budget=30000 \
+            --dump-dom "data:text/html,smoke" > /dev/null 2>&1 || \
+            echo "SMOKE_TEST_FAILED: chrome exited before establishing DevTools endpoint; inspect runner kernel/AppArmor state"
+          rm -rf /tmp/ci-browser-smoke
 
       - name: Typecheck
         run: npm run typecheck
