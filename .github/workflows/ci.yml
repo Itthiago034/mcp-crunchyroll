@@ -73,33 +73,27 @@ jobs:
           echo "chrome-path=${CFT_DIR}/chrome" >> "$GITHUB_OUTPUT"
           echo "chrome-sandbox=${CFT_DIR}/chrome-sandbox" >> "$GITHUB_OUTPUT"
 
-      # Temporary BT6 diagnosis. This deliberately uses the same launch
-      # vector as BrowserSessionManager, then observes readiness and performs
-      # the same kind of controlled shutdown. It does not relax Chrome's
-      # sandbox and must not be replaced with --no-sandbox.
-      - name: Diagnose CfT BT2 launch lifecycle
+      - name: Record provisioned browser identity
         run: |
           set +e
           CFT="${{ steps.setup-chrome.outputs.chrome-path }}"
-          PROFILE=/tmp/ci-browser-diagnostic
-          STDOUT_LOG=/tmp/ci-browser-diagnostic.stdout
-          STDERR_LOG=/tmp/ci-browser-diagnostic.stderr
-          rm -rf "$PROFILE" "$STDOUT_LOG" "$STDERR_LOG"
-
-          echo "[bt6-diagnostic] executable=$CFT"
+          PROFILE=/tmp/ci-browser-smoke
+          STDERR_LOG=/tmp/ci-browser-smoke.stderr
+          echo "CRUNCHYROLL_BROWSER_EXECUTABLE=$CFT" >> "$GITHUB_ENV"
           "$CFT" --version
-          stat -c '[bt6-diagnostic] chrome=%U:%G mode=%a suid=%A size=%s' "$CFT"
-          stat -c '[bt6-diagnostic] helper=%U:%G mode=%a suid=%A size=%s' "${CFT%/*}/chrome-sandbox"
-          echo "[bt6-diagnostic] CHROME_DEVEL_SANDBOX=${CHROME_DEVEL_SANDBOX:+present}"
-          if [ -n "${CHROME_DEVEL_SANDBOX:-}" ]; then
-            stat -c '[bt6-diagnostic] env-helper=%U:%G mode=%a suid=%A size=%s' "$CHROME_DEVEL_SANDBOX"
-          fi
-          findmnt -T "$CFT" -o TARGET,FSTYPE,OPTIONS || true
-          sysctl kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true
-          if [ -r /sys/module/apparmor/parameters/enabled ]; then
-            echo "[bt6-diagnostic] apparmor_enabled=$(cat /sys/module/apparmor/parameters/enabled)"
-          fi
+          stat -c 'chrome-sandbox=%U:%G mode=%a suid=%A' "${CFT%/*}/chrome-sandbox"
+          test "$(stat -c '%u:%g:%a' "${CFT%/*}/chrome-sandbox")" = "0:0:4755" || {
+            echo "SANDBOX_VALIDATION_FAILED: chrome-sandbox must be root:root 4755"
+            exit 1
+          }
+          echo "CHROME_DEVEL_SANDBOX=${CHROME_DEVEL_SANDBOX:+present}"
+          rm -rf "$PROFILE" "$STDERR_LOG"
 
+          # Validate the same persistent launch lifecycle used by
+          # BrowserSessionManager: wait for DevToolsActivePort, perform a
+          # loopback CDP request, then stop the owned process. --dump-dom is
+          # intentionally not used because it waits for a terminating page
+          # lifecycle that the real runtime does not require.
           "$CFT" \
             --user-data-dir="$PROFILE" \
             --remote-debugging-port=0 \
@@ -108,75 +102,50 @@ jobs:
             --disable-background-networking \
             --disable-background-mode \
             --headless=new \
-            >"$STDOUT_LOG" 2>"$STDERR_LOG" &
+            >/dev/null 2>"$STDERR_LOG" &
           CHROME_PID=$!
-          echo "[bt6-diagnostic] pid=$CHROME_PID"
-          ENDPOINT_SEEN=0
-          CDP_SEEN=0
+          ENDPOINT_OK=0
           for _ in $(seq 1 40); do
             if [ -f "$PROFILE/DevToolsActivePort" ]; then
-              ENDPOINT_SEEN=1
               PORT=$(sed -n '1p' "$PROFILE/DevToolsActivePort")
-              echo "[bt6-diagnostic] devtools_active_port=true port=$PORT"
-              if curl --fail --silent --show-error --max-time 3 "http://127.0.0.1:${PORT}/json/version" >/tmp/ci-browser-diagnostic.cdp 2>/tmp/ci-browser-diagnostic.cdp.err; then
-                CDP_SEEN=1
-                echo "[bt6-diagnostic] cdp_http=true"
-              else
-                echo "[bt6-diagnostic] cdp_http=false"
+              case "$PORT" in
+                ''|*[!0-9]*) PORT=0 ;;
+              esac
+              if [ "$PORT" -gt 0 ] 2>/dev/null && [ "$PORT" -lt 65536 ] && \
+                curl --fail --silent --show-error --max-time 3 "http://127.0.0.1:${PORT}/json/version" >/dev/null 2>&1; then
+                ENDPOINT_OK=1
+                echo "SANDBOX_CDP_VALIDATION=PASS"
+                break
               fi
-              break
             fi
-            if ! kill -0 "$CHROME_PID" 2>/dev/null; then
-              echo "[bt6-diagnostic] process_exited_before_endpoint=true"
-              break
-            fi
-            sleep 0.5
-          done
-          echo "[bt6-diagnostic] process_tree_before_stop"
-          ps -eo pid,ppid,uid,gid,stat,args --forest | awk -v p="$CHROME_PID" '$1 == p || $2 == p {print}'
-          echo "[bt6-diagnostic] stderr_tail"
-          tail -n 80 "$STDERR_LOG" 2>/dev/null || true
-
-          kill -TERM "$CHROME_PID" 2>/dev/null || true
-          for _ in $(seq 1 20); do
             if ! kill -0 "$CHROME_PID" 2>/dev/null; then break; fi
             sleep 0.5
           done
-          if kill -0 "$CHROME_PID" 2>/dev/null; then
-            echo "[bt6-diagnostic] controlled_stop=false; escalating_to_sigkill=true"
-            kill -KILL "$CHROME_PID" 2>/dev/null || true
-          else
-            echo "[bt6-diagnostic] controlled_stop=true"
-          fi
-          wait "$CHROME_PID" 2>/dev/null
-          echo "[bt6-diagnostic] exit_code=$? endpoint_seen=$ENDPOINT_SEEN cdp_seen=$CDP_SEEN"
-          rm -rf "$PROFILE" "$STDOUT_LOG" "$STDERR_LOG" /tmp/ci-browser-diagnostic.cdp /tmp/ci-browser-diagnostic.cdp.err
-
-      - name: Record provisioned browser identity
-        run: |
-          echo "CRUNCHYROLL_BROWSER_EXECUTABLE=${{ steps.setup-chrome.outputs.chrome-path }}" >> "$GITHUB_ENV"
-          "${{ steps.setup-chrome.outputs.chrome-path }}" --version
-          # Smoke test of the sandboxed launch path. Must NOT use --no-sandbox.
-          # Wrapped in a hard 90-second timeout so a wedged chrome process
-          # can never hang the workflow. --dump-dom prints the DOM then
-          # chrome exits cleanly.
-          timeout 90 "${{ steps.setup-chrome.outputs.chrome-path }}" \
-            --headless=new \
-            --user-data-dir=/tmp/ci-browser-smoke \
-            --remote-debugging-port=0 \
-            --no-first-run \
-            --no-default-browser-check \
-            --disable-background-networking \
-            --disable-background-mode \
-            --enable-logging=stderr \
-            --v=1 \
-            --dump-dom "data:text/html,smoke" > /dev/null 2>&1
-          SMOKE_RC=$?
-          if [ "${SMOKE_RC}" -ne 0 ]; then
-            echo "SMOKE_TEST_FAILED (chrome exit=${SMOKE_RC}): sandboxed launch failed; inspect runner kernel/AppArmor state"
+          if [ "$ENDPOINT_OK" -ne 1 ]; then
+            echo "SANDBOX_CDP_VALIDATION=FAIL"
+            tail -n 80 "$STDERR_LOG" 2>/dev/null || true
+            kill -TERM "$CHROME_PID" 2>/dev/null || true
+            wait "$CHROME_PID" 2>/dev/null || true
+            rm -rf "$PROFILE" "$STDERR_LOG"
             exit 1
           fi
-          rm -rf /tmp/ci-browser-smoke
+
+          kill -TERM "$CHROME_PID" 2>/dev/null || true
+          STOPPED=0
+          for _ in $(seq 1 20); do
+            if ! kill -0 "$CHROME_PID" 2>/dev/null; then STOPPED=1; break; fi
+            sleep 0.5
+          done
+          if [ "$STOPPED" -ne 1 ]; then
+            echo "SANDBOX_CDP_VALIDATION=FAIL (browser did not stop cleanly)"
+            kill -KILL "$CHROME_PID" 2>/dev/null || true
+            wait "$CHROME_PID" 2>/dev/null || true
+            rm -rf "$PROFILE" "$STDERR_LOG"
+            exit 1
+          fi
+          wait "$CHROME_PID" 2>/dev/null || true
+          echo "SANDBOX_CONTROLLED_STOP=PASS"
+          rm -rf "$PROFILE" "$STDERR_LOG"
 
       - name: Typecheck
         run: npm run typecheck
