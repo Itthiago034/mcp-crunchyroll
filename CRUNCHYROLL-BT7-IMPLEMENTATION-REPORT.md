@@ -238,6 +238,9 @@ since D-1c); the other read `calls[0].operation` where a `ResolvedCall` carries
 the migration, and sixteen more after the ruling — each verified to be a
 *stage* assertion (a statement about what was migrated *at that point*), never a
 behaviour assertion, each retired at the site with the reason written there.
+`test/bt7-account.test.ts` consequently runs 50 tests where the first candidate
+ran 53: three asserted a rendering, a route and a default that F-1 removed
+along with the operation itself.
 
 ## 17. BT6 Regression
 
@@ -366,7 +369,7 @@ the branch. All proof logs were regenerated **after** the candidate commit.
 | G-1 bind before URL | ✅ |
 | No operation special-cased inside the URL builder | ✅ |
 | Move, not copy; single path ownership | ✅ |
-| Focused / full / zero-egress / typecheck / build | ✅ 25+53 · 919 · 919 · 0 · 0 |
+| Focused / full / zero-egress / typecheck / build | ✅ 50+25 · 919 · 919 · 0 · 0 |
 | BT6 regression | none |
 | Live smoke, every expected outcome | ✅ |
 | Redaction rule honoured | ✅ |
