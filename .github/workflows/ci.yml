@@ -73,6 +73,85 @@ jobs:
           echo "chrome-path=${CFT_DIR}/chrome" >> "$GITHUB_OUTPUT"
           echo "chrome-sandbox=${CFT_DIR}/chrome-sandbox" >> "$GITHUB_OUTPUT"
 
+      # Temporary BT6 diagnosis. This deliberately uses the same launch
+      # vector as BrowserSessionManager, then observes readiness and performs
+      # the same kind of controlled shutdown. It does not relax Chrome's
+      # sandbox and must not be replaced with --no-sandbox.
+      - name: Diagnose CfT BT2 launch lifecycle
+        run: |
+          set +e
+          CFT="${{ steps.setup-chrome.outputs.chrome-path }}"
+          PROFILE=/tmp/ci-browser-diagnostic
+          STDOUT_LOG=/tmp/ci-browser-diagnostic.stdout
+          STDERR_LOG=/tmp/ci-browser-diagnostic.stderr
+          rm -rf "$PROFILE" "$STDOUT_LOG" "$STDERR_LOG"
+
+          echo "[bt6-diagnostic] executable=$CFT"
+          "$CFT" --version
+          stat -c '[bt6-diagnostic] chrome=%U:%G mode=%a suid=%A size=%s' "$CFT"
+          stat -c '[bt6-diagnostic] helper=%U:%G mode=%a suid=%A size=%s' "${CFT%/*}/chrome-sandbox"
+          echo "[bt6-diagnostic] CHROME_DEVEL_SANDBOX=${CHROME_DEVEL_SANDBOX:+present}"
+          if [ -n "${CHROME_DEVEL_SANDBOX:-}" ]; then
+            stat -c '[bt6-diagnostic] env-helper=%U:%G mode=%a suid=%A size=%s' "$CHROME_DEVEL_SANDBOX"
+          fi
+          findmnt -T "$CFT" -o TARGET,FSTYPE,OPTIONS || true
+          sysctl kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true
+          if [ -r /sys/module/apparmor/parameters/enabled ]; then
+            echo "[bt6-diagnostic] apparmor_enabled=$(cat /sys/module/apparmor/parameters/enabled)"
+          fi
+
+          "$CFT" \
+            --user-data-dir="$PROFILE" \
+            --remote-debugging-port=0 \
+            --no-first-run \
+            --no-default-browser-check \
+            --disable-background-networking \
+            --disable-background-mode \
+            --headless=new \
+            >"$STDOUT_LOG" 2>"$STDERR_LOG" &
+          CHROME_PID=$!
+          echo "[bt6-diagnostic] pid=$CHROME_PID"
+          ENDPOINT_SEEN=0
+          CDP_SEEN=0
+          for _ in $(seq 1 40); do
+            if [ -f "$PROFILE/DevToolsActivePort" ]; then
+              ENDPOINT_SEEN=1
+              PORT=$(sed -n '1p' "$PROFILE/DevToolsActivePort")
+              echo "[bt6-diagnostic] devtools_active_port=true port=$PORT"
+              if curl --fail --silent --show-error --max-time 3 "http://127.0.0.1:${PORT}/json/version" >/tmp/ci-browser-diagnostic.cdp 2>/tmp/ci-browser-diagnostic.cdp.err; then
+                CDP_SEEN=1
+                echo "[bt6-diagnostic] cdp_http=true"
+              else
+                echo "[bt6-diagnostic] cdp_http=false"
+              fi
+              break
+            fi
+            if ! kill -0 "$CHROME_PID" 2>/dev/null; then
+              echo "[bt6-diagnostic] process_exited_before_endpoint=true"
+              break
+            fi
+            sleep 0.5
+          done
+          echo "[bt6-diagnostic] process_tree_before_stop"
+          ps -eo pid,ppid,uid,gid,stat,args --forest | awk -v p="$CHROME_PID" '$1 == p || $2 == p {print}'
+          echo "[bt6-diagnostic] stderr_tail"
+          tail -n 80 "$STDERR_LOG" 2>/dev/null || true
+
+          kill -TERM "$CHROME_PID" 2>/dev/null || true
+          for _ in $(seq 1 20); do
+            if ! kill -0 "$CHROME_PID" 2>/dev/null; then break; fi
+            sleep 0.5
+          done
+          if kill -0 "$CHROME_PID" 2>/dev/null; then
+            echo "[bt6-diagnostic] controlled_stop=false; escalating_to_sigkill=true"
+            kill -KILL "$CHROME_PID" 2>/dev/null || true
+          else
+            echo "[bt6-diagnostic] controlled_stop=true"
+          fi
+          wait "$CHROME_PID" 2>/dev/null
+          echo "[bt6-diagnostic] exit_code=$? endpoint_seen=$ENDPOINT_SEEN cdp_seen=$CDP_SEEN"
+          rm -rf "$PROFILE" "$STDOUT_LOG" "$STDERR_LOG" /tmp/ci-browser-diagnostic.cdp /tmp/ci-browser-diagnostic.cdp.err
+
       - name: Record provisioned browser identity
         run: |
           echo "CRUNCHYROLL_BROWSER_EXECUTABLE=${{ steps.setup-chrome.outputs.chrome-path }}" >> "$GITHUB_ENV"
@@ -120,4 +199,3 @@ jobs:
             echo "$CHANGED"
             exit 1
           fi
-
