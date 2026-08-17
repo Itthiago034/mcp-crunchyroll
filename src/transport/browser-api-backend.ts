@@ -53,9 +53,7 @@ export function buildRequestUrl(
     if (value === undefined) continue;
     query.set(key, String(value));
   }
-  // BT7: repeated keys are appended once per element, in caller order. The
-  // provider expects `content_ids[]=A&content_ids[]=B`; a comma-joined single
-  // value would be a different request.
+  // BT7: repeated keys are appended once per element, in caller order.
   for (const [key, param] of Object.entries(descriptor.repeatedQueryParams ?? {})) {
     const values = callerParams[param];
     if (values === undefined) continue;
@@ -63,6 +61,18 @@ export function buildRequestUrl(
       throw new TransportError("INVALID_ARGUMENTS", `expected a list: ${param}`);
     }
     for (const entry of values) query.append(key, String(entry));
+  }
+  // F-2: joined keys render the whole list as ONE value, using the separator the
+  // descriptor declared. This function knows the RULE and never which operation
+  // needs it — the moment an operation name appears here, the registry has
+  // stopped being the single owner of the wire.
+  for (const [key, spec] of Object.entries(descriptor.joinedQueryParams ?? {})) {
+    const values = callerParams[spec.callerParam];
+    if (values === undefined) continue;
+    if (!Array.isArray(values)) {
+      throw new TransportError("INVALID_ARGUMENTS", `expected a list: ${spec.callerParam}`);
+    }
+    query.set(key, values.map((entry) => String(entry)).join(spec.separator));
   }
   for (const [key, value] of Object.entries(descriptor.fixedQuery ?? {})) {
     query.set(key, value);

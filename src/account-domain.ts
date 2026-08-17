@@ -79,9 +79,9 @@ export function parseRecommendations(json: unknown): {
   });
 }
 
-// ── Watchlist, history, continue watching ───────────────────────────────────
+// ── Watchlist and history ───────────────────────────────────────────────────
 //
-// All three answer a list of items whose exact fields the tools have always
+// Both answer a list of items whose exact fields the tools have always
 // passed through. The projection is deliberately shallow: BT7 preserves the
 // published shape rather than inventing a new one.
 
@@ -92,7 +92,8 @@ export function parseAccountItems(json: unknown, where: string): { count: number
 
 export const parseWatchlist = (json: unknown) => parseAccountItems(json, "watchlist");
 export const parseHistory = (json: unknown) => parseAccountItems(json, "history");
-export const parseContinueWatching = (json: unknown) => parseAccountItems(json, "continue_watching");
+// `parseContinueWatching` was removed with F-1: its only consumer was the
+// gateway case for an endpoint the provider no longer routes.
 
 // ── Playheads ───────────────────────────────────────────────────────────────
 

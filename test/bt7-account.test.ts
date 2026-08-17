@@ -35,9 +35,16 @@ const ACCOUNT_SENTINEL = "SYNTHETIC-ACCOUNT-ID-BT7";
 const PROFILE_SENTINEL = "SYNTHETIC-PROFILE-ID-BT7";
 const BEARER_SENTINEL = "SYNTHETIC-BEARER-BT7-MUST-NOT-LEAK";
 
-/** The six operations BT7 migrates, and no others. */
+/**
+ * The operations BT7 migrates, and no others.
+ *
+ * NARROWED BY THE F-1 RULING: GET_CONTINUE_WATCHING left this list. It was
+ * migrated in the first BT7 candidate and the live smoke proved the endpoint
+ * unrouted, so it is deferred rather than kept as a promise the provider will
+ * not honour. Everything in this file that asserted its migration is retired
+ * in place, at the site, with the reason.
+ */
 const BT7_OPERATIONS = [
-  "GET_CONTINUE_WATCHING",
   "GET_HISTORY",
   "GET_PLAYHEADS",
   "GET_RECOMMENDATIONS",
@@ -62,9 +69,11 @@ const MINIMUM_ARGS: Record<string, Record<string, unknown>> = {
   GET_RECOMMENDATIONS: { n: 20 },
   GET_WATCHLIST: { n: 20, order: "desc" },
   GET_HISTORY: { n: 20 },
-  GET_CONTINUE_WATCHING: { n: 10 },
   GET_PLAYHEADS: { content_ids: ["GE00377909ENUS", "GE00377910ENUS"] },
 };
+
+/** Migrated once, then deferred by F-1. Its behaviour lives in bt7-f1-f2. */
+const BT7_DEFERRED = ["GET_CONTINUE_WATCHING", "GET_SUBSCRIPTION"];
 
 /** A READY authority holding synthetic material, with a profile id present. */
 function readyAuthority(withProfile = true) {
@@ -151,19 +160,21 @@ function sources(): Array<{ path: string; code: string }> {
 // ── The table ───────────────────────────────────────────────────────────────
 
 describe("BT7 — the production table after the account-read migration", () => {
-  test("holds exactly the BT5/BT6 catalog reads plus the six BT7 account reads", () => {
+  test("holds exactly the BT5/BT6 catalog reads plus the five BT7 account reads", () => {
+    // Was 14 before the F-1 ruling. Thirteen is not a smaller migration, it is
+    // an honest one: an operation nobody can serve does not belong in a table
+    // whose whole meaning is "this is served here now".
     assert.deepEqual(
       PRODUCTION_OPERATIONS.map((d) => String(d.id)).sort(),
       [...BT5_BT6_OPERATIONS, ...BT7_OPERATIONS].sort()
     );
-    assert.equal(PRODUCTION_OPERATIONS.length, 14);
+    assert.equal(PRODUCTION_OPERATIONS.length, 13);
   });
 
-  test("GET_SUBSCRIPTION is absent — deferred by D-1c, not forgotten", () => {
-    assert.equal(
-      PRODUCTION_OPERATIONS.some((d) => String(d.id) === "GET_SUBSCRIPTION"),
-      false
-    );
+  test("both deferred operations are absent — D-1c and F-1, neither forgotten", () => {
+    for (const id of BT7_DEFERRED) {
+      assert.equal(PRODUCTION_OPERATIONS.some((d) => String(d.id) === id), false, id);
+    }
   });
 
   test("no BT8 mutation entered the table", () => {
@@ -332,20 +343,24 @@ describe("BT7 G-1 — identity reaches the URL only through bind()", () => {
   });
 });
 
-// ── G-2: repeated query parameters ──────────────────────────────────────────
+// ── The content_ids wire ────────────────────────────────────────────────────
 
-describe("BT7 G-2 — repeated query keys keep the provider's wire format", () => {
+describe("BT7 — the content_ids wire, as the provider accepts it", () => {
   const registry = createOperationRegistry(PRODUCTION_OPERATIONS);
 
-  test("content_ids is emitted once per id, in caller order", async () => {
+  // RETIRED BY THE F-2 RULING: these two asserted the repeated `content_ids[]`
+  // wire, copied faithfully from the legacy client. Live evidence overruled the
+  // copy — the v2 endpoint answers 400 `missing_required_field` to it and drops
+  // all but the first value when the bare key is repeated. The full replacement
+  // contract, including the retired forms, lives in test/bt7-f1-f2.test.ts.
+  test("content_ids is emitted once, comma-joined, in caller order", async () => {
     const h = backendHarness();
     await h.backend.executeResolved(
       resolveCall(registry, "GET_PLAYHEADS", { content_ids: ["AAA", "BBB", "CCC"] })
     );
     const url = h.fake.requests[0].url;
-    const query = new URL(url).searchParams.getAll("content_ids[]");
-    assert.deepEqual(query, ["AAA", "BBB", "CCC"], "one repeated key per id, order preserved");
-    assert.equal(url.includes("content_ids=AAA%2CBBB"), false, "never comma-joined");
+    assert.deepEqual(new URL(url).searchParams.getAll("content_ids"), ["AAA,BBB,CCC"]);
+    assert.equal(url.includes("content_ids%5B%5D"), false, "the bracket wire is retired");
     assert.equal(url.includes("%5B%22AAA%22"), false, "never JSON-encoded");
   });
 
@@ -356,7 +371,7 @@ describe("BT7 G-2 — repeated query keys keep the provider's wire format", () =
     );
     const params = new URL(h.fake.requests[0].url).searchParams;
     assert.equal(params.has("locale"), false, "no locale on this endpoint");
-    assert.deepEqual([...params.keys()], ["content_ids[]"]);
+    assert.deepEqual([...params.keys()], ["content_ids"]);
   });
 
   test("a malformed, empty or oversized array is refused before any URL exists", () => {
@@ -470,26 +485,23 @@ describe("BT7 — each operation renders exactly the endpoint the legacy client 
     );
   });
 
-  test("GET_CONTINUE_WATCHING", () => {
-    assert.equal(
-      render("GET_CONTINUE_WATCHING", { n: 10 }),
-      `${ORIGIN}/content/v2/${A}/continue_watching?n=10&locale=en-US`
-    );
-  });
+  // GET_CONTINUE_WATCHING had its exact rendering asserted here. F-1 deferred
+  // the operation, so there is no URL to render and no template to own.
 
   test("GET_PLAYHEADS", () => {
     assert.equal(
       render("GET_PLAYHEADS", { content_ids: ["AAA", "BBB"] }),
-      `${ORIGIN}/content/v2/${A}/playheads?content_ids%5B%5D=AAA&content_ids%5B%5D=BBB`
+      `${ORIGIN}/content/v2/${A}/playheads?content_ids=AAA%2CBBB`
     );
   });
 });
 
 describe("BT7 — domain defaults survive the migration verbatim", () => {
-  test("continue watching defaults to 10, everything else to 20", async () => {
+  // The continue-watching default of 10 left with F-1: the gateway case that
+  // held it is gone, and a default for an unserved operation is dead policy.
+  test("the account reads default to 20", async () => {
     const seen: Record<string, string | null> = {};
     for (const [tool, id] of [
-      ["crunchyroll_continue_watching", "GET_CONTINUE_WATCHING"],
       ["crunchyroll_get_watchlist", "GET_WATCHLIST"],
       ["crunchyroll_get_history", "GET_HISTORY"],
       ["crunchyroll_get_recommendations", "GET_RECOMMENDATIONS"],
@@ -498,7 +510,6 @@ describe("BT7 — domain defaults survive the migration verbatim", () => {
       await h.gateway.callTool(tool, {});
       seen[id] = String(h.backend.calls[0].callerParams.n ?? "");
     }
-    assert.equal(seen.GET_CONTINUE_WATCHING, "10", "continue watching keeps its own default");
     assert.equal(seen.GET_WATCHLIST, "20");
     assert.equal(seen.GET_HISTORY, "20");
     assert.equal(seen.GET_RECOMMENDATIONS, "20");
@@ -677,13 +688,6 @@ describe("BT7 — each tool routes to its operation and keeps its public shape",
       (r) => assert.deepEqual(Object.keys(r as object).sort(), ["count", "items"]),
     ],
     [
-      "crunchyroll_continue_watching",
-      {},
-      "GET_CONTINUE_WATCHING",
-      { data: [{ panel: PANEL }] },
-      (r) => assert.deepEqual(Object.keys(r as object).sort(), ["count", "items"]),
-    ],
-    [
       "crunchyroll_get_playheads",
       { content_ids: ["GE1"] },
       "GET_PLAYHEADS",
@@ -714,11 +718,10 @@ describe("BT7 — each tool routes to its operation and keeps its public shape",
   });
 
   test("an empty account is a valid, successful result", async () => {
-    for (const tool of [
-      "crunchyroll_get_watchlist",
-      "crunchyroll_get_history",
-      "crunchyroll_continue_watching",
-    ]) {
+    // crunchyroll_continue_watching was a third case here until F-1: an empty
+    // result and an absent endpoint are different answers, and only one of them
+    // is this test's subject.
+    for (const tool of ["crunchyroll_get_watchlist", "crunchyroll_get_history"]) {
       const h = gatewayHarness({ data: [] });
       const result = (await h.gateway.callTool(tool, {})) as { count: number; items: unknown[] };
       assert.equal(result.count, 0, tool);
@@ -736,7 +739,9 @@ describe("BT7 — transport ownership moved out of the legacy client", () => {
     "/content/v2/discover/{accountId}/recommendations",
     "/content/v2/{accountId}/watchlist",
     "/content/v2/{accountId}/watch-history",
-    "/content/v2/{accountId}/continue_watching",
+    // "/content/v2/{accountId}/continue_watching" was here. F-1 removed it from
+    // the registry WITHOUT returning it to src/api.ts: no owner at all is the
+    // correct state for a path the provider does not route.
     "/content/v2/{accountId}/playheads",
   ];
 

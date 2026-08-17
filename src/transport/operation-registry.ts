@@ -4,7 +4,8 @@
 // Nothing here is wired into an MCP tool in BT1.
 
 import type {
-  AuthDerivedParamSpec, CallerParams, OperationDescriptor, OperationId, ParamSpec, ResolvedCall,
+  AuthDerivedParamSpec, CallerParams, JoinedQueryParam, OperationDescriptor, OperationId, ParamSpec,
+  ResolvedCall,
 } from "./types.js";
 import {
   contentId, contentIdList, optionalBoolean, optionalOneOf, requiredIntegerInRange, searchText, slugList,
@@ -27,6 +28,17 @@ export interface OperationRegistry {
  * Hand-written for this known shape — no recursive deep-freeze helper, no
  * structuredClone, no proxy, no immutable-collection dependency.
  */
+/** F-2. Joined specs are two-field objects, so each entry is frozen with them. */
+function freezeJoined(
+  joined: Readonly<Record<string, JoinedQueryParam>> | undefined
+): Readonly<Record<string, JoinedQueryParam>> {
+  const captured: Record<string, JoinedQueryParam> = {};
+  for (const [key, spec] of Object.entries(joined ?? {})) {
+    captured[key] = Object.freeze({ callerParam: spec.callerParam, separator: spec.separator });
+  }
+  return Object.freeze(captured);
+}
+
 function captureDescriptor(d: OperationDescriptor): OperationDescriptor {
   const callerParams: Record<string, ParamSpec> = {};
   for (const [name, spec] of Object.entries(d.callerParams)) {
@@ -48,6 +60,7 @@ function captureDescriptor(d: OperationDescriptor): OperationDescriptor {
     fixedQuery: Object.freeze({ ...(d.fixedQuery ?? {}) }),
     queryParams: Object.freeze({ ...(d.queryParams ?? {}) }),
     repeatedQueryParams: Object.freeze({ ...(d.repeatedQueryParams ?? {}) }),
+    joinedQueryParams: freezeJoined(d.joinedQueryParams),
     scope: d.scope,
     auth: d.auth,
     mutation: d.mutation,
@@ -186,6 +199,35 @@ export function createOperationRegistry(
         );
       }
     }
+    // F-2. Same rule for joined keys, plus one more: the separator is part of
+    // the wire, so an empty one is not a formatting preference, it is a
+    // different request.
+    for (const [key, spec] of Object.entries(d.joinedQueryParams ?? {})) {
+      if (!(spec.callerParam in d.callerParams)) {
+        throw new TransportError(
+          "INVALID_ARGUMENTS",
+          `operation ${d.id} maps joined query ${key} to undeclared parameter ${spec.callerParam}`
+        );
+      }
+      for (const [other, where] of [
+        [d.queryParams, "scalar"],
+        [d.fixedQuery, "fixed"],
+        [d.repeatedQueryParams, "repeated"],
+      ] as Array<[Readonly<Record<string, unknown>> | undefined, string]>) {
+        if (key in (other ?? {})) {
+          throw new TransportError(
+            "INVALID_ARGUMENTS",
+            `operation ${d.id} declares query key ${key} both joined and ${where}`
+          );
+        }
+      }
+      if (typeof spec.separator !== "string" || spec.separator.length === 0) {
+        throw new TransportError(
+          "INVALID_ARGUMENTS",
+          `operation ${d.id} declares joined query ${key} without a separator`
+        );
+      }
+    }
     byId.set(d.id, captureDescriptor(d));
   }
   return {
@@ -261,6 +303,7 @@ function publicRead(spec: {
     fixedQuery: Object.freeze({ locale: CATALOG_LOCALE }),
     queryParams: Object.freeze({ ...(spec.queryParams ?? {}) }),
     repeatedQueryParams: Object.freeze({}),
+    joinedQueryParams: Object.freeze({}),
     scope: "PUBLIC",
     auth: "BEARER",
     mutation: false,
@@ -282,6 +325,7 @@ function accountRead(spec: {
   callerParams?: Record<string, ParamSpec>;
   queryParams?: Record<string, string>;
   repeatedQueryParams?: Record<string, string>;
+  joinedQueryParams?: Record<string, JoinedQueryParam>;
   withLocale?: boolean;
 }): OperationDescriptor {
   return Object.freeze({
@@ -293,6 +337,7 @@ function accountRead(spec: {
     fixedQuery: Object.freeze(spec.withLocale === false ? {} : { locale: CATALOG_LOCALE }),
     queryParams: Object.freeze({ ...(spec.queryParams ?? {}) }),
     repeatedQueryParams: Object.freeze({ ...(spec.repeatedQueryParams ?? {}) }),
+    joinedQueryParams: freezeJoined(spec.joinedQueryParams),
     scope: "ACCOUNT",
     auth: "BEARER",
     mutation: false,
@@ -408,18 +453,23 @@ export const PRODUCTION_OPERATIONS: readonly OperationDescriptor[] = Object.free
     callerParams: { n: requiredIntegerInRange(1, 100) },
     queryParams: { n: "n" },
   }),
-  accountRead({
-    id: "GET_CONTINUE_WATCHING",
-    pathTemplate: "/content/v2/{accountId}/continue_watching",
-    callerParams: { n: requiredIntegerInRange(1, 100) },
-    queryParams: { n: "n" },
-  }),
+  // GET_CONTINUE_WATCHING is DEFERRED (F-1). BT7's live smoke proved the legacy
+  // endpoint unrouted: 404 carrying the site's HTML shell, byte-identical with a
+  // full query, a partial query and no query at all, while a sibling path under
+  // the same prefix answered 200 on the same channel and the same identity. A
+  // descriptor here would promise something the provider no longer serves, so
+  // the tool stays published and answers OPERATION_NOT_MIGRATED. Where the
+  // capability went is a later question, and a matter of evidence.
   accountRead({
     id: "GET_PLAYHEADS",
     pathTemplate: "/content/v2/{accountId}/playheads",
     // The legacy request sent NO locale here. Preserved verbatim.
     withLocale: false,
     callerParams: { content_ids: contentIdList(MAX_CONTENT_IDS) },
-    repeatedQueryParams: { "content_ids[]": "content_ids" },
+    // F-2. The live v2 endpoint names `content_ids`, answers 400
+    // `missing_required_field` to the legacy `content_ids[]`, and keeps only the
+    // first value when the bare key is repeated. Comma-joined is the one
+    // encoding that resolved more than one id, so it is the contract.
+    joinedQueryParams: { content_ids: { callerParam: "content_ids", separator: "," } },
   }),
 ]);

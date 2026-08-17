@@ -49,6 +49,16 @@ export interface AuthDerivedParamSpec {
   readonly source: "accountId" | "profileId";
 }
 
+/**
+ * F-2. How one array-valued caller param becomes one query value. Both halves
+ * are descriptor-owned: a caller supplies elements, never the key and never the
+ * separator.
+ */
+export interface JoinedQueryParam {
+  readonly callerParam: string;
+  readonly separator: string;
+}
+
 export interface OperationDescriptor {
   readonly id: OperationId;
   readonly method: HttpMethod;
@@ -73,13 +83,29 @@ export interface OperationDescriptor {
   readonly queryParams: Readonly<Record<string, string>>;
   /**
    * BT7. Query key → a DECLARED, array-valued caller param, emitted once per
-   * element in caller order (`content_ids[]=A&content_ids[]=B`).
+   * element in caller order (`wire[]=A&wire[]=B`).
    *
    * A separate map rather than a flag on `queryParams`, because the two render
-   * differently and conflating them is how an array quietly becomes
-   * `content_ids=A,B` — a different request than the provider expects.
+   * differently and conflating them would let an array silently become a scalar.
+   *
+   * F-2 note: this shipped believing `GET_PLAYHEADS` needed it. Live evidence
+   * said otherwise, and that operation now uses `joinedQueryParams`. The
+   * capability is kept because it is general, closed and proven — an encoding a
+   * provider may still ask for — not because anything currently consumes it.
    */
   readonly repeatedQueryParams: Readonly<Record<string, string>>;
+  /**
+   * F-2. Query key → a DECLARED, array-valued caller param rendered as ONE
+   * scalar, its elements joined by a separator the DESCRIPTOR owns
+   * (`content_ids=A,B,C`).
+   *
+   * This is the encoding the live provider actually accepts for playheads: it
+   * names `content_ids`, rejects `content_ids[]` outright, and keeps only the
+   * first value when the bare key is repeated. The separator lives here, never
+   * in the URL builder and never in caller input, so no operation can be
+   * special-cased by name downstream.
+   */
+  readonly joinedQueryParams: Readonly<Record<string, JoinedQueryParam>>;
   readonly scope: AuthScope;
   readonly auth: AuthMaterialRequirement;
   readonly mutation: MutationClass;

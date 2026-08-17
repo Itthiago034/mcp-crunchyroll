@@ -22,7 +22,6 @@ import {
 } from "../catalog-domain.js";
 import {
   AccountShapeError,
-  parseContinueWatching,
   parseHistory,
   parsePlayheads,
   parseRecommendations,
@@ -40,8 +39,6 @@ import type { CrunchyrollTransport, OperationId, CallerParams } from "./types.js
  */
 const DEFAULT_PAGE_SIZE = 20;
 const DEFAULT_BROWSE_START = 0;
-/** Continue-watching has always asked for ten, not twenty. Preserved. */
-const DEFAULT_CONTINUE_WATCHING_SIZE = 10;
 /** The watchlist has always been newest-first unless the caller says otherwise. */
 const DEFAULT_WATCHLIST_ORDER = "desc";
 
@@ -215,16 +212,6 @@ export function createContentGateway(
         case "GET_HISTORY":
           return parseHistory(
             (await transport.execute(operation, withDefined({ n: args.n ?? DEFAULT_PAGE_SIZE }))).json
-          );
-
-        case "GET_CONTINUE_WATCHING":
-          return parseContinueWatching(
-            (
-              await transport.execute(
-                operation,
-                withDefined({ n: args.n ?? DEFAULT_CONTINUE_WATCHING_SIZE })
-              )
-            ).json
           );
 
         case "GET_PLAYHEADS":

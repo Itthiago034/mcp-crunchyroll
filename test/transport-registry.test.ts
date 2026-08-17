@@ -85,7 +85,6 @@ describe("BT1 registry — construction and lookup", () => {
       [
         "BROWSE",
         "GET_CATEGORIES",
-        "GET_CONTINUE_WATCHING",
         "GET_EPISODE",
         "GET_EPISODES",
         "GET_HISTORY",
@@ -98,7 +97,8 @@ describe("BT1 registry — construction and lookup", () => {
         "GET_WATCHLIST",
         "SEARCH",
       ],
-      "BT5 categories; BT6 the public catalog reads; BT7 the account reads"
+      "BT5 categories; BT6 the public catalog reads; BT7 the account reads, " +
+        "less GET_CONTINUE_WATCHING, deferred by F-1 on live evidence"
     );
   });
 });
