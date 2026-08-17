@@ -31,13 +31,23 @@ jobs:
 
       - name: Deterministic sandboxed Chromium (Chrome for Testing)
         id: setup-chrome
-        uses: step-security/setup-chrome@v2
-        with:
-          # Pinned Chrome for Testing — official Chromium team build for
-          # automation. Sandbox stays enabled: no --no-sandbox and no
-          # --disable-setuid-sandbox anywhere in this workflow.
-          chrome-version: 131.0.6778.85
-          install-dependencies: true
+        run: |
+          # Official Chromium team Chrome for Testing — pinned version,
+          # downloaded directly from the storage bucket, not from a
+          # third-party action (step-security/setup-chrome is blocked for
+          # private repositories without a subscription). Sandbox stays
+          # enabled: no --no-sandbox and no --disable-setuid-sandbox
+          # anywhere in this workflow.
+          CFT_VERSION="131.0.6778.85"
+          CFT_ZIP="/tmp/chrome-for-testing-${CFT_VERSION}.zip"
+          CFT_DIR="/opt/chrome-for-testing-${CFT_VERSION}"
+          CFT_URL="https://storage.googleapis.com/chrome-for-testing-public/${CFT_VERSION}/linux64/chrome-linux64.zip"
+          curl -sSL --retry 3 --retry-delay 2 -o "${CFT_ZIP}" "${CFT_URL}"
+          unzip -q "${CFT_ZIP}" -d /opt/
+          mv /opt/chrome-linux64 "${CFT_DIR}"
+          rm -f "${CFT_ZIP}"
+          chmod -R a-w "${CFT_DIR}" >/dev/null 2>&1 || true
+          echo "chrome-path=${CFT_DIR}/chrome" >> "$GITHUB_OUTPUT"
 
       - name: Record provisioned browser identity
         run: |
