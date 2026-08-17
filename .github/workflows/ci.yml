@@ -9,6 +9,9 @@ jobs:
     name: install / typecheck / build / test
     runs-on: ubuntu-latest
     strategy:
+      # Each Node version must produce its own evidence; an early failure in
+      # one matrix leg must not cancel the others.
+      fail-fast: false
       matrix:
         node-version: [18, 20, 22]
     steps:
@@ -25,6 +28,21 @@ jobs:
 
       - name: Reproducible install (strict lockfile)
         run: npm ci
+
+      - name: Deterministic sandboxed Chromium (Chrome for Testing)
+        id: setup-chrome
+        uses: step-security/setup-chrome@v2
+        with:
+          # Pinned Chrome for Testing — official Chromium team build for
+          # automation. Sandbox stays enabled: no --no-sandbox and no
+          # --disable-setuid-sandbox anywhere in this workflow.
+          chrome-version: 131.0.6778.85
+          install-dependencies: true
+
+      - name: Record provisioned browser identity
+        run: |
+          echo "CRUNCHYROLL_BROWSER_EXECUTABLE=${{ steps.setup-chrome.outputs.chrome-path }}" >> "$GITHUB_ENV"
+          "${{ steps.setup-chrome.outputs.chrome-path }}" --version
 
       - name: Typecheck
         run: npm run typecheck
