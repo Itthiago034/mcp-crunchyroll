@@ -77,9 +77,11 @@ jobs:
         run: |
           echo "CRUNCHYROLL_BROWSER_EXECUTABLE=${{ steps.setup-chrome.outputs.chrome-path }}" >> "$GITHUB_ENV"
           "${{ steps.setup-chrome.outputs.chrome-path }}" --version
-          # Smoke test of the sandboxed launch path (stderr visible for
-          # diagnostics). Must NOT use --no-sandbox.
-          "${{ steps.setup-chrome.outputs.chrome-path }}" \
+          # Smoke test of the sandboxed launch path. Must NOT use --no-sandbox.
+          # Wrapped in a hard 90-second timeout so a wedged chrome process
+          # can never hang the workflow. --dump-dom prints the DOM then
+          # chrome exits cleanly.
+          timeout 90 "${{ steps.setup-chrome.outputs.chrome-path }}" \
             --headless=new \
             --user-data-dir=/tmp/ci-browser-smoke \
             --remote-debugging-port=0 \
@@ -89,9 +91,12 @@ jobs:
             --disable-background-mode \
             --enable-logging=stderr \
             --v=1 \
-            --virtual-time-budget=30000 \
-            --dump-dom "data:text/html,smoke" > /dev/null 2>&1 || \
-            echo "SMOKE_TEST_FAILED: chrome exited before establishing DevTools endpoint; inspect runner kernel/AppArmor state"
+            --dump-dom "data:text/html,smoke" > /dev/null 2>&1
+          SMOKE_RC=$?
+          if [ "${SMOKE_RC}" -ne 0 ]; then
+            echo "SMOKE_TEST_FAILED (chrome exit=${SMOKE_RC}): sandboxed launch failed; inspect runner kernel/AppArmor state"
+            exit 1
+          fi
           rm -rf /tmp/ci-browser-smoke
 
       - name: Typecheck
