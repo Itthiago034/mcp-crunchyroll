@@ -27,7 +27,17 @@ export type TransportErrorKind =
   | "API_FORBIDDEN"
   | "API_NOT_FOUND"
   | "API_RATE_LIMITED"
-  | "API_SERVER_ERROR";
+  | "API_SERVER_ERROR"
+  // ── BT8.1 (mutation structural support) ───────────────────────────────────
+  //
+  // Appended, exactly as the note above anticipates. BT8.1 introduces the NAMES
+  // and nothing that raises them: no mutation is production-registered, and the
+  // read path's status mapping is deliberately left untouched, so `400` and
+  // `409` keep their current read behaviour until BT8.2 owns the mutation
+  // response mapping.
+  | "MUTATION_OUTCOME_UNKNOWN"
+  | "API_BAD_REQUEST"
+  | "API_CONFLICT";
 
 /**
  * Fixed, secret-free and deliberately uninformative about the provider: no
@@ -52,6 +62,10 @@ const FIXED_MESSAGES: Record<TransportErrorKind, string> = {
   API_NOT_FOUND: "Upstream has no such resource",
   API_RATE_LIMITED: "Upstream is rate limiting this client",
   API_SERVER_ERROR: "Upstream reported a server error",
+  MUTATION_OUTCOME_UNKNOWN:
+    "The change may or may not have been applied; the outcome could not be established",
+  API_BAD_REQUEST: "Upstream rejected the request as malformed",
+  API_CONFLICT: "Upstream reported a conflict with the current state",
 };
 
 export class TransportError extends Error {

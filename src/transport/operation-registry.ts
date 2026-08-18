@@ -4,11 +4,12 @@
 // Nothing here is wired into an MCP tool in BT1.
 
 import type {
-  AuthDerivedParamSpec, CallerParams, JoinedQueryParam, OperationDescriptor, OperationId, ParamSpec,
-  ResolvedCall,
+  AuthDerivedParamSpec, BodySpec, CallerParams, JoinedQueryParam, OperationDescriptor, OperationId,
+  ParamSpec, ResolvedCall, ResponseContract,
 } from "./types.js";
 import {
-  contentId, contentIdList, optionalBoolean, optionalOneOf, requiredIntegerInRange, searchText, slugList,
+  contentId, contentIdList, HTTP_METHODS, MUTATION_CLASSES, optionalBoolean, optionalOneOf,
+  requiredIntegerInRange, searchText, slugList,
 } from "./types.js";
 import { TransportError } from "./transport-error.js";
 
@@ -39,6 +40,26 @@ function freezeJoined(
   return Object.freeze(captured);
 }
 
+/**
+ * BT8.1. A body spec is two flat maps, so each is frozen with the spec itself —
+ * hand-written for this known shape, exactly like `freezeJoined` above.
+ */
+function freezeBody(spec: BodySpec): BodySpec {
+  return Object.freeze({
+    contentType: spec.contentType,
+    fields: Object.freeze({ ...spec.fields }),
+    fixedFields: Object.freeze({ ...spec.fixedFields }),
+  });
+}
+
+/** BT8.1. Same reasoning; the status list is copied, never aliased. */
+function freezeResponse(contract: ResponseContract): ResponseContract {
+  return Object.freeze({
+    successStatuses: Object.freeze([...contract.successStatuses]),
+    body: contract.body,
+  });
+}
+
 function captureDescriptor(d: OperationDescriptor): OperationDescriptor {
   const callerParams: Record<string, ParamSpec> = {};
   for (const [name, spec] of Object.entries(d.callerParams)) {
@@ -64,6 +85,12 @@ function captureDescriptor(d: OperationDescriptor): OperationDescriptor {
     scope: d.scope,
     auth: d.auth,
     mutation: d.mutation,
+    // BT8.1. Absence is meaningful for both — a DELETE has no body, a read has
+    // no declared response contract — so an absent one stays ABSENT rather than
+    // becoming a present `undefined`, and the frozen copy of a read descriptor
+    // keeps exactly the key set it has always had.
+    ...(d.body === undefined ? {} : { body: freezeBody(d.body) }),
+    ...(d.response === undefined ? {} : { response: freezeResponse(d.response) }),
   });
 }
 
@@ -88,6 +115,100 @@ export function createOperationRegistry(
     }
     if (d.scope !== "PUBLIC" && d.scope !== "ACCOUNT") {
       throw new TransportError("INVALID_ARGUMENTS", `operation ${String(d.id)} declares no closed scope`);
+    }
+    // ── BT8.1 (INV-M1 / INV-M3) ───────────────────────────────────────────
+    //
+    // The SAME closure BT5-FIX1 gave `auth` and `scope`, for the same stated
+    // reason, now applied to the two dimensions BT8 turns into decisions.
+    //
+    // `mutation` matters most: from BT8 onwards it is the field the execution
+    // gate READS to decide whether a request may leave. An unchecked value —
+    // `true`, `1`, `"ACCOUNT "`, an object — must never reach a comparison that
+    // could grant by accident, and `!== false` is precisely such a comparison.
+    if (!MUTATION_CLASSES.includes(d.mutation)) {
+      throw new TransportError(
+        "INVALID_ARGUMENTS",
+        `operation ${String(d.id)} declares no closed mutation class`
+      );
+    }
+    if (!HTTP_METHODS.includes(d.method)) {
+      throw new TransportError(
+        "INVALID_ARGUMENTS",
+        `operation ${String(d.id)} declares no closed method`
+      );
+    }
+    // INV-M2. The biconditional IS the substitution the design asked for: it
+    // replaces "mutations are impossible" with "only explicitly registered,
+    // structurally valid mutations are possible". A GET may never claim to
+    // change state, and a state-changing method may never pose as a read —
+    // which is the shape a mutation would have to take to slip past a gate that
+    // only inspects one of the two fields.
+    if ((d.method === "GET") !== (d.mutation === false)) {
+      throw new TransportError(
+        "INVALID_ARGUMENTS",
+        `operation ${String(d.id)} disagrees about whether it mutates: method ${d.method}`
+      );
+    }
+    // INV-M4. An anonymous or public write has no meaning in this system: every
+    // mutation this project can express addresses the authenticated account.
+    if (d.mutation !== false && (d.scope !== "ACCOUNT" || d.auth !== "BEARER")) {
+      throw new TransportError(
+        "INVALID_ARGUMENTS",
+        `operation ${String(d.id)} mutates without being an authenticated account operation`
+      );
+    }
+    // INV-M5. A body belongs to a POST and to nothing else. The legacy DELETE
+    // sent none, a GET body is meaningless here, and allowing one anyway would
+    // widen the wire for no operation that exists.
+    if (d.body !== undefined && (d.method !== "POST" || d.mutation === false)) {
+      throw new TransportError(
+        "INVALID_ARGUMENTS",
+        `operation ${String(d.id)} declares a body on a non-mutating or non-POST method`
+      );
+    }
+    // INV-M8. A mutation may not INHERIT the read path's implicit "any 2xx,
+    // JSON" contract. It has to say what success looks like, because a write
+    // that answers 204 and a write that answers 200 with a document are
+    // different contracts and only the provider knows which one this is.
+    if (d.mutation !== false) {
+      const contract = d.response;
+      if (
+        contract === undefined ||
+        !Array.isArray(contract.successStatuses) ||
+        contract.successStatuses.length === 0 ||
+        (contract.body !== "JSON" && contract.body !== "EMPTY")
+      ) {
+        throw new TransportError(
+          "INVALID_ARGUMENTS",
+          `operation ${String(d.id)} mutates without a closed response contract`
+        );
+      }
+      for (const status of contract.successStatuses) {
+        if (!Number.isInteger(status) || status < 200 || status > 299) {
+          throw new TransportError(
+            "INVALID_ARGUMENTS",
+            `operation ${String(d.id)} declares a non-success status as success`
+          );
+        }
+      }
+      // INV-M9. Neither encoding has a mutation use case, and the smallest
+      // mutation surface is the one worth defending.
+      if (
+        Object.keys(d.repeatedQueryParams ?? {}).length > 0 ||
+        Object.keys(d.joinedQueryParams ?? {}).length > 0
+      ) {
+        throw new TransportError(
+          "INVALID_ARGUMENTS",
+          `operation ${String(d.id)} declares a list-valued query on a mutation`
+        );
+      }
+    } else if (d.response !== undefined) {
+      // A read declaring one would be claiming a contract nothing enforces for
+      // it, and would quietly diverge from every other read in the table.
+      throw new TransportError(
+        "INVALID_ARGUMENTS",
+        `operation ${String(d.id)} is a read but declares a mutation response contract`
+      );
     }
     // An account-scoped endpoint resolves identity from the current record, so
     // it cannot be served without material. The combination has no meaning and
@@ -228,6 +349,44 @@ export function createOperationRegistry(
         );
       }
     }
+    // ── BT8.1 (INV-M6 / INV-M7) — the body is the registry's, not the caller's ──
+    //
+    // The same two rules the query already lives by, because a body is the same
+    // kind of thing: a wire key must name something DECLARED, and a wire key may
+    // be filled exactly one way.
+    //
+    // The identity clause is the one that is specific to a write. `bind()`
+    // resolves identity for whatever a descriptor declares, so a body field
+    // naming `accountId` really would be served — and identity in a body is
+    // identity outside the path, which is the one place BT7 proved it belongs.
+    for (const [key, param] of Object.entries(d.body?.fields ?? {})) {
+      if (param in d.authDerivedParams) {
+        throw new TransportError(
+          "INVALID_ARGUMENTS",
+          `operation ${d.id} maps body ${key} to authenticated identity ${param}`
+        );
+      }
+      if (!(param in d.callerParams)) {
+        throw new TransportError(
+          "INVALID_ARGUMENTS",
+          `operation ${d.id} maps body ${key} to undeclared parameter ${param}`
+        );
+      }
+    }
+    for (const key of Object.keys(d.body?.fixedFields ?? {})) {
+      if (key in (d.body?.fields ?? {})) {
+        throw new TransportError(
+          "INVALID_ARGUMENTS",
+          `operation ${d.id} declares body key ${key} both fixed and caller-filled`
+        );
+      }
+    }
+    if (d.body !== undefined && d.body.contentType !== "application/json") {
+      throw new TransportError(
+        "INVALID_ARGUMENTS",
+        `operation ${d.id} declares an unsupported body content type`
+      );
+    }
     byId.set(d.id, captureDescriptor(d));
   }
   return {
@@ -345,6 +504,52 @@ function accountRead(spec: {
 }
 
 /**
+ * BT8.1. An ACCOUNT MUTATION: the one sanctioned way to construct a
+ * state-changing descriptor.
+ *
+ * It exists for the reason `publicRead`/`accountRead` exist — writing the
+ * invariant shape ONCE removes the chance of one descriptor quietly disagreeing
+ * with the rest — and it exists NOW, ahead of any consumer, because registry
+ * machinery has always preceded the descriptors that use it: BT1 shipped the
+ * whole registry with an empty production table.
+ *
+ * Every field a caller must not influence is fixed here rather than passed in:
+ * identity is auth-derived, the scope and auth requirement are settled, and the
+ * query maps are empty because the legacy owners of all three BT8 operations
+ * sent no query string at all. That last point is preserved VERBATIM and is
+ * itself subject to BT8.0 confirming the live endpoints accept none.
+ *
+ * It registers nothing. `PRODUCTION_OPERATIONS` below still contains zero
+ * mutations, and all three mutation tools stay refused at the gateway.
+ */
+export function accountMutation(spec: {
+  id: string;
+  method: "POST" | "DELETE";
+  pathTemplate: string;
+  mutation: "ACCOUNT" | "PROGRESS";
+  callerParams: Record<string, ParamSpec>;
+  body?: BodySpec;
+  response: ResponseContract;
+}): OperationDescriptor {
+  return Object.freeze({
+    id: spec.id as OperationId,
+    method: spec.method,
+    pathTemplate: spec.pathTemplate,
+    callerParams: Object.freeze({ ...spec.callerParams }),
+    authDerivedParams: Object.freeze({ accountId: Object.freeze({ source: "accountId" }) }),
+    fixedQuery: Object.freeze({}),
+    queryParams: Object.freeze({}),
+    repeatedQueryParams: Object.freeze({}),
+    joinedQueryParams: Object.freeze({}),
+    scope: "ACCOUNT",
+    auth: "BEARER",
+    mutation: spec.mutation,
+    ...(spec.body === undefined ? {} : { body: spec.body }),
+    response: spec.response,
+  }) as OperationDescriptor;
+}
+
+/**
  * The production operation table.
  *
  * Registry MACHINERY arrived in BT1; endpoint OWNERSHIP transfers one operation
@@ -366,6 +571,13 @@ function accountRead(spec: {
  * BT5-FIX1 superseded the earlier ACCOUNT-with-no-identity shape, which
  * overloaded ACCOUNT and would have made PROFILE_READY enforcement ambiguous
  * for the real account operations arriving at BT7.
+ *
+ * BT8.1 taught this registry to EXPRESS a mutation and registered none. The
+ * table below is still entirely `mutation: false`, so `ADD_TO_WATCHLIST`,
+ * `REMOVE_FROM_WATCHLIST` and `UPDATE_PLAYHEAD` remain absent and their tools
+ * remain refused with `OPERATION_NOT_MIGRATED` before any transport. Their
+ * descriptors arrive at BT8.2–BT8.4, each on the provider evidence BT8.0 owes
+ * it, and each in the same auditable stage that removes its legacy owner.
  */
 export const PRODUCTION_OPERATIONS: readonly OperationDescriptor[] = Object.freeze([
   publicRead({

@@ -10,6 +10,17 @@ export type OperationId = string & { readonly __brand: "OperationId" };
 export type HttpMethod = "GET" | "POST" | "DELETE";
 
 /**
+ * BT8.1. The SAME closed set, available at runtime.
+ *
+ * `tsconfig` typechecks `src/` only, so a union alone is never exercised by the
+ * suite — the identical reasoning BT5-FIX1 gave for closing `auth` and `scope`
+ * at registry construction. `PUT` and `PATCH` are deliberately absent: no
+ * provider evidence in this project asks for either, and BT8's design admits a
+ * method only when evidence requires it.
+ */
+export const HTTP_METHODS: readonly HttpMethod[] = Object.freeze(["GET", "POST", "DELETE"]);
+
+/**
  * WHOSE data an endpoint addresses — an identity question.
  *
  * `PUBLIC`: the path carries no account or profile identity.
@@ -28,7 +39,23 @@ export type AuthScope = "PUBLIC" | "ACCOUNT";
  * refused at registry construction.
  */
 export type AuthMaterialRequirement = "NONE" | "BEARER";
+
+/**
+ * WHETHER an operation changes account state, and of which kind.
+ *
+ * `false` is a read. `ACCOUNT` changes stored account state (watchlist
+ * membership); `PROGRESS` changes viewing progress. The distinction is not
+ * decoration: progress is a last-writer-wins scalar with no set semantics, so
+ * it carries a different retry hazard from a membership change (BT8 design §15).
+ */
 export type MutationClass = false | "ACCOUNT" | "PROGRESS";
+
+/** BT8.1. The same closed set at runtime, for the reason given on HTTP_METHODS. */
+export const MUTATION_CLASSES: readonly MutationClass[] = Object.freeze([
+  false,
+  "ACCOUNT",
+  "PROGRESS",
+]);
 
 /**
  * Runtime contract for one caller-supplied parameter. A predicate rather than a
@@ -57,6 +84,41 @@ export interface AuthDerivedParamSpec {
 export interface JoinedQueryParam {
   readonly callerParam: string;
   readonly separator: string;
+}
+
+/**
+ * BT8.1. A DESCRIPTOR-OWNED request body.
+ *
+ * The caller supplies VALUES; it never supplies a key, a type, a content type
+ * or a document. This is the body analogue of `queryParams`/`fixedQuery`, and
+ * it exists so that "the registry owns the wire" survives the arrival of
+ * request bodies — a caller-supplied JSON blob would end that guarantee in one
+ * step.
+ *
+ * `contentType` is a single literal rather than a free string: one encoding is
+ * the only one any BT8 operation needs, and a widened field is an invitation to
+ * a second one arriving without a decision.
+ */
+export interface BodySpec {
+  readonly contentType: "application/json";
+  /** wire key → the DECLARED caller param that fills it. */
+  readonly fields: Readonly<Record<string, string>>;
+  /** wire key → a constant of THIS BUILD. Never caller-supplied. */
+  readonly fixedFields: Readonly<Record<string, string | number | boolean>>;
+}
+
+/**
+ * BT8.1. What a SUCCESSFUL provider answer is allowed to look like.
+ *
+ * Reads leave this absent and keep the implicit "any 2xx, JSON" contract they
+ * have always had. A mutation must declare it, because a write may legitimately
+ * answer `204 No Content` — which carries no content type at all, and which the
+ * read path would otherwise reject as an unreadable response, reporting a
+ * successful write as a transport failure.
+ */
+export interface ResponseContract {
+  readonly successStatuses: readonly number[];
+  readonly body: "JSON" | "EMPTY";
 }
 
 export interface OperationDescriptor {
@@ -109,6 +171,14 @@ export interface OperationDescriptor {
   readonly scope: AuthScope;
   readonly auth: AuthMaterialRequirement;
   readonly mutation: MutationClass;
+  /**
+   * BT8.1. Present ONLY on a mutation that carries a body. Its absence is
+   * meaningful — a `DELETE` sends no body and no content type — so it is left
+   * undefined rather than normalized to an empty spec.
+   */
+  readonly body?: BodySpec;
+  /** BT8.1. Required of every mutation, absent on every read. */
+  readonly response?: ResponseContract;
 }
 
 /** Raw caller arguments, before validation. */

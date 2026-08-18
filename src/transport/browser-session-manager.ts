@@ -109,15 +109,23 @@ const CRUNCHYROLL_PAGE_ORIGIN = "https://www.crunchyroll.com";
  * constant. `credentials: "omit"` keeps the browser's cookie jar out of the
  * request, and `redirect: "manual"` means a redirect is reported rather than
  * silently followed to an unvalidated origin.
+ *
+ * BT8.1 added two further structured arguments so a descriptor-declared body
+ * can travel. They change nothing about who decides what is sent: this function
+ * still sets exactly TWO header names, both literal in its own source, and a
+ * caller can name neither. `Content-Type` is set ONLY when a body is actually
+ * present, so a bodyless request keeps the header set it has always had, and a
+ * write can never be sent under whatever default the page would have chosen.
  */
 export const CRUNCHYROLL_FETCH_FUNCTION = `
-  async function (url, method, authorization, maxChars) {
-    const response = await fetch(url, {
-      method,
-      headers: { Authorization: authorization },
-      credentials: "omit",
-      redirect: "manual",
-    });
+  async function (url, method, authorization, maxChars, bodyText, bodyContentType) {
+    const headers = { Authorization: authorization };
+    const init = { method, headers, credentials: "omit", redirect: "manual" };
+    if (typeof bodyText === "string") {
+      headers["Content-Type"] = bodyContentType;
+      init.body = bodyText;
+    }
+    const response = await fetch(url, init);
     const contentType = response.headers.get("content-type") || "";
     const text = await response.text();
     const truncated = text.length > maxChars;
@@ -947,6 +955,13 @@ export function createBrowserSessionManager(
           if (!isCrunchyrollApiUrl(input.url)) {
             throw new BrowserLifecycleError("BROWSER_UNAVAILABLE", "origin");
           }
+          // BT8.1. Re-checked here for the same reason the origin is: a body is
+          // ASSEMBLED, and anything assembled is worth checking twice, on both
+          // sides of the boundary that carries it. The registry already refuses
+          // a body on anything but a POST; this is the page's own refusal.
+          if (input.body !== undefined && input.method !== "POST") {
+            throw new BrowserLifecycleError("BROWSER_UNAVAILABLE", "body-method");
+          }
           if (
             generation !== activeConnectionGeneration ||
             lifecycleState !== "BROWSER_READY" ||
@@ -963,6 +978,22 @@ export function createBrowserSessionManager(
             );
           });
 
+          // The variable parts cross as STRUCTURED arguments. They are never
+          // concatenated into the function source.
+          //
+          // BT8.1: the body pair is APPENDED, never sent as two empty slots, so
+          // a request without one produces byte-identical CDP parameters to the
+          // ones this channel has always sent.
+          const callArguments: Array<{ value: unknown }> = [
+            { value: input.url },
+            { value: input.method },
+            { value: input.authorization },
+            { value: input.maxBytes },
+          ];
+          if (input.body !== undefined) {
+            callArguments.push({ value: input.body.text }, { value: input.body.contentType });
+          }
+
           let raw: unknown;
           try {
             raw = await Promise.race([
@@ -971,14 +1002,7 @@ export function createBrowserSessionManager(
                 {
                   functionDeclaration: CRUNCHYROLL_FETCH_FUNCTION,
                   executionContextId: contextId,
-                  // The variable parts cross as STRUCTURED arguments. They are
-                  // never concatenated into the function source.
-                  arguments: [
-                    { value: input.url },
-                    { value: input.method },
-                    { value: input.authorization },
-                    { value: input.maxBytes },
-                  ],
+                  arguments: callArguments,
                   awaitPromise: true,
                   returnByValue: true,
                   silent: true,

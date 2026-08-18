@@ -110,20 +110,41 @@ export interface ResponseInterception {
 export const MAX_API_RESPONSE_BYTES = 512 * 1024;
 
 /**
+ * BT8.1. The request body, when the registry descriptor declares one.
+ *
+ * Two values, both produced by the transport from a frozen descriptor and
+ * already-validated caller params. It is NOT a header map and NOT a document
+ * the caller can hand over: `text` is serialized by the transport from
+ * descriptor-owned key mappings, and `contentType` accompanies it so the page
+ * never has to guess an encoding — nor invent one when there is no body.
+ */
+export interface ApiExecutionBody {
+  readonly contentType: string;
+  readonly text: string;
+}
+
+/**
  * One request the managed page performs on our behalf.
  *
  * Every field is derived by the transport from the frozen registry descriptor
  * and the AuthContext snapshot. There is deliberately no field that could
- * carry code, a header map, a body or a cookie: the function that runs in the
- * page is a constant of this build, and these are its only arguments.
+ * carry a header map or a cookie, and none that could carry anything the page
+ * would execute: the function that runs in the page is a constant of this
+ * build, and these are its only arguments.
+ *
+ * BT8.1 widened `method` past the single read verb and added an OPTIONAL body.
+ * Both remain descriptor-owned — a caller can name neither — and the set of
+ * methods is closed here exactly as it is closed in the registry.
  */
 export interface ApiExecutionRequest {
   readonly url: string;
-  readonly method: "GET";
+  readonly method: "GET" | "POST" | "DELETE";
   /** The complete Authorization header value, from the auth snapshot. */
   readonly authorization: string;
   readonly deadlineMs: number;
   readonly maxBytes: number;
+  /** Absent for every GET and every DELETE. Its absence is what a read looks like. */
+  readonly body?: ApiExecutionBody;
 }
 
 /** The bounded shape the page function returns. Never a page object. */

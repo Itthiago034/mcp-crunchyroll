@@ -15,7 +15,11 @@
 // is the closed execution channel it is handed.
 
 import type { AuthContextReader } from "./auth-context.js";
-import { MAX_API_RESPONSE_BYTES, type ApiExecutionChannel } from "./browser-lifecycle-types.js";
+import {
+  MAX_API_RESPONSE_BYTES,
+  type ApiExecutionBody,
+  type ApiExecutionChannel,
+} from "./browser-lifecycle-types.js";
 import { TransportError } from "./transport-error.js";
 import type { ResolvedCall, TransportBackend, TransportResult } from "./types.js";
 
@@ -82,6 +86,44 @@ export function buildRequestUrl(
   return `${CRUNCHYROLL_API_ORIGIN}${path}${rendered.length > 0 ? `?${rendered}` : ""}`;
 }
 
+/**
+ * BT8.1. Serialize the DESCRIPTOR-DECLARED request body.
+ *
+ * The shape of the document is the descriptor's; only the values are the
+ * caller's, and each of those already passed the descriptor's own predicate.
+ * Like `buildRequestUrl`, this function knows the RULE and never which
+ * operation needs it — an operation name appearing here would mean the registry
+ * had stopped being the single owner of the wire.
+ *
+ * Constants are emitted before caller values, and both come from frozen maps,
+ * so the serialized key order is deterministic and a serialization test is
+ * meaningful. Exported for that reason.
+ */
+export function buildRequestBody(call: ResolvedCall): ApiExecutionBody | undefined {
+  const spec = call.descriptor.body;
+  if (spec === undefined) return undefined;
+
+  const payload: Record<string, string | number | boolean> = {};
+  for (const [key, value] of Object.entries(spec.fixedFields)) {
+    payload[key] = value;
+  }
+  for (const [key, param] of Object.entries(spec.fields)) {
+    const value = call.callerParams[param];
+    // An absent optional stays ABSENT: a declared-but-unsupplied field must not
+    // become an explicit null, which is a different request.
+    if (value === undefined) continue;
+    if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
+      // Nothing structured can reach a body. A caller cannot express an object
+      // in the first place — every param predicate admits a primitive — so this
+      // is the assertion of that, not a conversion of it.
+      throw new TransportError("INVALID_ARGUMENTS", `unserializable body parameter: ${param}`);
+    }
+    payload[key] = value;
+  }
+
+  return Object.freeze({ contentType: spec.contentType, text: JSON.stringify(payload) });
+}
+
 /** Frozen: never caller input, never environment-configurable. */
 export const CRUNCHYROLL_API_ORIGIN = "https://www.crunchyroll.com";
 
@@ -133,9 +175,27 @@ export function createBrowserApiBackend(ports: BrowserApiBackendPorts): Transpor
     async executeResolved(call: ResolvedCall): Promise<TransportResult> {
       const { descriptor } = call;
 
-      // BT5 migrates one read. A mutation reaching here would be a wiring
-      // error, and refusing costs less than trusting the table.
-      if (descriptor.method !== "GET" || descriptor.mutation !== false) {
+      // ── The execution gate (BT5, rewritten at BT8.1) ─────────────────────
+      //
+      // BT5 could say "no mutation may pass", because none could exist. BT8
+      // needs the stronger statement instead: only an explicitly registered,
+      // structurally valid mutation may pass. The guard is therefore given a
+      // rule rather than removed — an operation that is neither a well-formed
+      // read nor a well-formed mutation is still refused exactly as before.
+      //
+      // The invariants are RE-DERIVED here instead of trusted from the registry,
+      // for the same reason the built URL is re-checked against the origin a few
+      // lines below: two independent checks of one property is what this
+      // transport does with anything that decides whether a request may leave.
+      const isRead = descriptor.method === "GET" && descriptor.mutation === false;
+      const isMutation =
+        descriptor.method !== "GET" &&
+        descriptor.mutation !== false &&
+        descriptor.scope === "ACCOUNT" &&
+        descriptor.auth === "BEARER" &&
+        descriptor.response !== undefined &&
+        (descriptor.body === undefined || descriptor.method === "POST");
+      if (!isRead && !isMutation) {
         throw new TransportError("OPERATION_NOT_MIGRATED", "method");
       }
 
@@ -167,6 +227,9 @@ export function createBrowserApiBackend(ports: BrowserApiBackendPorts): Transpor
       if (!url.startsWith(`${CRUNCHYROLL_API_ORIGIN}/`)) {
         throw new TransportError("INVALID_ARGUMENTS", "path");
       }
+      // Serialized BEFORE the channel is opened, so a body this transport
+      // cannot build fails while the request is still provably unsent.
+      const body = buildRequestBody(call);
 
       try {
         // runCurrent snapshots the record ONCE, and re-checks it after the
@@ -178,10 +241,13 @@ export function createBrowserApiBackend(ports: BrowserApiBackendPorts): Transpor
           try {
             response = await channel.request({
               url,
-              method: "GET",
+              method: descriptor.method,
               authorization: `${view.tokenType} ${view.accessToken}`,
               deadlineMs,
               maxBytes: MAX_API_RESPONSE_BYTES,
+              // Omitted entirely when there is none, so a read's request record
+              // keeps exactly the fields it has always carried.
+              ...(body === undefined ? {} : { body }),
             });
           } finally {
             // Teardown must never mask the outcome.
@@ -195,19 +261,39 @@ export function createBrowserApiBackend(ports: BrowserApiBackendPorts): Transpor
           ) {
             throw new TransportError("INVALID_RESPONSE", "over-cap");
           }
-          if (response.status < 200 || response.status > 299) {
+          // BT8.1. A read has no declared contract and keeps the implicit one
+          // it has always had: any 2xx, and a JSON document. A mutation must
+          // have declared both halves, and gets exactly what it declared.
+          const contract = descriptor.response;
+          const succeeded =
+            contract === undefined
+              ? response.status >= 200 && response.status <= 299
+              : contract.successStatuses.includes(response.status);
+          if (!succeeded) {
             throw upstreamError(response.status);
           }
-          if (!isJsonContentType(response.contentType)) {
-            // An HTML challenge page is the expected shape of this failure and
-            // none of its content may travel: only the fact does.
-            throw new TransportError("INVALID_RESPONSE", "content-type");
-          }
+
           let json: unknown;
-          try {
-            json = JSON.parse(response.body);
-          } catch {
-            throw new TransportError("INVALID_RESPONSE", "json");
+          if (contract?.body === "EMPTY") {
+            // A write may legitimately answer with no document and no content
+            // type. Demanding JSON here would report a successful change as an
+            // unreadable response — so what is checked instead is that nothing
+            // arrived that we would have had to interpret.
+            if (response.body.length > 0) {
+              throw new TransportError("INVALID_RESPONSE", "body");
+            }
+            json = undefined;
+          } else {
+            if (!isJsonContentType(response.contentType)) {
+              // An HTML challenge page is the expected shape of this failure and
+              // none of its content may travel: only the fact does.
+              throw new TransportError("INVALID_RESPONSE", "content-type");
+            }
+            try {
+              json = JSON.parse(response.body);
+            } catch {
+              throw new TransportError("INVALID_RESPONSE", "json");
+            }
           }
 
           return Object.freeze({
