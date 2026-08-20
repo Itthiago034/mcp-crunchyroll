@@ -234,6 +234,21 @@ export function createContentGateway(
           };
         }
 
+        case "REMOVE_FROM_WATCHLIST": {
+          await transport.execute(operation, args);
+          return {
+            tool: "crunchyroll_remove_from_watchlist",
+            operation: "REMOVE_FROM_WATCHLIST",
+            mutation: true,
+            mutation_class: "ACCOUNT",
+            content_id: args.content_id,
+            outcome: "APPLIED",
+            outcome_certainty: "CERTAIN",
+            retry_performed: false,
+            verify_with: "crunchyroll_get_watchlist",
+          };
+        }
+
         default:
           // A descriptor exists but this boundary has no parser for it: refuse
           // rather than improvise. Migrating an operation means adding both.

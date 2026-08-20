@@ -119,6 +119,12 @@ export interface BodySpec {
 export interface ResponseContract {
   readonly successStatuses: readonly number[];
   readonly body: "JSON" | "EMPTY";
+  /**
+   * A descriptor-declared 404 whose meaning was proved for this operation.
+   * It is deliberately absent from every read and from mutations without
+   * operation-specific evidence; an arbitrary HTML body never establishes it.
+   */
+  readonly determinedNotFound?: "watchlist-item-absent";
 }
 
 export interface OperationDescriptor {

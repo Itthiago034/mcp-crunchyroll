@@ -175,8 +175,15 @@ function addProviderDetail(status: number, body: string): string | undefined {
 function upstreamError(
   status: number,
   mutation: boolean,
-  body: string
+  body: string,
+  determinedNotFound?: "watchlist-item-absent",
 ): TransportError {
+  // A 404 has an operation-specific meaning only when the descriptor carries
+  // the BT8.0-proved declaration. Provider HTML is intentionally ignored: the
+  // same shell can represent an unrouted hypothesis on another operation.
+  if (mutation && status === 404 && determinedNotFound !== undefined) {
+    return new TransportError("API_NOT_FOUND", determinedNotFound);
+  }
   if (mutation && status === 400) {
     return new TransportError("API_BAD_REQUEST", addProviderDetail(status, body));
   }
@@ -352,7 +359,12 @@ export function createBrowserApiBackend(ports: BrowserApiBackendPorts): Transpor
             if (response.status === 0 && isMutation) {
               throw new TransportError("MUTATION_OUTCOME_UNKNOWN", "redirect");
             }
-            throw upstreamError(response.status, isMutation, response.body);
+            throw upstreamError(
+              response.status,
+              isMutation,
+              response.body,
+              descriptor.response?.determinedNotFound,
+            );
           }
 
           let json: unknown;

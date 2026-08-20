@@ -652,19 +652,6 @@ async function getValidToken(): Promise<{ token: string; account_id: string }> {
 
 
 
-// ── Watchlist ─────────────────────────────────────────────────────────────────
-
-
-export async function removeFromWatchlist(contentId: string): Promise<{ success: boolean; message: string }> {
-  const { token, account_id } = await getValidToken();
-  await request(`${API_BASE}/content/v2/${account_id}/watchlist/${contentId}`, {
-    method: "DELETE",
-    token,
-    headers: { "Content-Type": "application/json" },
-  });
-  return { success: true, message: `Removed ${contentId} from watchlist` };
-}
-
 // ── Watch History & Progress ──────────────────────────────────────────────────
 
 

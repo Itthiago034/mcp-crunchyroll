@@ -323,12 +323,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "crunchyroll_remove_from_watchlist",
       description: "Remove an anime series or movie from the watchlist.",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
       inputSchema: {
         type: "object",
         properties: {
           content_id: { type: "string", description: "Series or movie ID to remove" },
         },
         required: ["content_id"],
+        additionalProperties: false,
       },
     },
 

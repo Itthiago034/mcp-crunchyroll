@@ -57,6 +57,9 @@ function freezeResponse(contract: ResponseContract): ResponseContract {
   return Object.freeze({
     successStatuses: Object.freeze([...contract.successStatuses]),
     body: contract.body,
+    ...(contract.determinedNotFound === undefined
+      ? {}
+      : { determinedNotFound: contract.determinedNotFound }),
   });
 }
 
@@ -190,6 +193,15 @@ export function createOperationRegistry(
             `operation ${String(d.id)} declares a non-success status as success`
           );
         }
+      }
+      if (
+        contract.determinedNotFound !== undefined &&
+        contract.determinedNotFound !== "watchlist-item-absent"
+      ) {
+        throw new TransportError(
+          "INVALID_ARGUMENTS",
+          `operation ${String(d.id)} declares no closed determined not-found outcome`
+        );
       }
       // INV-M9. Neither encoding has a mutation use case, and the smallest
       // mutation surface is the one worth defending.
@@ -572,11 +584,11 @@ export function accountMutation(spec: {
  * overloaded ACCOUNT and would have made PROFILE_READY enforcement ambiguous
  * for the real account operations arriving at BT7.
  *
- * BT8.1 taught this registry to express mutations. BT8.2 registers only
- * ADD_TO_WATCHLIST from the BT8.0 collection contract; REMOVE_FROM_WATCHLIST
- * and UPDATE_PLAYHEAD remain absent and their tools remain refused with
- * `OPERATION_NOT_MIGRATED` before any transport. Each later descriptor belongs
- * to its own auditable stage and provider contract.
+ * BT8.1 taught this registry to express mutations. BT8.2 registers ADD and
+ * BT8.3 registers REMOVE from their respective BT8.0 contracts; UPDATE_PLAYHEAD
+ * remains absent and its tool remains refused with OPERATION_NOT_MIGRATED before
+ * any transport. Each descriptor belongs to its own auditable stage and provider
+ * contract.
  */
 export const PRODUCTION_OPERATIONS: readonly OperationDescriptor[] = Object.freeze([
   publicRead({
@@ -695,5 +707,20 @@ export const PRODUCTION_OPERATIONS: readonly OperationDescriptor[] = Object.free
       fixedFields: {},
     },
     response: { successStatuses: [204], body: "EMPTY" },
+  }),
+  accountMutation({
+    id: "REMOVE_FROM_WATCHLIST",
+    method: "DELETE",
+    pathTemplate: "/content/v2/{accountId}/watchlist/{content_id}",
+    mutation: "ACCOUNT",
+    callerParams: { content_id: contentId },
+    // BT8.0 proved this exact DELETE route succeeds for a present item (204)
+    // and returns 404 when the item is absent. The opaque HTML response itself
+    // is never parsed; the descriptor carries the operation-specific meaning.
+    response: {
+      successStatuses: [204],
+      body: "EMPTY",
+      determinedNotFound: "watchlist-item-absent",
+    },
   }),
 ]);
