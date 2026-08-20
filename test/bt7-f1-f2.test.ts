@@ -81,9 +81,9 @@ const render = (operation: string, params: Record<string, unknown>): string =>
 // ── F-1 ─────────────────────────────────────────────────────────────────────
 
 describe("F-1 — GET_CONTINUE_WATCHING is deferred, not migrated", () => {
-  test("the production table holds fifteen operations and not this one", () => {
+  test("the production table holds sixteen operations and not this one", () => {
     const ids = PRODUCTION_OPERATIONS.map((d) => d.id as unknown as string).sort();
-    assert.equal(ids.length, 15, "PRODUCTION_OPERATIONS must be exactly 15");
+    assert.equal(ids.length, 16, "PRODUCTION_OPERATIONS must be exactly 16");
     assert.equal(ids.includes("GET_CONTINUE_WATCHING"), false);
     assert.deepEqual(ids, [
       "ADD_TO_WATCHLIST",
@@ -101,6 +101,7 @@ describe("F-1 — GET_CONTINUE_WATCHING is deferred, not migrated", () => {
       "GET_WATCHLIST",
       "REMOVE_FROM_WATCHLIST",
       "SEARCH",
+      "UPDATE_PLAYHEAD",
     ]);
   });
 
@@ -427,16 +428,12 @@ describe("F-1/F-2 — the rest of BT7 is untouched", () => {
     assert.ok(names.includes("crunchyroll_get_playheads"));
   });
 
-  test("the unadopted BT8 mutation remains refused with no transport", async () => {
+  test("the deferred subscription operation remains refused with no transport", async () => {
     const { gateway, backend } = harness();
-    for (const [tool, args] of [
-      ["crunchyroll_update_playhead", { content_id: "A", playhead: 1 }],
-    ] as Array<[string, Record<string, unknown>]>) {
-      await assert.rejects(
-        gateway.callTool(tool, args),
-        (e: unknown) => e instanceof TransportError && e.kind === "OPERATION_NOT_MIGRATED"
-      );
-    }
+    await assert.rejects(
+      gateway.callTool("crunchyroll_get_subscription", {}),
+      (e: unknown) => e instanceof TransportError && e.kind === "OPERATION_NOT_MIGRATED"
+    );
     assert.equal(backend.calls.length, 0);
   });
 

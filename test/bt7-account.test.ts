@@ -160,15 +160,15 @@ function sources(): Array<{ path: string; code: string }> {
 // ── The table ───────────────────────────────────────────────────────────────
 
 describe("BT7 — the production table after the account-read migration", () => {
-  test("holds the BT5/BT6 catalog reads, five BT7 reads and BT8.2/BT8.3 watchlist mutations", () => {
+  test("holds the BT5/BT6 catalog reads, five BT7 reads and all BT8 mutations", () => {
     // Was 14 before the F-1 ruling. Thirteen is not a smaller migration, it is
     // an honest one: an operation nobody can serve does not belong in a table
     // whose whole meaning is "this is served here now".
     assert.deepEqual(
       PRODUCTION_OPERATIONS.map((d) => String(d.id)).sort(),
-      [...BT5_BT6_OPERATIONS, ...BT7_OPERATIONS, "ADD_TO_WATCHLIST", "REMOVE_FROM_WATCHLIST"].sort()
+      [...BT5_BT6_OPERATIONS, ...BT7_OPERATIONS, "ADD_TO_WATCHLIST", "REMOVE_FROM_WATCHLIST", "UPDATE_PLAYHEAD"].sort()
     );
-    assert.equal(PRODUCTION_OPERATIONS.length, 15);
+    assert.equal(PRODUCTION_OPERATIONS.length, 16);
   });
 
   test("both deferred operations are absent — D-1c and F-1, neither forgotten", () => {
@@ -177,10 +177,10 @@ describe("BT7 — the production table after the account-read migration", () => 
     }
   });
 
-  test("ADD and REMOVE entered the table; UPDATE remains deferred", () => {
+  test("all three BT8 mutations entered the table", () => {
     assert.equal(PRODUCTION_OPERATIONS.some((d) => String(d.id) === "ADD_TO_WATCHLIST"), true);
     assert.equal(PRODUCTION_OPERATIONS.some((d) => String(d.id) === "REMOVE_FROM_WATCHLIST"), true);
-    assert.equal(PRODUCTION_OPERATIONS.some((d) => String(d.id) === "UPDATE_PLAYHEAD"), false);
+    assert.equal(PRODUCTION_OPERATIONS.some((d) => String(d.id) === "UPDATE_PLAYHEAD"), true);
   });
 
   test("every BT7 descriptor is an ACCOUNT read that resolves exactly one identity", () => {
@@ -629,11 +629,8 @@ describe("BT7 — nothing here can become a write", () => {
 
 // ── Boundaries that must not move ───────────────────────────────────────────
 
-describe("BT7 — the deferred and BT8 boundaries hold", () => {
-  for (const [tool, args] of [
-    ["crunchyroll_get_subscription", {}],
-    ["crunchyroll_update_playhead", { content_id: "A", playhead: 1 }],
-  ] as Array<[string, Record<string, unknown>]>) {
+describe("BT7 — the deferred boundary holds", () => {
+  for (const [tool, args] of [["crunchyroll_get_subscription", {}]] as Array<[string, Record<string, unknown>]>) {
     test(`${tool} stays OPERATION_NOT_MIGRATED with zero transport calls`, async () => {
       const h = gatewayHarness();
       await assert.rejects(
@@ -768,15 +765,15 @@ describe("BT7 — transport ownership moved out of the legacy client", () => {
         owners.push([match[1], url[0]]);
       }
     }
-    const ALLOWED_OWNERS = new Set(["updatePlayhead", "getSubscription"]);
+    const ALLOWED_OWNERS = new Set(["getSubscription"]);
     for (const [fn, url] of owners) {
       assert.ok(
         ALLOWED_OWNERS.has(fn),
         `${fn} still owns a Crunchyroll path in the legacy client: ${url.slice(0, 60)}`
       );
     }
-    // And the BT8 owners really are still there, unchanged.
-    assert.ok(owners.some(([fn]) => fn === "updatePlayhead"), "UPDATE_PLAYHEAD is BT8's");
+    // All three BT8 mutations now have registry owners, not legacy owners.
+    assert.equal(owners.some(([fn]) => fn === "updatePlayhead"), false);
   });
 
   test("the legacy transport functions for the six are gone", () => {
@@ -797,12 +794,12 @@ describe("BT7 — transport ownership moved out of the legacy client", () => {
     }
   });
 
-  test("the deferred operation and unmigrated BT8 operation keep their legacy owners", () => {
+  test("the deferred operation keeps its legacy owner while BT8 owners stay removed", () => {
     const api = readFileSync(join(SRC, "api.ts"), "utf-8");
     assert.match(api, /export async function getSubscription\b/, "GET_SUBSCRIPTION is deferred, not deleted");
     assert.equal(/export async function addToWatchlist\b/.test(api), false, "ADD owner must be removed");
     assert.equal(/export async function removeFromWatchlist\b/.test(api), false, "REMOVE owner must be removed");
-    assert.match(api, /export async function updatePlayhead\b/, "UPDATE_PLAYHEAD remains BT8.4's");
+    assert.equal(/export async function updatePlayhead\b/.test(api), false, "UPDATE owner must be removed");
   });
 
   test("infrastructure the remaining legacy callers need is preserved", () => {

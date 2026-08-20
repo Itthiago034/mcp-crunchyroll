@@ -98,6 +98,7 @@ describe("BT1 registry — construction and lookup", () => {
         "GET_WATCHLIST",
         "REMOVE_FROM_WATCHLIST",
         "SEARCH",
+        "UPDATE_PLAYHEAD",
       ],
       "BT5 categories; BT6 the public catalog reads; BT7 the account reads, " +
         "less GET_CONTINUE_WATCHING, deferred by F-1 on live evidence"

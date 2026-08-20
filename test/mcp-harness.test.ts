@@ -66,7 +66,8 @@ describe("MCP server harness", () => {
             // re-ordered by the tool registry; descriptions are informational).
             const expectedSchema =
               expected.name === "crunchyroll_add_to_watchlist" ||
-              expected.name === "crunchyroll_remove_from_watchlist"
+              expected.name === "crunchyroll_remove_from_watchlist" ||
+              expected.name === "crunchyroll_update_playhead"
                 ? { ...(expected.inputSchema as Record<string, unknown>), additionalProperties: false }
                 : expected.inputSchema;
             assert.deepEqual(actual.inputSchema, expectedSchema);
@@ -101,9 +102,8 @@ describe("MCP server harness", () => {
       // unmigrated content tool reached Node and failed on missing tokens.
       // After the cutover the same call is refused locally, before any
       // transport and long before any network.
-      // BT7 migrated the account reads, so the representative moved again — to
-      // a BT8 mutation, which must stay refused for two more stages.
-      test("an unmigrated content tool is refused with OPERATION_NOT_MIGRATED", async () => {
+      // BT7 migrated the account reads and BT8 migrated the three mutations.
+      test("a migrated UPDATE mutation reaches the browser boundary", async () => {
         await withClient(target, async (client) => {
           const result = await client.sendRequest("tools/call", {
             name: "crunchyroll_update_playhead",
@@ -111,7 +111,8 @@ describe("MCP server harness", () => {
           });
           assert.equal(result.error, undefined, "unexpected MCP-level error");
           const content = (result.result as { content: { text: string }[] }).content[0].text;
-          assert.match(content, /OPERATION_NOT_MIGRATED/);
+          assert.match(content, /Not authenticated|browser/i);
+          assert.equal(/OPERATION_NOT_MIGRATED/.test(content), false, "UPDATE is migrated");
         });
       });
 

@@ -4,8 +4,8 @@
 // reader, a fake execution channel, synthetic descriptors, no browser, no
 // network, no credentials, no provider.
 //
-// BT8.3 registers ADD_TO_WATCHLIST and REMOVE_FROM_WATCHLIST. UPDATE_PLAYHEAD
-// stays absent and refused, which is asserted below.
+// BT8.4 registers the final UPDATE_PLAYHEAD mutation; all three BT8 mutations
+// are asserted below while BT7 reads remain unchanged.
 //
 // Frozen design: CRUNCHYROLL-BT8-MUTATIONS-DESIGN.md §12 (registry evolution),
 // §13 (body ownership), §14 (response model), §18 (browser boundary).
@@ -54,11 +54,7 @@ const SRC = join(REPO_ROOT, "src");
 const ACCOUNT_SENTINEL = "SYNTHETIC-ACCOUNT-ID-BT8";
 const BEARER_SENTINEL = "SYNTHETIC-BEARER-BT8-MUST-NOT-LEAK";
 
-/** The mutation intentionally absent after BT8.3. */
-const UNMIGRATED_MUTATIONS = ["UPDATE_PLAYHEAD"];
-const REAL_MUTATION_TOOLS: Array<[string, Record<string, unknown>]> = [
-  ["crunchyroll_update_playhead", { content_id: "GE00377909ENUS", playhead: 42 }],
-];
+const BT8_MUTATIONS = ["ADD_TO_WATCHLIST", "REMOVE_FROM_WATCHLIST", "UPDATE_PLAYHEAD"];
 
 // ── Synthetic descriptors ───────────────────────────────────────────────────
 
@@ -356,10 +352,10 @@ describe("BT8.1 — mutation and method are closed at construction", () => {
 
 // ── The critical exit requirement: zero production mutations ────────────────
 
-describe("BT8.3 — the capability is used only by migrated watchlist mutations", () => {
-  test("BT7 production reads remain reads and ADD/REMOVE are the production mutations", () => {
+describe("BT8.4 — the capability is used only by the three migrated mutations", () => {
+  test("BT7 production reads remain reads and all BT8 mutations own their contracts", () => {
     for (const d of PRODUCTION_OPERATIONS) {
-      if (["ADD_TO_WATCHLIST", "REMOVE_FROM_WATCHLIST"].includes(String(d.id))) continue;
+      if (BT8_MUTATIONS.includes(String(d.id))) continue;
       assert.equal(d.mutation, false, `${String(d.id)} must remain a read`);
       assert.equal(d.method, "GET", `${String(d.id)} must remain a GET`);
       assert.equal(d.body, undefined, `${String(d.id)} must carry no body`);
@@ -371,44 +367,32 @@ describe("BT8.3 — the capability is used only by migrated watchlist mutations"
     const remove = PRODUCTION_OPERATIONS.find((d) => String(d.id) === "REMOVE_FROM_WATCHLIST")!;
     assert.equal(remove.mutation, "ACCOUNT");
     assert.equal(remove.method, "DELETE");
+    const update = PRODUCTION_OPERATIONS.find((d) => String(d.id) === "UPDATE_PLAYHEAD")!;
+    assert.equal(update.mutation, "PROGRESS");
+    assert.equal(update.method, "POST");
   });
 
-  test("ADD and REMOVE are registered while UPDATE remains absent", () => {
+  test("all three BT8 mutations are registered", () => {
     const ids = PRODUCTION_OPERATIONS.map((d) => String(d.id));
-    assert.equal(ids.includes("ADD_TO_WATCHLIST"), true);
-    assert.equal(ids.includes("REMOVE_FROM_WATCHLIST"), true);
-    for (const id of UNMIGRATED_MUTATIONS) {
-      assert.equal(ids.includes(id), false, `${id} must not be registered at BT8.3`);
-    }
-    assert.equal(PRODUCTION_OPERATIONS.length, 15);
+    for (const id of BT8_MUTATIONS) assert.equal(ids.includes(id), true, `${id} must be registered`);
+    assert.equal(PRODUCTION_OPERATIONS.length, 16);
   });
 
-  test("UPDATE stays refused, with zero transport calls", async () => {
-    for (const [tool, args] of REAL_MUTATION_TOOLS) {
-      const h = gatewayHarness();
-      await assert.rejects(
-        h.gateway.callTool(tool, args),
-        (e: unknown) => e instanceof TransportError && e.kind === "OPERATION_NOT_MIGRATED",
-        `${tool} must still be refused`
-      );
-      assert.equal(h.backend.calls.length, 0, `${tool} must reach no transport`);
-    }
-  });
-
-  test("the refusal happens at the registry boundary, before any transport exists", () => {
-    const { registry } = gatewayHarness();
-    for (const id of UNMIGRATED_MUTATIONS) {
-      assert.equal(registry.has(id), false, `${id} must not resolve`);
-    }
+  test("UPDATE reaches the same dispatcher/gateway mutation boundary", async () => {
+    const h = gatewayHarness();
+    const result = await h.gateway.callTool("crunchyroll_update_playhead", {
+      content_id: "GE00377909ENUS",
+      playhead: 42,
+    });
+    assert.equal(result.operation, "UPDATE_PLAYHEAD");
+    assert.equal(h.backend.calls.length, 1);
   });
 
   test("no legacy mutation owner acquired a caller inside src/", () => {
-    // UPDATE stays in src/api.ts for BT8.4; what must remain true
-    // is that nothing calls them, so the refusal is the only reachable path.
     const gateway = readFileSync(join(SRC, "transport", "content-gateway.ts"), "utf-8");
-    for (const fn of ["updatePlayhead"]) {
-      assert.equal(gateway.includes(fn), false, `the gateway must not reach ${fn}`);
-    }
+    const api = readFileSync(join(SRC, "api.ts"), "utf-8");
+    assert.equal(gateway.includes("updatePlayhead"), false, "the gateway must not reach the legacy function");
+    assert.equal(/export async function updatePlayhead\b/.test(api), false, "UPDATE owner must be removed");
   });
 });
 
@@ -549,7 +533,7 @@ describe("BT8.1 — the body is the descriptor's, the values are the caller's", 
       backendSource.indexOf("export function buildRequestBody"),
       backendSource.indexOf("export const CRUNCHYROLL_API_ORIGIN")
     );
-    for (const id of [...UNMIGRATED_MUTATIONS, "ADD_TO_WATCHLIST", "SYNTHETIC_WRITE"]) {
+    for (const id of [...BT8_MUTATIONS, "SYNTHETIC_WRITE"]) {
       assert.equal(fn.includes(id), false, `${id} must not be special-cased in the serializer`);
     }
   });

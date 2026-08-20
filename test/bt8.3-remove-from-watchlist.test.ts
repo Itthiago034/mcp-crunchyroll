@@ -238,15 +238,11 @@ describe("BT8.3 — REMOVE_FROM_WATCHLIST production contract", () => {
 });
 
 describe("BT8.3 — migration ratchet", () => {
-  test("ADD remains migrated and UPDATE remains locally refused", async () => {
+  test("ADD, REMOVE and UPDATE remain migrated", () => {
     const h = gatewayHarness();
     assert.equal(h.registry.has(ADD_OPERATION), true);
     assert.equal(h.registry.has(REMOVE_OPERATION), true);
-    await assert.rejects(
-      h.gateway.callTool("crunchyroll_update_playhead", { content_id: CONTENT_ID, playhead: 1 }),
-      (error: unknown) => error instanceof TransportError && error.kind === "OPERATION_NOT_MIGRATED",
-    );
     assert.equal(h.backend.calls.length, 0);
-    assert.equal(h.registry.has(UPDATE_OPERATION), false);
+    assert.equal(h.registry.has(UPDATE_OPERATION), true);
   });
 });

@@ -906,15 +906,19 @@ describe("B4-FIX-1-C1 — refreshed identity used by a real public consumer", ()
           )
         );
       }
-      // The remaining legacy public consumer `updatePlayhead()` issues one authenticated
-      // POST to the account playheads URL after the refresh; anything else
-      // is unexpected in this synthetic setup.
+      // The remaining legacy public consumer `getSubscription()` issues one
+      // authenticated request to the subscription URL after the refresh; anything
+      // else is unexpected in this synthetic setup.
       if (
-        String(input) === `${API_BASE_URL}/content/v2/${newAccountId}/playheads` &&
-        init?.method === "POST" &&
-        init.body === JSON.stringify({ content_id: "GMWHE5QWY", playhead: 42 })
+        String(input) === `${API_BASE_URL}/subs/v1/subscriptions/${newAccountId}/benefits` &&
+        init?.method === undefined
       ) {
-        return Promise.resolve(new Response("{}", { status: 200 }));
+        return Promise.resolve(
+          new Response(JSON.stringify({ data: [] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          })
+        );
       }
       assert.fail(`unexpected fetch: ${input}`);
     });
@@ -922,11 +926,11 @@ describe("B4-FIX-1-C1 — refreshed identity used by a real public consumer", ()
     try {
       // getStatus() reads the persisted identity but does NOT trigger a
       // refresh by itself — exercising the refresh requires a real consumer
-      // that needs a valid token. updatePlayhead() is a public consumer that
+      // that needs a valid token. getSubscription() is a remaining legacy consumer that
       // goes through getValidToken(), which issues the refresh for the
       // expired fixture above and then persists the refreshed identity.
-      const { updatePlayhead, getStatus } = await import("../src/api.js");
-      await updatePlayhead("GMWHE5QWY", 42);
+      const { getSubscription, getStatus } = await import("../src/api.js");
+      await getSubscription();
       assert.ok(refreshSeen, "the refresh HTTP request must have been made");
 
       // Now getStatus() — a second, separate public consumer — must report
@@ -947,8 +951,8 @@ describe("B4-FIX-1-C1 — refreshed identity used by a real public consumer", ()
   });
 
   test("getValidToken() refresh path returns the refreshed access_token AND the refreshed account_id together", async () => {
-    // Regression proof via the remaining legacy public consumer updatePlayhead(): its
-    // outgoing URL embeds the account_id returned by getValidToken().
+    // Regression proof via the remaining legacy public consumer getSubscription():
+    // its outgoing URL embeds the account_id returned by getValidToken().
     const originalFetch = globalThis.fetch;
     const prevHome = process.env.HOME;
     const tmpHome = setupIsolatedHome(
@@ -956,7 +960,7 @@ describe("B4-FIX-1-C1 — refreshed identity used by a real public consumer", ()
     );
     process.env.HOME = tmpHome;
 
-    let watchlistUrl: string | undefined;
+    let subscriptionUrl: string | undefined;
     installFetch((input, init) => {
       if (String(input) === AUTH_URL && init?.method === "POST") {
         return Promise.resolve(
@@ -972,25 +976,29 @@ describe("B4-FIX-1-C1 — refreshed identity used by a real public consumer", ()
         );
       }
       if (
-        String(input) === `${API_BASE_URL}/content/v2/${newAccountId}/playheads` &&
-        init?.method === "POST" &&
-        init.body === JSON.stringify({ content_id: "GMWHE5QWY", playhead: 42 })
+        String(input) === `${API_BASE_URL}/subs/v1/subscriptions/${newAccountId}/benefits` &&
+        init?.method === undefined
       ) {
-        watchlistUrl = String(input);
-        return Promise.resolve(new Response("{}", { status: 200 }));
+        subscriptionUrl = String(input);
+        return Promise.resolve(
+          new Response(JSON.stringify({ data: [] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          })
+        );
       }
       assert.fail(`unexpected fetch: ${input}`);
     });
 
     try {
-      const { updatePlayhead } = await import("../src/api.js");
-      await updatePlayhead("GMWHE5QWY", 42);
-      assert.ok(watchlistUrl, "updatePlayhead must have issued its HTTP request");
+      const { getSubscription } = await import("../src/api.js");
+      await getSubscription();
+      assert.ok(subscriptionUrl, "getSubscription must have issued its HTTP request");
       assert.ok(
-        watchlistUrl!.includes(`/content/v2/${newAccountId}/playheads`),
-        `playhead URL must embed the REFRESHED account_id ${newAccountId}, got ${watchlistUrl}`
+        subscriptionUrl!.includes(`/subs/v1/subscriptions/${newAccountId}/benefits`),
+        `subscription URL must embed the REFRESHED account_id ${newAccountId}, got ${subscriptionUrl}`
       );
-      assert.ok(!watchlistUrl!.includes(oldAccountId), "the STALE account_id must not appear in the URL");
+      assert.ok(!subscriptionUrl!.includes(oldAccountId), "the STALE account_id must not appear in the URL");
     } finally {
       restoreFetch(originalFetch);
       process.env.HOME = prevHome;

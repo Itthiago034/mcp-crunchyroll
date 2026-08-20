@@ -87,8 +87,8 @@ describe("BT6 — the production table after the catalog migration", () => {
 
   test("no unadopted mutation or deferred operation slipped in", () => {
     // RETIRED AT BT7 for the six account READS, which are now legitimately
-    // migrated. The deferred subscription and BT8.4's UPDATE must stay absent.
-    for (const forbidden of ["GET_SUBSCRIPTION", "UPDATE_PLAYHEAD"]) {
+    // migrated. The deferred subscription must stay absent.
+    for (const forbidden of ["GET_SUBSCRIPTION"]) {
       assert.equal(
         PRODUCTION_OPERATIONS.some((d) => String(d.id) === forbidden),
         false,
@@ -145,7 +145,7 @@ describe("BT6 — transport knowledge moved, not copied", () => {
     // BT6 did not touch the mutations or the deferred operation.
     const api = readFileSync(join(SRC, "api.ts"), "utf-8");
     assert.equal(/export async function removeFromWatchlist\b/.test(api), false, "REMOVE owner migrated at BT8.3");
-    assert.match(api, /export async function updatePlayhead\b/);
+    assert.equal(/export async function updatePlayhead\b/.test(api), false, "UPDATE owner migrated at BT8.4");
     assert.match(api, /export async function getSubscription\b/);
   });
 
@@ -359,13 +359,10 @@ describe("BT6 — every migrated tool routes to the browser transport", () => {
 
 // ── The account boundary does not move ──────────────────────────────────────
 
-describe("BT6 — deferred operations and unadopted mutations stay refused", () => {
+describe("BT6 — deferred operations stay refused", () => {
   // RETIRED AT BT7 for the six account reads. The representatives are now the
   // deferred operation and the BT8 mutations.
-  for (const [tool, args] of [
-    ["crunchyroll_get_subscription", {}],
-    ["crunchyroll_update_playhead", { content_id: "A", playhead: 1 }],
-  ] as Array<[string, Record<string, unknown>]>) {
+  for (const [tool, args] of [["crunchyroll_get_subscription", {}]] as Array<[string, Record<string, unknown>]>) {
     test(`${tool} is still OPERATION_NOT_MIGRATED, with zero transport calls`, async () => {
       const h = harness({});
       await assert.rejects(
