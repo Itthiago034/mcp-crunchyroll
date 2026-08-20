@@ -154,6 +154,7 @@ jobs:
         run: npm run build
 
       - name: Tests (unit + MCP stdio harness)
+        timeout-minutes: 20
         run: npm test
         env:
           # Guarantee no account dependency: tests only use deliberately
