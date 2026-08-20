@@ -28,6 +28,18 @@ interface Harness {
   cleanup: () => Promise<void>;
 }
 
+async function removeTemporaryProfileTree(base: string): Promise<void> {
+  for (let attempt = 1; attempt <= 50; attempt += 1) {
+    try {
+      rmSync(base, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOTEMPTY" || attempt === 50) throw error;
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    }
+  }
+}
+
 async function harness(): Promise<Harness> {
   const server = await startLocalServer();
   const base = mkdtempSync(join(tmpdir(), "bt2-int-"));
@@ -49,12 +61,7 @@ async function harness(): Promise<Harness> {
     cleanup: async () => {
       await manager.stop().catch(() => undefined);
       await server.close();
-      rmSync(base, {
-        recursive: true,
-        force: true,
-        maxRetries: 5,
-        retryDelay: 100,
-      });
+      await removeTemporaryProfileTree(base);
     },
   };
 }
