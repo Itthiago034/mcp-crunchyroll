@@ -907,9 +907,9 @@ describe("B4-FIX-1-C1 — refreshed identity used by a real public consumer", ()
         );
       }
       // The remaining legacy public consumer `removeFromWatchlist()` issues one authenticated
-      // POST to the account watchlist URL after the refresh; anything else
+      // DELETE to the account watchlist URL after the refresh; anything else
       // is unexpected in this synthetic setup.
-      if (String(input).startsWith(`${API_BASE_URL}/content/v2/${newAccountId}/watchlist/`) && init?.method === "POST") {
+      if (String(input).startsWith(`${API_BASE_URL}/content/v2/${newAccountId}/watchlist/`) && init?.method === "DELETE") {
         return Promise.resolve(new Response("{}", { status: 200 }));
       }
       assert.fail(`unexpected fetch: ${input}`);
@@ -967,7 +967,7 @@ describe("B4-FIX-1-C1 — refreshed identity used by a real public consumer", ()
           )
         );
       }
-      if (String(input).includes(`/content/v2/`) && init?.method === "POST") {
+      if (String(input).includes(`/content/v2/`) && init?.method === "DELETE") {
         watchlistUrl = String(input);
         return Promise.resolve(new Response("{}", { status: 200 }));
       }
