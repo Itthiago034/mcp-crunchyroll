@@ -9,6 +9,9 @@ jobs:
     name: install / typecheck / build / test
     runs-on: ubuntu-latest
     strategy:
+      # Each Node version must produce its own evidence; an early failure in
+      # one matrix leg must not cancel the others.
+      fail-fast: false
       matrix:
         node-version: [18, 20, 22]
     steps:
@@ -26,6 +29,124 @@ jobs:
       - name: Reproducible install (strict lockfile)
         run: npm ci
 
+      - name: Deterministic sandboxed Chromium (Chrome for Testing)
+        id: setup-chrome
+        run: |
+          # Official Chromium team Chrome for Testing — pinned version,
+          # downloaded directly from the storage bucket, not from a
+          # third-party action (step-security/setup-chrome is blocked for
+          # private repositories without a subscription). Sandbox stays
+          # enabled: no --no-sandbox and no --disable-setuid-sandbox
+          # anywhere in this workflow.
+          CFT_VERSION="131.0.6778.85"
+          CFT_ZIP="/tmp/chrome-for-testing-${CFT_VERSION}.zip"
+          CFT_DIR="/opt/chrome-for-testing-${CFT_VERSION}"
+          CFT_URL="https://storage.googleapis.com/chrome-for-testing-public/${CFT_VERSION}/linux64/chrome-linux64.zip"
+          curl -sSL --retry 3 --retry-delay 2 -o "${CFT_ZIP}" "${CFT_URL}"
+          unzip -q "${CFT_ZIP}" -d /opt/
+          mv /opt/chrome-linux64 "${CFT_DIR}"
+          rm -f "${CFT_ZIP}"
+
+          # Ubuntu 24.04 runners restrict unprivileged user namespaces via
+          # AppArmor (kernel.apparmor_restrict_unprivileged_userns), so the
+          # unprivileged namespace sandbox Chrome normally uses is unavailable
+          # and the binary exits with "No usable sandbox!" on launch. The
+          # documented safe fallback is the SUID setuid sandbox helper
+          # (chrome-sandbox), which provides a real sandbox without any
+          # --no-sandbox flag. The CfT zip ships it as "chrome_sandbox"
+          # (underscore), but Chrome looks up "chrome-sandbox" (hyphen), so
+          # it must be renamed and given the setuid bit. See:
+          # - actions/runner-images#12096
+          # - puppeteer/puppeteer#13595 (SUID helper = safest option)
+          # - GoogleChromeLabs/chrome-for-testing#38 (underscore vs hyphen)
+          CFT_SANDBOX="${CFT_DIR}/chrome_sandbox"
+          if [ -f "${CFT_SANDBOX}" ]; then
+            ln -f "${CFT_SANDBOX}" "${CFT_DIR}/chrome-sandbox"
+            sudo chown root:root "${CFT_DIR}/chrome-sandbox"
+            sudo chmod 4755 "${CFT_DIR}/chrome-sandbox"
+            echo "CHROME_DEVEL_SANDBOX=${CFT_DIR}/chrome-sandbox" >> "$GITHUB_ENV"
+          else
+            echo "ERROR: chrome_sandbox helper missing from CfT package"
+            exit 1
+          fi
+          chmod -R a-w "${CFT_DIR}" >/dev/null 2>&1 || true
+          echo "chrome-path=${CFT_DIR}/chrome" >> "$GITHUB_OUTPUT"
+          echo "chrome-sandbox=${CFT_DIR}/chrome-sandbox" >> "$GITHUB_OUTPUT"
+
+      - name: Record provisioned browser identity
+        run: |
+          set +e
+          CFT="${{ steps.setup-chrome.outputs.chrome-path }}"
+          PROFILE=/tmp/ci-browser-smoke
+          STDERR_LOG=/tmp/ci-browser-smoke.stderr
+          echo "CRUNCHYROLL_BROWSER_EXECUTABLE=$CFT" >> "$GITHUB_ENV"
+          "$CFT" --version
+          stat -c 'chrome-sandbox=%U:%G mode=%a suid=%A' "${CFT%/*}/chrome-sandbox"
+          test "$(stat -c '%u:%g:%a' "${CFT%/*}/chrome-sandbox")" = "0:0:4755" || {
+            echo "SANDBOX_VALIDATION_FAILED: chrome-sandbox must be root:root 4755"
+            exit 1
+          }
+          echo "CHROME_DEVEL_SANDBOX=${CHROME_DEVEL_SANDBOX:+present}"
+          rm -rf "$PROFILE" "$STDERR_LOG"
+
+          # Validate the same persistent launch lifecycle used by
+          # BrowserSessionManager: wait for DevToolsActivePort, perform a
+          # loopback CDP request, then stop the owned process. --dump-dom is
+          # intentionally not used because it waits for a terminating page
+          # lifecycle that the real runtime does not require.
+          "$CFT" \
+            --user-data-dir="$PROFILE" \
+            --remote-debugging-port=0 \
+            --no-first-run \
+            --no-default-browser-check \
+            --disable-background-networking \
+            --disable-background-mode \
+            --headless=new \
+            >/dev/null 2>"$STDERR_LOG" &
+          CHROME_PID=$!
+          ENDPOINT_OK=0
+          for _ in $(seq 1 40); do
+            if [ -f "$PROFILE/DevToolsActivePort" ]; then
+              PORT=$(sed -n '1p' "$PROFILE/DevToolsActivePort")
+              case "$PORT" in
+                ''|*[!0-9]*) PORT=0 ;;
+              esac
+              if [ "$PORT" -gt 0 ] 2>/dev/null && [ "$PORT" -lt 65536 ] && \
+                curl --fail --silent --show-error --max-time 3 "http://127.0.0.1:${PORT}/json/version" >/dev/null 2>&1; then
+                ENDPOINT_OK=1
+                echo "SANDBOX_CDP_VALIDATION=PASS"
+                break
+              fi
+            fi
+            if ! kill -0 "$CHROME_PID" 2>/dev/null; then break; fi
+            sleep 0.5
+          done
+          if [ "$ENDPOINT_OK" -ne 1 ]; then
+            echo "SANDBOX_CDP_VALIDATION=FAIL"
+            tail -n 80 "$STDERR_LOG" 2>/dev/null || true
+            kill -TERM "$CHROME_PID" 2>/dev/null || true
+            wait "$CHROME_PID" 2>/dev/null || true
+            rm -rf "$PROFILE" "$STDERR_LOG"
+            exit 1
+          fi
+
+          kill -TERM "$CHROME_PID" 2>/dev/null || true
+          STOPPED=0
+          for _ in $(seq 1 20); do
+            if ! kill -0 "$CHROME_PID" 2>/dev/null; then STOPPED=1; break; fi
+            sleep 0.5
+          done
+          if [ "$STOPPED" -ne 1 ]; then
+            echo "SANDBOX_CDP_VALIDATION=FAIL (browser did not stop cleanly)"
+            kill -KILL "$CHROME_PID" 2>/dev/null || true
+            wait "$CHROME_PID" 2>/dev/null || true
+            rm -rf "$PROFILE" "$STDERR_LOG"
+            exit 1
+          fi
+          wait "$CHROME_PID" 2>/dev/null || true
+          echo "SANDBOX_CONTROLLED_STOP=PASS"
+          rm -rf "$PROFILE" "$STDERR_LOG"
+
       - name: Typecheck
         run: npm run typecheck
 
@@ -33,6 +154,7 @@ jobs:
         run: npm run build
 
       - name: Tests (unit + MCP stdio harness)
+        timeout-minutes: 20
         run: npm test
         env:
           # Guarantee no account dependency: tests only use deliberately
@@ -47,4 +169,3 @@ jobs:
             echo "$CHANGED"
             exit 1
           fi
-

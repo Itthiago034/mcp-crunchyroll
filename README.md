@@ -1,171 +1,208 @@
-# Crunchyroll MCP Server
+<p align="center">
+  <img
+    src="docs/assets/mcp-crunchyroll-banner.png"
+    alt="MCP Crunchyroll"
+    width="100%"
+  >
+</p>
 
-Crunchyroll anime streaming MCP connector for personal AI agents. Lets AI assistants manage your Crunchyroll account — search anime, track progress, manage watchlists, get recommendations, and more.
+# MCP Crunchyroll
 
-This version is packaged for use with [Hermes Agent](https://github.com/nousresearch/hermes-agent), including a catalog manifest (`manifest.yaml`) following the [hermes-agent optional-mcps](https://github.com/NousResearch/hermes-agent/tree/main/optional-mcps) format.
+An unofficial [Model Context Protocol](https://modelcontextprotocol.io/) server for Crunchyroll, written in TypeScript. It gives MCP clients a closed tool surface for catalog discovery, account reads, and account mutations through browser-mediated authentication and provider access.
 
-## Features
+[![CI](https://github.com/Itthiago034/mcp-crunchyroll/actions/workflows/ci.yml/badge.svg)](https://github.com/Itthiago034/mcp-crunchyroll/actions/workflows/ci.yml)
+![Node.js](https://img.shields.io/badge/Node.js-18%20%7C%2020%20%7C%2022-339933)
+![TypeScript](https://img.shields.io/badge/TypeScript-5.3-3178C6)
+![License](https://img.shields.io/badge/license-MIT-blue)
+![Unofficial](https://img.shields.io/badge/unofficial-community%20project-f47521)
 
-- **Search** anime series and movies
-- **Browse** by genre, popularity, new additions, or simulcast season
-- **Show details** — series info, seasons, episodes
-- **Watchlist** management — add, remove, view
-- **Watch history & progress** — track and update playhead positions
-- **Continue watching** — pick up where you left off
-- **Recommendations** — personalized and similar-to suggestions
-- **Simulcast schedule** — current and past seasonal tags
-- **Subscription** info — tier, renewal date, status
+## Release status
 
-## Usage with Hermes Agent
+v0.1.0 exposes 21 public tools. Nineteen are operational: three local authentication/status tools and sixteen production API operations. Two published tools remain deliberately deferred and fail closed.
 
-### Option A — Catalog entry (recommended)
+| Surface | Count | Status |
+|---|---:|---|
+| Public MCP tools | 21 | Published |
+| Authentication and status tools | 3 | Operational |
+| Production API operations | 16 | Operational |
+| Deferred tools | 2 | `OPERATION_NOT_MIGRATED` |
 
-Place `manifest.yaml` into the `optional-mcps/crunchyroll/` directory of your hermes-agent checkout, then:
+The production operations cover catalog reads, account reads, adding and removing watchlist items, and updating playheads. CI validates the project on Node.js 18, 20, and 22 with sandboxed Chrome for Testing.
 
-```bash
-hermes mcp install crunchyroll
+## How it works
+
+```text
+MCP client
+    |
+    | stdio tool call
+    v
+MCP Crunchyroll
+    |
+    | closed operation descriptor + auth-derived account identity
+    v
+Managed browser / CDP
+    |
+    | provider request in the authenticated browser context
+    v
+Crunchyroll web services
 ```
 
-The manifest handles cloning, dependency installation, and the launch command. After installation, log in once through the `crunchyroll_login` tool (ask Hermes to do it — it will request your email and password, and tokens are saved locally).
+Interactive credentials are entered only in the managed browser. Usernames, passwords, cookies, and bearer tokens are not tool arguments. Migrated provider operations use the browser-mediated transport; callers cannot choose an account ID or override the HTTP method, path, headers, query, or raw request body.
 
-### Option B — Manual stdio config
+This project is not affiliated with or endorsed by Crunchyroll, LLC.
 
-Add to your `~/.hermes/config.yaml`:
+## Requirements
 
-```yaml
-mcp_servers:
-  crunchyroll:
-    command: "npx"
-    args: ["-y", "tsx", "${userHome}/path/to/mcp-crunchyroll/src/index.ts"]
-```
+- Node.js 18 or newer
+- npm
+- A supported Chromium-family browser for interactive authentication, unless `CRUNCHYROLL_BROWSER_EXECUTABLE` points to one explicitly
 
-Or build first and point at the compiled output:
+## Install and build
 
 ```bash
-npm install
+git clone https://github.com/Itthiago034/mcp-crunchyroll.git
+cd mcp-crunchyroll
+npm ci
+npm run typecheck
 npm run build
 ```
 
-```yaml
-mcp_servers:
-  crunchyroll:
-    command: "node"
-    args: ["${userHome}/path/to/mcp-crunchyroll/dist/index.js"]
-```
+The production bundle is written to `dist/index.js`.
 
-Restart Hermes (or run `/reload-mcp`) and log in through `crunchyroll_login`.
+## Run
 
-## Usage with other MCP hosts
-
-For Claude Desktop or any stdio-capable MCP client:
+Run the built stdio server:
 
 ```bash
-npm install -g @striderlabs/mcp-crunchyroll
+npm start
 ```
+
+For development directly from TypeScript:
+
+```bash
+npm run dev
+```
+
+A generic MCP client configuration for the built bundle looks like this:
 
 ```json
 {
   "mcpServers": {
     "crunchyroll": {
-      "command": "npx",
-      "args": ["-y", "@striderlabs/mcp-crunchyroll"]
+      "command": "node",
+      "args": ["/absolute/path/to/mcp-crunchyroll/dist/index.js"]
     }
   }
 }
 ```
 
+The repository also includes `manifest.yaml` for compatible Hermes Agent installations.
+
 ## Authentication
 
-Log in once with your Crunchyroll credentials via the `crunchyroll_login` tool:
+Call:
 
+```text
+crunchyroll_login({})
 ```
-crunchyroll_login(email: "you@example.com", password: "your-password")
-```
 
-Tokens are saved to `~/.strider/crunchyroll/` and automatically refreshed. You only need to log in again if tokens expire or after calling `crunchyroll_logout`.
+The login tool takes no arguments. It opens Crunchyroll in a dedicated managed browser, where the user completes sign-in and any human verification directly. The MCP server grants readiness only after observing and validating authentication material from that browser flow.
 
-## Tools
+Useful local tools:
 
-### Authentication
+| Tool | Purpose | Status |
+|---|---|---|
+| `crunchyroll_login` | Start interactive browser sign-in | Operational |
+| `crunchyroll_logout` | Invalidate the local authenticated context and clear managed artifacts | Operational |
+| `crunchyroll_status` | Report auth and browser readiness | Operational |
 
-| Tool | Description |
-|------|-------------|
-| `crunchyroll_login` | Log in with email + password |
-| `crunchyroll_logout` | Clear saved session |
-| `crunchyroll_status` | Check login status and account info |
+The managed browser profile is stored under `~/.strider/crunchyroll/browser-profile`. Do not point the server at a personal browser profile.
 
-### Search & Browse
+## Tool surface
 
-| Tool | Description |
-|------|-------------|
-| `crunchyroll_search` | Search anime series and movies |
-| `crunchyroll_browse` | Browse by popularity, genre, season, sub/dub |
-| `crunchyroll_get_categories` | List all genres/categories |
+### Catalog and discovery
+
+| Tool | Purpose |
+|---|---|
+| `crunchyroll_search` | Search titles |
+| `crunchyroll_browse` | Browse by supported sort, category, season, and availability filters |
+| `crunchyroll_get_categories` | List browse categories |
 | `crunchyroll_get_simulcast_seasons` | List simulcast season tags |
+| `crunchyroll_get_series` | Read series details |
+| `crunchyroll_get_seasons` | Read seasons for a series |
+| `crunchyroll_get_episodes` | Read episodes for a season |
+| `crunchyroll_get_episode` | Read one episode |
+| `crunchyroll_get_recommendations` | Read personalized recommendations |
+| `crunchyroll_get_similar` | Read titles similar to a series |
 
-### Show Details
+### Account reads
 
-| Tool | Description |
-|------|-------------|
-| `crunchyroll_get_series` | Get series info by ID |
-| `crunchyroll_get_seasons` | Get seasons for a series |
-| `crunchyroll_get_episodes` | Get episodes in a season |
-| `crunchyroll_get_episode` | Get single episode details |
+| Tool | Purpose |
+|---|---|
+| `crunchyroll_get_watchlist` | Read the authenticated account's watchlist |
+| `crunchyroll_get_history` | Read watch history |
+| `crunchyroll_get_playheads` | Read playheads for selected content IDs |
 
-### Watchlist
+### Account mutations
 
-| Tool | Description |
-|------|-------------|
-| `crunchyroll_get_watchlist` | View saved watchlist |
-| `crunchyroll_add_to_watchlist` | Add series/movie to watchlist |
-| `crunchyroll_remove_from_watchlist` | Remove from watchlist |
+| Tool | Purpose | Provider success |
+|---|---|---|
+| `crunchyroll_add_to_watchlist` | Add a content ID to the authenticated account's watchlist | `204 No Content` |
+| `crunchyroll_remove_from_watchlist` | Remove a content ID from the authenticated account's watchlist | `204 No Content` |
+| `crunchyroll_update_playhead` | Submit a playhead for a content ID | `204 No Content` |
 
-### Watch History & Progress
+Mutation identity is derived from the authenticated browser context. The caller supplies only the functional inputs in each closed tool schema and cannot select `accountId`.
 
-| Tool | Description |
-|------|-------------|
-| `crunchyroll_get_history` | Recently watched episodes |
-| `crunchyroll_continue_watching` | In-progress anime |
-| `crunchyroll_get_playheads` | Progress for specific content IDs |
-| `crunchyroll_update_playhead` | Update watch position (seconds) |
+A provider response such as bad request, conflict, or operation-specific not found is reported deterministically. If a write may have been dispatched but its result cannot be known—for example, because the browser disconnects after possible dispatch—the operation returns `MUTATION_OUTCOME_UNKNOWN`. The server does not blindly retry mutations. Callers can reconcile playhead state with `crunchyroll_get_playheads` when appropriate.
 
-### Recommendations
+### Deferred tools
 
-| Tool | Description |
-|------|-------------|
-| `crunchyroll_get_recommendations` | Personalized recommendations |
-| `crunchyroll_get_similar` | Anime similar to a given series |
+These names remain visible for compatibility, but v0.1.0 intentionally refuses them with `OPERATION_NOT_MIGRATED`:
 
-### Account
+| Tool | v0.1.0 status |
+|---|---|
+| `crunchyroll_continue_watching` | Deferred / fail-closed |
+| `crunchyroll_get_subscription` | Deferred / fail-closed |
 
-| Tool | Description |
-|------|-------------|
-| `crunchyroll_get_subscription` | Subscription tier and renewal info |
+They are not counted among the 19 operational tools.
 
-## Example Prompts
+## Security boundaries
 
-- *"What anime should I watch next based on my history?"*
-- *"Add Attack on Titan to my watchlist"*
-- *"What's airing this season? Sort by popularity"*
-- *"Where did I leave off watching One Piece?"*
-- *"Show me all the action anime added this week"*
-- *"When does my Crunchyroll subscription renew?"*
+- Interactive secrets are entered in the managed browser, not passed as MCP tool arguments.
+- Provider access for migrated operations is mediated by the managed browser/CDP boundary.
+- Authorization and content type are controlled internally.
+- Account mutation identity is auth-derived.
+- Unknown or forbidden caller arguments are rejected instead of silently discarded.
+- Mutation outcomes that become uncertain after possible dispatch fail closed as `MUTATION_OUTCOME_UNKNOWN`.
+- No automatic retry is performed for uncertain mutations.
+- Browser transport uses `credentials: "omit"` and manual redirect handling.
+- CI provisions pinned Chrome for Testing with its sandbox enabled; `--no-sandbox` is not used.
 
-## Notes
+These controls describe the implemented boundaries; they are not a claim of absolute containment against every host or browser threat.
 
-- Uses the Crunchyroll web API (same endpoints as the website)
-- Tokens are stored locally in `~/.strider/crunchyroll/` and auto-refreshed
-- Content IDs can be found in search results or Crunchyroll URLs
-- API endpoints are subject to change by Crunchyroll
-
-## Development
+## Development and tests
 
 ```bash
-npm install
-npm run dev      # run from TypeScript source via tsx
-npm run build    # bundle to dist/index.js with esbuild
+npm ci
+npm run typecheck
+npm run build
+npm test
 ```
 
-## Credits & License
+The test command runs the unit suites and MCP stdio harness. GitHub Actions repeats install, typecheck, build, and tests independently on Node.js 18, 20, and 22, including the sandboxed browser lifecycle checks.
 
-Based on the open-source `@striderlabs/mcp-crunchyroll` package by StrikerLabs ([github.com/markswendsen-code/mcp-crunchyroll](https://github.com/markswendsen-code/mcp-crunchyroll)), distributed under the MIT License.
+## Known limitations
+
+- `crunchyroll_continue_watching` is deferred and fails closed.
+- `crunchyroll_get_subscription` is deferred and fails closed.
+- Crunchyroll's internal web interfaces are not a stable public API and may change.
+- The project does not provide playback, media downloading, or DRM bypass.
+- Authentication can require user interaction in the managed browser.
+
+## Credits and license
+
+Based on the open-source `@striderlabs/mcp-crunchyroll` project by StrikerLabs. Distributed under the MIT License.
+
+## Disclaimer
+
+**Unofficial community project. Not affiliated with or endorsed by Crunchyroll, LLC.** “Crunchyroll” and related names and marks belong to their respective owners.

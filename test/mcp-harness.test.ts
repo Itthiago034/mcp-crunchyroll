@@ -64,7 +64,13 @@ describe("MCP server harness", () => {
             assert.notEqual(actual, undefined, `tool ${expected.name} missing from list`);
             // Per-tool structural equivalence of the published schema (names may be
             // re-ordered by the tool registry; descriptions are informational).
-            assert.deepEqual(actual.inputSchema, expected.inputSchema);
+            const expectedSchema =
+              expected.name === "crunchyroll_add_to_watchlist" ||
+              expected.name === "crunchyroll_remove_from_watchlist" ||
+              expected.name === "crunchyroll_update_playhead"
+                ? { ...(expected.inputSchema as Record<string, unknown>), additionalProperties: false }
+                : expected.inputSchema;
+            assert.deepEqual(actual.inputSchema, expectedSchema);
           }
         });
       });
@@ -92,30 +98,109 @@ describe("MCP server harness", () => {
         });
       });
 
-      test("authenticated calls fail compatibly when no tokens are saved", async () => {
+      // BT5 cutover: this used to characterize the LEGACY path, where an
+      // unmigrated content tool reached Node and failed on missing tokens.
+      // After the cutover the same call is refused locally, before any
+      // transport and long before any network.
+      // BT7 migrated the account reads and BT8 migrated the three mutations.
+      test("a migrated UPDATE mutation reaches the browser boundary", async () => {
         await withClient(target, async (client) => {
           const result = await client.sendRequest("tools/call", {
-            name: "crunchyroll_get_series",
-            arguments: { series_id: "GY8VEQ95Y" },
+            name: "crunchyroll_update_playhead",
+            arguments: { content_id: "GE00377909ENUS", playhead: 1 },
           });
           assert.equal(result.error, undefined, "unexpected MCP-level error");
           const content = (result.result as { content: { text: string }[] }).content[0].text;
-          // The server must surface an authentication failure rather than succeed or crash
-          assert.match(content, /not logged in|login|auth|session/i);
+          assert.match(content, /Not authenticated|browser/i);
+          assert.equal(/OPERATION_NOT_MIGRATED/.test(content), false, "UPDATE is migrated");
         });
       });
 
-      test("crunchyroll_login with deliberately invalid credentials fails in the currently expected way (characterization)", async () => {
-        // Characterization test for current behaviour (to be fixed in a later gate):
-        // the RPC layer reports success while the payload text contains success:false.
+      for (const [tool, args] of [
+        ["crunchyroll_get_categories", {}],
+        ["crunchyroll_search", { query: "frieren" }],
+        ["crunchyroll_get_series", { series_id: "GY8VEQ95Y" }],
+        ["crunchyroll_browse", {}],
+      ] as Array<[string, Record<string, unknown>]>) {
+        test(`${tool} routes to the browser transport, never to Node`, async () => {
+          await withClient(target, async (client) => {
+            const result = await client.sendRequest("tools/call", { name: tool, arguments: args });
+            assert.equal(result.error, undefined, "unexpected MCP-level error");
+            const content = (result.result as { content: { text: string }[] }).content[0].text;
+            // No browser and no session in the harness, so the honest outcome is
+            // a typed transport refusal — NOT a legacy "not logged in" from Node.
+            assert.match(content, /Not authenticated|browser/i);
+            assert.equal(/OPERATION_NOT_MIGRATED/.test(content), false, "it IS migrated");
+          });
+        });
+      }
+
+      // BT4 completion §8 — BREAKING: login is browser-interactive and accepts
+      // no arguments at all. The old characterization test (credentials in,
+      // success:false out) described the retired credential-consuming path.
+      test("crunchyroll_login publishes a closed schema that admits no credential", async () => {
+        await withClient(target, async (client) => {
+          const list = (await client.sendRequest("tools/list", {}))
+            .result as { tools: { name: string; inputSchema: Record<string, unknown>; description?: string }[] };
+          const login = list.tools.find((t) => t.name === "crunchyroll_login")!;
+          assert.deepEqual(login.inputSchema, {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+          });
+          assert.match(String(login.description), /browser/i);
+          for (const forbidden of ["email", "password", "username", "otp", "code", "token"]) {
+            assert.equal(
+              JSON.stringify(login.inputSchema).includes(forbidden),
+              false,
+              `the login schema must not mention ${forbidden}`
+            );
+          }
+        });
+      });
+
+      test("crunchyroll_login refuses supplied credentials instead of ignoring them", async () => {
+        // Fails closed on BOTH surfaces: the schema refuses them, and the
+        // handler refuses them again locally. No browser is opened, so this
+        // stays a deterministic offline assertion.
         await withClient(target, async (client) => {
           const result = await client.sendRequest("tools/call", {
             name: "crunchyroll_login",
             arguments: { email: INVALID_EMAIL, password: INVALID_PASSWORD },
           });
-          assert.equal(result.error, undefined, "current behaviour: RPC layer does not set isError");
-          const content = (result.result as { content: { text: string }[] }).content[0].text;
-          assert.match(content, /success.*false|"success": false|success: false/i);
+          assert.equal(result.error?.code, -32602, "an invalid-params error, not a silent ignore");
+          const rendered = JSON.stringify(result);
+          assert.equal(rendered.includes(INVALID_PASSWORD), false, "the password was echoed back");
+          assert.equal(rendered.includes(INVALID_EMAIL), false, "the email was echoed back");
+        });
+      });
+
+      test("crunchyroll_status reports the BT4 readiness contract", async () => {
+        await withClient(target, async (client) => {
+          const result = await client.sendRequest("tools/call", {
+            name: "crunchyroll_status",
+            arguments: {},
+          });
+          assert.equal(result.error, undefined, "unexpected MCP-level error");
+          const status = JSON.parse(
+            (result.result as { content: { text: string }[] }).content[0].text
+          ) as Record<string, unknown>;
+
+          assert.deepEqual(Object.keys(status).sort(), [
+            "auth_state",
+            "authenticated",
+            "browser_connected",
+            "browser_running",
+            "logged_in",
+            "player_ready",
+            "profile_ready",
+          ]);
+          // Removed by §10: unsourceable under browser login, or internal identity.
+          for (const removed of ["email", "account_id", "token_expires_at", "profile"]) {
+            assert.equal(removed in status, false, `${removed} must be gone from status`);
+          }
+          assert.equal(status.authenticated, status.logged_in);
+          assert.equal(status.player_ready, false, "BT4 owns no player");
         });
       });
 

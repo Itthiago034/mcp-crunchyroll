@@ -8,7 +8,11 @@ await build({
   format: "esm",
   outfile: "dist/index.js",
   banner: {
-    js: "#!/usr/bin/env node",
+    // The shebang must stay the first line. The createRequire bridge follows:
+    // bundled CommonJS dependencies (ws) require Node builtins, and an ESM
+    // bundle has no `require` of its own. Same policy as the dedicated
+    // websocket bundle smoke in test/transport-websocket.test.ts.
+    js: '#!/usr/bin/env node\nimport { createRequire } from "node:module";\nconst require = createRequire(import.meta.url);',
   },
   external: [],
   minify: false,

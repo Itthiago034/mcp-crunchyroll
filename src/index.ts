@@ -7,32 +7,64 @@ import {
   McpError,
 } from "@modelcontextprotocol/sdk/types.js";
 
+import { setLegacyAuthTransitionSink } from "./api.js";
+
+// BT4: the auth authority and its trusted producer. Composed here and nowhere
+// else — see the composition-root section below.
+import { createAuthContextAuthority } from "./transport/auth-context.js";
+import { createAuthProducer, createDefaultAuthProducerPorts } from "./transport/auth-producer.js";
+import { createAuthOrchestrator } from "./transport/auth-orchestrator.js";
+import { createBrowserAuthObserver, CRUNCHYROLL_LOGIN_URL } from "./transport/browser-auth.js";
 import {
-  login,
-  logout,
-  getStatus,
-  searchAnime,
-  getSeriesDetails,
-  getSeasons,
-  getEpisodes,
-  getEpisodeDetails,
-  getWatchlist,
-  addToWatchlist,
-  removeFromWatchlist,
-  getWatchHistory,
-  getPlayheads,
-  updatePlayhead,
-  getContinueWatching,
-  getRecommendations,
-  getSimilar,
-  getSimulcastSeasons,
-  browse,
-  getCategories,
-  getSubscription,
-} from "./api.js";
+  createBrowserSessionManager,
+  createRealBrowserSessionSeams,
+  type BrowserSessionManager,
+} from "./transport/browser-session-manager.js";
+import { browserProfileDir, resolveBrowserExecutable } from "./transport/browser-profile.js";
+import { DEFAULT_BROWSER_SESSION_CONFIG } from "./transport/browser-lifecycle-types.js";
+
+// BT5: the cutover. Content tools reach the browser transport through the
+// gateway, or they are refused — there is no other route from here.
+import { createOperationRegistry, PRODUCTION_OPERATIONS } from "./transport/operation-registry.js";
+import { createTransportDispatcher } from "./transport/dispatcher.js";
+import { createBrowserApiBackend } from "./transport/browser-api-backend.js";
+import { createContentGateway } from "./transport/content-gateway.js";
+import { installNodeCrunchyrollGuard } from "./transport/node-egress-guard.js";
 
 // B6-core: operation-scoped secret redaction (internal, not an MCP surface).
 import { withRedactionScope, safeErrorWithCleanStack, redactSecrets, sanitizeToolResult } from "./redact.js";
+// Gate B5: structured logout domain types from the storage layer.
+import type { LogoutResult } from "./api.js";
+
+// ── Gate B5: logout presentation at the MCP boundary ─────────────────────────
+//
+// The domain (clearAuthData) computes the LogoutResult — state, per-artifact
+// artifact states and reasons. This function is the ONLY place that turns
+// that result into a human message; messages never contain paths, raw
+// errors, stacks, or secret literals, and the CLEARED success message
+// wording is preserved verbatim from the pre-B5 contract.
+function formatLogoutResult(
+  result: LogoutResult
+): { success: boolean; state: string; tokens: { state: string; reason?: string }; session: { state: string; reason?: string }; message: string } {
+  const { state } = result;
+  let message: string;
+  if (state === "CLEARED") {
+    message = "Logged out successfully. Session tokens cleared.";
+  } else if (state === "ALREADY_ABSENT") {
+    message = "No session tokens found to clear.";
+  } else if (state === "PARTIAL") {
+    message = "Logged out partially. Some stored credentials could not be removed — check the per-artifact details for reasons.";
+  } else {
+    message = "Logout failed. No stored credentials were removed — check the per-artifact details for reasons.";
+  }
+  return {
+    success: state === "CLEARED" || state === "ALREADY_ABSENT",
+    state,
+    tokens: result.tokens,
+    session: result.session,
+    message,
+  };
+}
 
 // B6-FIX-1 (blocker B6-C2): closed list of tool argument fields whose values
 // are known-sensitive. Never register every argument — query/title/series_id
@@ -46,22 +78,140 @@ const server = new Server(
   { capabilities: { tools: {} } }
 );
 
+// ── BT4 composition root ─────────────────────────────────────────────────────
+//
+// This file is the ONLY place that constructs an auth authority, and it
+// constructs EXACTLY ONE per MCP process — never one per request or per tool.
+// The authority object itself never leaves this section: only the narrow
+// writer port crosses into the producer, so no other module can install
+// material, invalidate, mint a context or reach the reader side.
+//
+// BT5 derives the BT3 reader HERE, exactly once, and hands the port to the
+// transport backend — the only module that calls `bind()`/`runCurrent()`. The
+// authority object itself still never leaves this section.
+
+const authAuthority = createAuthContextAuthority();
+const authProducer = createAuthProducer(createDefaultAuthProducerPorts(authAuthority.asWriter()));
+
+/**
+ * The managed browser, built on first use.
+ *
+ * Construction resolves a real executable and can fail on a machine with no
+ * supported browser installed. That must not stop the server from starting and
+ * reporting an honest LOGIN_REQUIRED, so nothing is built until an interactive
+ * login actually asks for it.
+ */
+let browserSession: BrowserSessionManager | undefined;
+
+function managedBrowser(): BrowserSessionManager {
+  if (!browserSession) {
+    browserSession = createBrowserSessionManager(
+      {
+        ...DEFAULT_BROWSER_SESSION_CONFIG,
+        // The managed page opens directly on the FIXED login surface. It is a
+        // constant of this build: never a tool argument, never an environment
+        // variable, never assembled from a caller-supplied fragment.
+        initialPageUrl: CRUNCHYROLL_LOGIN_URL,
+        profileDir: browserProfileDir(),
+        executablePath: resolveBrowserExecutable(),
+      },
+      createRealBrowserSessionSeams(DEFAULT_BROWSER_SESSION_CONFIG.cdpCommandTimeoutMs)
+    );
+  }
+  return browserSession;
+}
+
+/**
+ * Auth orchestration: the login gate, the exclusive logout gate and the honest
+ * composite readiness report.
+ *
+ * The authority itself does not travel here either — the orchestrator receives
+ * a closure over the two SAFE diagnostics (availability and whether the record
+ * carries a profile id) and can neither read material nor commit one.
+ */
+const authOrchestrator = createAuthOrchestrator({
+  diagnostics: {
+    availability: () => authAuthority.diagnostics().availability,
+    hasProfileId: () => authAuthority.diagnostics().hasProfileId,
+  },
+  browser: {
+    lifecycleState: () => browserSession?.state(),
+    // BT4-R1: read-only connection identity, so material observed on a
+    // connection that has since been replaced can never be installed.
+    connectionGeneration: () => browserSession?.connectionGeneration(),
+    openLoginSurface: async () => {
+      const session = managedBrowser();
+      await session.start();
+      await session.ensureManagedPage();
+    },
+  },
+  producer: authProducer,
+  observer: createBrowserAuthObserver({
+    // The pattern is chosen by the observer module that owns the constant; the
+    // manager only opens the closed channel it is handed.
+    openInterception: (urlPattern) => managedBrowser().openResponseInterception(urlPattern),
+    now: () => Date.now(),
+    schedule: (callback, ms) => {
+      const timer = setTimeout(callback, ms);
+      // An observation deadline must never hold the process open by itself.
+      timer.unref?.();
+      return { cancel: () => clearTimeout(timer) };
+    },
+  }),
+});
+
+// ── BT5 cutover ──────────────────────────────────────────────────────────────
+//
+// The Node egress assertion is installed unconditionally, at composition, for
+// the life of the process: after the cutover Crunchyroll is reachable only from
+// the managed browser, and any Node-originated attempt fails closed before a
+// socket exists. It is scoped by destination host, so a loopback fixture or any
+// unrelated destination is untouched.
+installNodeCrunchyrollGuard();
+
+/**
+ * The content boundary: registry → dispatcher → browser transport.
+ *
+ * BT3's reader is the only auth surface that crosses. It snapshots the record
+ * once per operation, registers the bearer as a secret, and performs the final
+ * generation commit check itself — so a response obtained under a session that
+ * has since changed is discarded rather than returned.
+ */
+const contentGateway = (() => {
+  const registry = createOperationRegistry(PRODUCTION_OPERATIONS);
+  const backend = createBrowserApiBackend({
+    openChannel: () => managedBrowser().openApiExecutionChannel(),
+    reader: authAuthority.asReader(),
+  });
+  return createContentGateway(createTransportDispatcher(registry, backend), registry);
+})();
+
+// BT4-D2: the legacy refresh path notifies us on a semantic invalid_grant so
+// the LIVE authority is invalidated BEFORE `clearAuthData()` runs. The sink is
+// synchronous, holds no state, and never re-enters the legacy module.
+setLegacyAuthTransitionSink({
+  onInvalidGrant: () => {
+    authProducer.invalidateForInvalidGrant();
+    // The provider said this session must be re-established. That is a REASON,
+    // recorded separately from availability, so status can distinguish "never
+    // logged in" from "log in again".
+    authOrchestrator.signalReauthRequired();
+  },
+});
+
 // ── Tool Definitions ──────────────────────────────────────────────────────────
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     // Auth
     {
+      // BT4 completion §8 — BREAKING: no credential arguments of any kind.
+      // The human types into Crunchyroll's own page in the managed browser;
+      // this server never receives an email, password, code or cookie.
       name: "crunchyroll_login",
-      description: "Log in to Crunchyroll with email and password. Tokens are saved locally for future requests.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          email: { type: "string", description: "Crunchyroll account email" },
-          password: { type: "string", description: "Crunchyroll account password" },
-        },
-        required: ["email", "password"],
-      },
+      description:
+        "Log in to Crunchyroll interactively in the managed browser. Takes no arguments: you type your credentials into Crunchyroll's own page, and this server never receives them.",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
     },
     {
       name: "crunchyroll_logout",
@@ -70,7 +220,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "crunchyroll_status",
-      description: "Check current Crunchyroll login status and account info.",
+      description:
+        "Report current Crunchyroll readiness: whether authenticated work is permitted, the browser lifecycle, and the auth state.",
       inputSchema: { type: "object", properties: {} },
     },
 
@@ -154,23 +305,37 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "crunchyroll_add_to_watchlist",
       description: "Add an anime series or movie to the watchlist.",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
       inputSchema: {
         type: "object",
         properties: {
           content_id: { type: "string", description: "Series or movie ID to add" },
         },
         required: ["content_id"],
+        additionalProperties: false,
       },
     },
     {
       name: "crunchyroll_remove_from_watchlist",
       description: "Remove an anime series or movie from the watchlist.",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
       inputSchema: {
         type: "object",
         properties: {
           content_id: { type: "string", description: "Series or movie ID to remove" },
         },
         required: ["content_id"],
+        additionalProperties: false,
       },
     },
 
@@ -213,6 +378,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "crunchyroll_update_playhead",
       description: "Update watch progress for an episode or movie.",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
       inputSchema: {
         type: "object",
         properties: {
@@ -220,6 +391,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           playhead: { type: "number", description: "Position in seconds" },
         },
         required: ["content_id", "playhead"],
+        additionalProperties: false,
       },
     },
 
@@ -308,11 +480,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   return withRedactionScope(async (scope) => {
     const { name, arguments: args = {} } = request.params;
 
-    // B6-core: register the raw credentials received by the login handler.
-    // They must not survive in any error path that crosses the MCP boundary.
-    // Empty/whitespace values are rejected by registerSecret by design.
+    // B6: anything credential-shaped that arrives at the login tool is still
+    // registered before it can reach an error path — the tool now REFUSES such
+    // input (§8), and a refused credential must not leak on the way out either.
     if (name === "crunchyroll_login") {
-      scope.registerSecret(String(args.password ?? ""), String(args.email ?? ""));
+      scope.registerSecret(
+        ...Object.values(args as Record<string, unknown>)
+          .filter((value): value is string => typeof value === "string" && value.length > 0)
+      );
     }
 
     // B6-FIX-1 (blocker B6-C2): register known-sensitive argument fields for
@@ -333,231 +508,71 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // McpError throws from the switch (default case) propagate untouched to
       // the catch — ErrorCode and MethodNotFound semantics are preserved.
       const result = await (async () => {
+        // ── BT5 cutover boundary ────────────────────────────────────────────
+        //
+        // Every content tool is decided HERE, once, before any handler runs.
+        // A migrated operation goes to the browser transport; an unmigrated one
+        // is refused with OPERATION_NOT_MIGRATED. Neither outcome can reach the
+        // legacy Node client, because this boundary is the only route left and
+        // it has no legacy branch.
+        if (contentGateway.isContentTool(name)) {
+          const payload = await contentGateway.callTool(name, args as Record<string, unknown>);
+          return {
+            content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
+          };
+        }
+
         switch (name) {
         // ── Auth ──────────────────────────────────────────────────────────────
         case "crunchyroll_login": {
-          const result = await login(args.email as string, args.password as string);
-        return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        };
+          // Fails closed on BOTH surfaces: the published schema admits no
+          // property, and any supplied argument is refused here with a typed
+          // error rather than silently ignored. The refusal names no key and
+          // echoes no value.
+          if (Object.keys(args as Record<string, unknown>).length > 0) {
+            throw new McpError(
+              ErrorCode.InvalidParams,
+              "crunchyroll_login takes no arguments. Login is interactive: type your credentials into the Crunchyroll page in the managed browser. This server never accepts or stores them."
+            );
+          }
+          const outcome = await authOrchestrator.login();
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({ accepted: outcome.accepted, ...outcome.readiness }, null, 2),
+              },
+            ],
+          };
       }
 
       case "crunchyroll_logout": {
-        await logout();
+        // BT4: the exclusive logout gate holds for the whole transaction, the
+        // live authority is invalidated BEFORE any filesystem work, and the
+        // structured LogoutResult is passed through verbatim — the public
+        // output contract is unchanged (the four-axis result is BT8's).
+        const logoutResult = (await authOrchestrator.logout()).persistence as LogoutResult;
+        const presentation = formatLogoutResult(logoutResult);
         return {
-          content: [{ type: "text", text: "Logged out successfully. Session tokens cleared." }],
+          content: [{ type: "text", text: JSON.stringify(presentation) }],
         };
       }
 
       case "crunchyroll_status": {
-        const status = await getStatus();
+        // Strictly read-only (§10): it never logs in, refreshes, mints,
+        // commits, invalidates, mutates storage, navigates or reopens a
+        // browser. It reports current known readiness and nothing else.
+        const status = authOrchestrator.readiness();
         return {
           content: [{ type: "text", text: JSON.stringify(status, null, 2) }],
         };
       }
 
-      // ── Search ────────────────────────────────────────────────────────────
-      case "crunchyroll_search": {
-        const results = await searchAnime(args.query as string, {
-          type: args.type as "series" | "movie_listing" | "" | undefined,
-          n: args.n as number | undefined,
-        });
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ count: results.length, results }, null, 2),
-            },
-          ],
-        };
-      }
-
-      // ── Series ────────────────────────────────────────────────────────────
-      case "crunchyroll_get_series": {
-        const series = await getSeriesDetails(args.series_id as string);
-        return {
-          content: [{ type: "text", text: JSON.stringify(series, null, 2) }],
-        };
-      }
-
-      case "crunchyroll_get_seasons": {
-        const seasons = await getSeasons(args.series_id as string);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ count: seasons.length, seasons }, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "crunchyroll_get_episodes": {
-        const episodes = await getEpisodes(args.season_id as string);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ count: episodes.length, episodes }, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "crunchyroll_get_episode": {
-        const episode = await getEpisodeDetails(args.episode_id as string);
-        return {
-          content: [{ type: "text", text: JSON.stringify(episode, null, 2) }],
-        };
-      }
-
-      // ── Watchlist ─────────────────────────────────────────────────────────
-      case "crunchyroll_get_watchlist": {
-        const items = await getWatchlist({
-          n: args.n as number | undefined,
-          order: args.order as "desc" | "asc" | undefined,
-        });
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ count: items.length, items }, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "crunchyroll_add_to_watchlist": {
-        const result = await addToWatchlist(args.content_id as string);
-        return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        };
-      }
-
-      case "crunchyroll_remove_from_watchlist": {
-        const result = await removeFromWatchlist(args.content_id as string);
-        return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        };
-      }
-
-      // ── History & Progress ────────────────────────────────────────────────
-      case "crunchyroll_get_history": {
-        const items = await getWatchHistory({ n: args.n as number | undefined });
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ count: items.length, items }, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "crunchyroll_continue_watching": {
-        const items = await getContinueWatching({ n: args.n as number | undefined });
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ count: items.length, items }, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "crunchyroll_get_playheads": {
-        const data = await getPlayheads(args.content_ids as string[]);
-        return {
-          content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-        };
-      }
-
-      case "crunchyroll_update_playhead": {
-        const result = await updatePlayhead(args.content_id as string, args.playhead as number);
-        return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        };
-      }
-
-      // ── Recommendations ───────────────────────────────────────────────────
-      case "crunchyroll_get_recommendations": {
-        const recs = await getRecommendations({ n: args.n as number | undefined });
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ count: recs.length, recommendations: recs }, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "crunchyroll_get_similar": {
-        const recs = await getSimilar(args.series_id as string, { n: args.n as number | undefined });
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ count: recs.length, similar: recs }, null, 2),
-            },
-          ],
-        };
-      }
-
-      // ── Simulcast ─────────────────────────────────────────────────────────
-      case "crunchyroll_get_simulcast_seasons": {
-        const seasons = await getSimulcastSeasons();
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ count: seasons.length, seasons }, null, 2),
-            },
-          ],
-        };
-      }
-
-      // ── Browse ────────────────────────────────────────────────────────────
-      case "crunchyroll_browse": {
-        const items = await browse({
-          sort_by: args.sort_by as "popularity" | "newly_added" | "updated" | "alphabetical" | undefined,
-          categories: args.categories as string | undefined,
-          seasonal_tag: args.seasonal_tag as string | undefined,
-          is_subbed: args.is_subbed as boolean | undefined,
-          is_dubbed: args.is_dubbed as boolean | undefined,
-          n: args.n as number | undefined,
-          start: args.start as number | undefined,
-        });
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ count: items.length, items }, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "crunchyroll_get_categories": {
-        const cats = await getCategories();
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ count: cats.length, categories: cats }, null, 2),
-            },
-          ],
-        };
-      }
-
-      // ── Subscription ──────────────────────────────────────────────────────
-      case "crunchyroll_get_subscription": {
-        const sub = await getSubscription();
-        return {
-          content: [{ type: "text", text: JSON.stringify(sub, null, 2) }],
-        };
-      }
+        // ── Content ─────────────────────────────────────────────────────────
+        // BT5 cutover: every content tool is decided by the gateway BEFORE
+        // this switch is reached, so no content case exists here any more and
+        // no content path can reach the legacy Node client. See the
+        // composition root's content boundary above.
 
         default:
           throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
@@ -608,8 +623,56 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 
+/**
+ * BT4: invalidate the live authority before asynchronous teardown.
+ *
+ * This is the existing teardown seam — no process manager is invented for it.
+ * Shutting down is not logging out: persisted credentials are deliberately left
+ * alone, only the process-local authority is dropped.
+ */
+function installShutdownInvalidation(): void {
+  let shuttingDown = false;
+  const shutdown = (signal: NodeJS.Signals) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    try {
+      authProducer.invalidateForShutdown();
+    } catch {
+      // a terminal authority is already unavailable; never block teardown
+    }
+    process.exit(signal === "SIGINT" ? 130 : 143);
+  };
+  process.once("SIGINT", () => shutdown("SIGINT"));
+  process.once("SIGTERM", () => shutdown("SIGTERM"));
+}
+
 async function main() {
+  installShutdownInvalidation();
+
+  // BT4 startup bootstrap: hardened storage is loaded and validated OUTSIDE the
+  // authority and installed through an explicit ESTABLISH compare-and-swap.
+  // Nothing is trusted merely because a file exists, and every non-installing
+  // outcome leaves the process unavailable rather than pretending otherwise.
+  // It never throws: a broken store must not stop the server from starting and
+  // reporting an honest LOGIN_REQUIRED.
+  try {
+    await authProducer.bootstrapFromStorage();
+  } catch {
+    // fail closed and stay unavailable
+  }
+
   const transport = new StdioServerTransport();
+  // The stdio close path is the other teardown seam (§11): when the client
+  // goes away, the process-local authority is dropped BEFORE the SDK's own
+  // asynchronous teardown — the SDK chains this handler ahead of its own.
+  // Closing is not logging out: persisted credentials are left alone.
+  transport.onclose = () => {
+    try {
+      authProducer.invalidateForShutdown();
+    } catch {
+      // a terminal authority is already unavailable; never block teardown
+    }
+  };
   await server.connect(transport);
   console.error("Crunchyroll MCP server running on stdio");
 }

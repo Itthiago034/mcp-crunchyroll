@@ -8,7 +8,12 @@ import {
   clearAuthData,
   hasSavedTokens,
   isTokenExpired,
+  type LogoutResult,
 } from "./auth.js";
+
+// Gate B5: re-export the structured logout domain type so the MCP boundary
+// (src/index.ts) can reference it without widening the runtime surface.
+export type { LogoutResult };
 
 // B6-core: redaction of upstream error bodies before they become Error
 // messages that can cross the MCP boundary.
@@ -352,6 +357,42 @@ export function classifyRefreshResponse(status: number, body: unknown): RefreshE
  */
 let refreshInFlight: Promise<TokenData> | undefined;
 
+// ── BT4 — live auth transition sink ─────────────────────────────────────────
+
+/**
+ * A narrow, synchronous notification the composition root registers so the live
+ * invalid_grant path can invalidate the auth authority BEFORE any persistence
+ * cleanup begins (BT4 completion errata §4).
+ *
+ * It holds no auth state, no authority reference and no storage knowledge — it
+ * is a one-way edge out of this module. `clearAuthData()` remains the single,
+ * unduplicated owner of secure clearing.
+ */
+export interface LegacyAuthTransitionSink {
+  onInvalidGrant(): void;
+}
+
+let authTransitionSink: LegacyAuthTransitionSink | undefined;
+
+export function setLegacyAuthTransitionSink(sink: LegacyAuthTransitionSink | undefined): void {
+  authTransitionSink = sink;
+}
+
+/**
+ * Notify the sink, never letting its failure become an outward error of its
+ * own: a broken listener must not change the classification the provider gave
+ * us, and must not stop the cleanup that follows.
+ */
+function notifyInvalidGrant(): void {
+  const sink = authTransitionSink;
+  if (!sink) return;
+  try {
+    sink.onInvalidGrant();
+  } catch {
+    // deliberately swallowed — see above
+  }
+}
+
 /**
  * Internal refresh-specific token path (Architecture B). Generic
  * request() is NOT used here: refresh classification requires local
@@ -416,6 +457,9 @@ async function refreshOperation(oldTokens: TokenData): Promise<TokenData> {
   }
   if (classified) {
     if (classified.kind === "REAUTH_REQUIRED") {
+      // BT4: the LIVE authority is invalidated FIRST, synchronously, so a slow
+      // or failing filesystem clear can never leave an old context usable.
+      notifyInvalidGrant();
       // Semantic invalid_grant: do not save the response, do not return the
       // old access token, attempt local clear (best-effort, unchanged B2/B3
       // semantics), throw, no retry.
@@ -528,8 +572,11 @@ export async function login(email: string, password: string): Promise<{ success:
   }
 }
 
-export async function logout(): Promise<void> {
-  await clearAuthData();
+export async function logout(): Promise<LogoutResult> {
+  // B5: passthrough — clearAuthData() is the single source of truth for the
+  // logout domain result. logout() must NOT recalculate state, translate
+  // states, or own a second outcome matrix.
+  return clearAuthData();
 }
 
 export async function getStatus(): Promise<{
@@ -575,278 +622,53 @@ async function getValidToken(): Promise<{ token: string; account_id: string }> {
 
 // ── Search ────────────────────────────────────────────────────────────────────
 
-interface SearchResult {
-  items: Array<{
-    type: string;
-    count: number;
-    items: Array<{ type: string; id: string; series_meta?: CrunchyrollSeries; movie_listing_meta?: CrunchyrollMovie }>;
-  }>;
-}
+// ── LIVE-COMPAT-01 — discover item metadata shape ───────────────────────────
+//
+// Discover responses (search / browse) have been observed in two shapes:
+//
+//   legacy: { id, type, series_meta: { title, description, series_launch_year } }
+//   live:   { id, type, title, description, series_metadata: { series_launch_year } }
+//
+// In the live shape the title/description live at the ITEM level and only the
+// series-specific extras stay nested. Reading them exclusively from the nested
+// object drops every live item in search (the `if (meta)` guard) and degrades
+// browse titles to the raw id. Both shapes are normalized in ONE place so the
+// drift stays observable here and nowhere else.
 
-export async function searchAnime(
-  query: string,
-  options: { type?: "series" | "movie_listing" | ""; n?: number; locale?: string } = {}
-): Promise<Array<{ type: string; id: string; title: string; description: string }>> {
-  const { token } = await getValidToken();
-  const params = new URLSearchParams({
-    q: query,
-    n: String(options.n ?? 20),
-    locale: options.locale ?? DEFAULT_LOCALE,
-    ...(options.type ? { type: options.type } : {}),
-  });
 
-  const data = await request<{ data: SearchResult["items"] }>(
-    `${API_BASE}/content/v2/discover/search?${params}`,
-    { token }
-  );
 
-  const results: Array<{ type: string; id: string; title: string; description: string }> = [];
-  for (const group of data.data ?? []) {
-    for (const item of group.items ?? []) {
-      const meta = item.series_meta ?? item.movie_listing_meta;
-      if (meta) {
-        results.push({
-          type: item.type,
-          id: item.id,
-          title: meta.title,
-          description: meta.description?.slice(0, 300) ?? "",
-        });
-      }
-    }
-  }
-  return results;
-}
+/**
+ * Resolve title/description/series extras from whichever shape the item uses.
+ * Legacy nested metadata wins when present; otherwise the item-level fields
+ * (live shape) are used. An unrecognized shape yields an empty view, which
+ * callers handle exactly as they already handled missing metadata.
+ */
+
+
 
 // ── Series / Movies ───────────────────────────────────────────────────────────
 
-export async function getSeriesDetails(seriesId: string): Promise<CrunchyrollSeries> {
-  const { token } = await getValidToken();
-  const params = new URLSearchParams({ locale: DEFAULT_LOCALE });
-  const data = await request<{ data: CrunchyrollSeries[] }>(
-    `${API_BASE}/content/v2/cms/series/${seriesId}?${params}`,
-    { token }
-  );
-  if (!data.data?.[0]) throw new Error(`Series ${seriesId} not found`);
-  return data.data[0];
-}
 
-export async function getSeasons(seriesId: string): Promise<CrunchyrollSeason[]> {
-  const { token } = await getValidToken();
-  const params = new URLSearchParams({ locale: DEFAULT_LOCALE, series_id: seriesId });
-  const data = await request<{ data: CrunchyrollSeason[] }>(
-    `${API_BASE}/content/v2/cms/series/${seriesId}/seasons?${params}`,
-    { token }
-  );
-  return data.data ?? [];
-}
 
-export async function getEpisodes(seasonId: string): Promise<CrunchyrollEpisode[]> {
-  const { token } = await getValidToken();
-  const params = new URLSearchParams({ locale: DEFAULT_LOCALE });
-  const data = await request<{ data: CrunchyrollEpisode[] }>(
-    `${API_BASE}/content/v2/cms/seasons/${seasonId}/episodes?${params}`,
-    { token }
-  );
-  return data.data ?? [];
-}
 
-export async function getEpisodeDetails(episodeId: string): Promise<CrunchyrollEpisode> {
-  const { token } = await getValidToken();
-  const params = new URLSearchParams({ locale: DEFAULT_LOCALE });
-  const data = await request<{ data: CrunchyrollEpisode[] }>(
-    `${API_BASE}/content/v2/cms/episodes/${episodeId}?${params}`,
-    { token }
-  );
-  if (!data.data?.[0]) throw new Error(`Episode ${episodeId} not found`);
-  return data.data[0];
-}
-
-// ── Watchlist ─────────────────────────────────────────────────────────────────
-
-export async function getWatchlist(options: { n?: number; order?: "desc" | "asc" } = {}): Promise<WatchlistItem[]> {
-  const { token, account_id } = await getValidToken();
-  const params = new URLSearchParams({
-    n: String(options.n ?? 20),
-    order: options.order ?? "desc",
-    locale: DEFAULT_LOCALE,
-  });
-  const data = await request<{ data: WatchlistItem[] }>(
-    `${API_BASE}/content/v2/${account_id}/watchlist?${params}`,
-    { token }
-  );
-  return data.data ?? [];
-}
-
-export async function addToWatchlist(contentId: string): Promise<{ success: boolean; message: string }> {
-  const { token, account_id } = await getValidToken();
-  await request(`${API_BASE}/content/v2/${account_id}/watchlist/${contentId}`, {
-    method: "POST",
-    token,
-    body: JSON.stringify({}),
-  });
-  return { success: true, message: `Added ${contentId} to watchlist` };
-}
-
-export async function removeFromWatchlist(contentId: string): Promise<{ success: boolean; message: string }> {
-  const { token, account_id } = await getValidToken();
-  await request(`${API_BASE}/content/v2/${account_id}/watchlist/${contentId}`, {
-    method: "DELETE",
-    token,
-    headers: { "Content-Type": "application/json" },
-  });
-  return { success: true, message: `Removed ${contentId} from watchlist` };
-}
 
 // ── Watch History & Progress ──────────────────────────────────────────────────
 
-export async function getWatchHistory(options: { n?: number; locale?: string } = {}): Promise<HistoryItem[]> {
-  const { token, account_id } = await getValidToken();
-  const params = new URLSearchParams({
-    n: String(options.n ?? 20),
-    locale: options.locale ?? DEFAULT_LOCALE,
-  });
-  const data = await request<{ data: HistoryItem[] }>(
-    `${API_BASE}/content/v2/${account_id}/watch-history?${params}`,
-    { token }
-  );
-  return data.data ?? [];
-}
 
-export async function getPlayheads(contentIds: string[]): Promise<PlayheadData[]> {
-  const { token, account_id } = await getValidToken();
-  const params = new URLSearchParams();
-  contentIds.forEach((id) => params.append("content_ids[]", id));
-  const data = await request<{ data: PlayheadData[] }>(
-    `${API_BASE}/content/v2/${account_id}/playheads?${params}`,
-    { token }
-  );
-  return data.data ?? [];
-}
-
-export async function updatePlayhead(
-  contentId: string,
-  playhead: number
-): Promise<{ success: boolean; message: string }> {
-  const { token, account_id } = await getValidToken();
-  await request(`${API_BASE}/content/v2/${account_id}/playheads`, {
-    method: "POST",
-    token,
-    body: JSON.stringify({ content_id: contentId, playhead }),
-  });
-  return { success: true, message: `Updated playhead for ${contentId} to ${playhead}s` };
-}
-
-export async function getContinueWatching(options: { n?: number } = {}): Promise<WatchlistItem[]> {
-  const { token, account_id } = await getValidToken();
-  const params = new URLSearchParams({
-    n: String(options.n ?? 10),
-    locale: DEFAULT_LOCALE,
-  });
-  const data = await request<{ data: WatchlistItem[] }>(
-    `${API_BASE}/content/v2/${account_id}/continue_watching?${params}`,
-    { token }
-  );
-  return data.data ?? [];
-}
 
 // ── Recommendations ───────────────────────────────────────────────────────────
 
-export async function getRecommendations(options: { n?: number } = {}): Promise<Recommendation[]> {
-  const { token, account_id } = await getValidToken();
-  const params = new URLSearchParams({
-    n: String(options.n ?? 20),
-    locale: DEFAULT_LOCALE,
-  });
-  const data = await request<{ data: Recommendation[] }>(
-    `${API_BASE}/content/v2/discover/${account_id}/recommendations?${params}`,
-    { token }
-  );
-  return data.data ?? [];
-}
 
-export async function getSimilar(seriesId: string, options: { n?: number } = {}): Promise<Recommendation[]> {
-  const { token, account_id } = await getValidToken();
-  const params = new URLSearchParams({
-    n: String(options.n ?? 20),
-    locale: DEFAULT_LOCALE,
-  });
-  const data = await request<{ data: Recommendation[] }>(
-    `${API_BASE}/content/v2/discover/${account_id}/similar_to/${seriesId}?${params}`,
-    { token }
-  );
-  return data.data ?? [];
-}
 
 // ── Simulcast / Browse ────────────────────────────────────────────────────────
 
-export async function getSimulcastSeasons(): Promise<SimulcastSeason[]> {
-  const { token } = await getValidToken();
-  const params = new URLSearchParams({ locale: DEFAULT_LOCALE });
-  const data = await request<{ data: SimulcastSeason[] }>(
-    `${API_BASE}/content/v2/discover/seasonal_tags?${params}`,
-    { token }
-  );
-  return data.data ?? [];
-}
 
-interface BrowseOptions {
-  sort_by?: "popularity" | "newly_added" | "updated" | "alphabetical";
-  categories?: string;
-  seasonal_tag?: string;
-  is_subbed?: boolean;
-  is_dubbed?: boolean;
-  n?: number;
-  start?: number;
-  locale?: string;
-}
 
-export interface BrowseItem {
-  id: string;
-  title: string;
-  type: string;
-  description?: string;
-  series_launch_year?: number;
-}
 
-export async function browse(options: BrowseOptions = {}): Promise<BrowseItem[]> {
-  const { token } = await getValidToken();
-  const params = new URLSearchParams({
-    n: String(options.n ?? 20),
-    start: String(options.start ?? 0),
-    locale: options.locale ?? DEFAULT_LOCALE,
-    ...(options.sort_by ? { sort_by: options.sort_by } : {}),
-    ...(options.categories ? { categories: options.categories } : {}),
-    ...(options.seasonal_tag ? { seasonal_tag: options.seasonal_tag } : {}),
-    ...(options.is_subbed !== undefined ? { is_subbed: String(options.is_subbed) } : {}),
-    ...(options.is_dubbed !== undefined ? { is_dubbed: String(options.is_dubbed) } : {}),
-  });
 
-  const data = await request<{ data: Array<{ type: string; id: string; series_meta?: CrunchyrollSeries; movie_listing_meta?: CrunchyrollMovie }> }>(
-    `${API_BASE}/content/v2/discover/browse?${params}`,
-    { token }
-  );
-
-  return (data.data ?? []).map((item) => {
-    const meta = item.series_meta ?? item.movie_listing_meta;
-    return {
-      id: item.id,
-      title: meta?.title ?? item.id,
-      type: item.type,
-      description: meta?.description?.slice(0, 300) ?? "",
-      series_launch_year: (meta as CrunchyrollSeries)?.series_launch_year,
-    };
-  });
-}
-
-export async function getCategories(): Promise<Array<{ id: string; localization: { title: string } }>> {
-  const { token } = await getValidToken();
-  const params = new URLSearchParams({ locale: DEFAULT_LOCALE });
-  const data = await request<{ data: Array<{ id: string; localization: { title: string } }> }>(
-    `${API_BASE}/content/v2/discover/categories?${params}`,
-    { token }
-  );
-  return data.data ?? [];
-}
+// BT5: getCategories moved to the Operation Registry (GET_CATEGORIES) and the
+// browser transport. Its path literal left this module in the same commit the
+// descriptor entered the registry — never copy-first, remove-later.
 
 // ── Subscription ──────────────────────────────────────────────────────────────
 
