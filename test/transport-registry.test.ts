@@ -96,6 +96,7 @@ describe("BT1 registry — construction and lookup", () => {
         "GET_SIMILAR",
         "GET_SIMULCAST_SEASONS",
         "GET_WATCHLIST",
+        "REMOVE_FROM_WATCHLIST",
         "SEARCH",
       ],
       "BT5 categories; BT6 the public catalog reads; BT7 the account reads, " +

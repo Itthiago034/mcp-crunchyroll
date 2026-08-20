@@ -85,14 +85,14 @@ describe("BT6 — the production table after the catalog migration", () => {
     }
   });
 
-  test("no mutation and no deferred operation slipped in", () => {
+  test("no unadopted mutation or deferred operation slipped in", () => {
     // RETIRED AT BT7 for the six account READS, which are now legitimately
-    // migrated. Mutations and the deferred subscription must still be absent.
-    for (const forbidden of ["GET_SUBSCRIPTION", "REMOVE_FROM_WATCHLIST", "UPDATE_PLAYHEAD"]) {
+    // migrated. The deferred subscription and BT8.4's UPDATE must stay absent.
+    for (const forbidden of ["GET_SUBSCRIPTION", "UPDATE_PLAYHEAD"]) {
       assert.equal(
         PRODUCTION_OPERATIONS.some((d) => String(d.id) === forbidden),
         false,
-        `${forbidden} must not be migrated at BT6`
+        `${forbidden} must not be migrated before its owning stage`
       );
     }
   });
@@ -144,7 +144,7 @@ describe("BT6 — transport knowledge moved, not copied", () => {
     // RETIRED AT BT7: BT7 moved the account READS. What remains true is that
     // BT6 did not touch the mutations or the deferred operation.
     const api = readFileSync(join(SRC, "api.ts"), "utf-8");
-    assert.match(api, /export async function removeFromWatchlist\b/);
+    assert.equal(/export async function removeFromWatchlist\b/.test(api), false, "REMOVE owner migrated at BT8.3");
     assert.match(api, /export async function updatePlayhead\b/);
     assert.match(api, /export async function getSubscription\b/);
   });
@@ -359,12 +359,11 @@ describe("BT6 — every migrated tool routes to the browser transport", () => {
 
 // ── The account boundary does not move ──────────────────────────────────────
 
-describe("BT6 — account reads and mutations stay refused", () => {
+describe("BT6 — deferred operations and unadopted mutations stay refused", () => {
   // RETIRED AT BT7 for the six account reads. The representatives are now the
   // deferred operation and the BT8 mutations.
   for (const [tool, args] of [
     ["crunchyroll_get_subscription", {}],
-    ["crunchyroll_remove_from_watchlist", { content_id: "A" }],
     ["crunchyroll_update_playhead", { content_id: "A", playhead: 1 }],
   ] as Array<[string, Record<string, unknown>]>) {
     test(`${tool} is still OPERATION_NOT_MIGRATED, with zero transport calls`, async () => {

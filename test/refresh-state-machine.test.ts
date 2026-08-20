@@ -906,10 +906,14 @@ describe("B4-FIX-1-C1 — refreshed identity used by a real public consumer", ()
           )
         );
       }
-      // The remaining legacy public consumer `removeFromWatchlist()` issues one authenticated
-      // DELETE to the account watchlist URL after the refresh; anything else
+      // The remaining legacy public consumer `updatePlayhead()` issues one authenticated
+      // POST to the account playheads URL after the refresh; anything else
       // is unexpected in this synthetic setup.
-      if (String(input).startsWith(`${API_BASE_URL}/content/v2/${newAccountId}/watchlist/`) && init?.method === "DELETE") {
+      if (
+        String(input) === `${API_BASE_URL}/content/v2/${newAccountId}/playheads` &&
+        init?.method === "POST" &&
+        init.body === JSON.stringify({ content_id: "GMWHE5QWY", playhead: 42 })
+      ) {
         return Promise.resolve(new Response("{}", { status: 200 }));
       }
       assert.fail(`unexpected fetch: ${input}`);
@@ -918,11 +922,11 @@ describe("B4-FIX-1-C1 — refreshed identity used by a real public consumer", ()
     try {
       // getStatus() reads the persisted identity but does NOT trigger a
       // refresh by itself — exercising the refresh requires a real consumer
-      // that needs a valid token. removeFromWatchlist() is a public consumer that
+      // that needs a valid token. updatePlayhead() is a public consumer that
       // goes through getValidToken(), which issues the refresh for the
       // expired fixture above and then persists the refreshed identity.
-      const { removeFromWatchlist, getStatus } = await import("../src/api.js");
-      await removeFromWatchlist("GMWHE5QWY");
+      const { updatePlayhead, getStatus } = await import("../src/api.js");
+      await updatePlayhead("GMWHE5QWY", 42);
       assert.ok(refreshSeen, "the refresh HTTP request must have been made");
 
       // Now getStatus() — a second, separate public consumer — must report
@@ -943,7 +947,7 @@ describe("B4-FIX-1-C1 — refreshed identity used by a real public consumer", ()
   });
 
   test("getValidToken() refresh path returns the refreshed access_token AND the refreshed account_id together", async () => {
-    // Regression proof via the remaining legacy public consumer removeFromWatchlist(): its
+    // Regression proof via the remaining legacy public consumer updatePlayhead(): its
     // outgoing URL embeds the account_id returned by getValidToken().
     const originalFetch = globalThis.fetch;
     const prevHome = process.env.HOME;
@@ -967,7 +971,11 @@ describe("B4-FIX-1-C1 — refreshed identity used by a real public consumer", ()
           )
         );
       }
-      if (String(input).includes(`/content/v2/`) && init?.method === "DELETE") {
+      if (
+        String(input) === `${API_BASE_URL}/content/v2/${newAccountId}/playheads` &&
+        init?.method === "POST" &&
+        init.body === JSON.stringify({ content_id: "GMWHE5QWY", playhead: 42 })
+      ) {
         watchlistUrl = String(input);
         return Promise.resolve(new Response("{}", { status: 200 }));
       }
@@ -975,12 +983,12 @@ describe("B4-FIX-1-C1 — refreshed identity used by a real public consumer", ()
     });
 
     try {
-      const { removeFromWatchlist } = await import("../src/api.js");
-      await removeFromWatchlist("GMWHE5QWY");
-      assert.ok(watchlistUrl, "removeFromWatchlist must have issued its HTTP request");
+      const { updatePlayhead } = await import("../src/api.js");
+      await updatePlayhead("GMWHE5QWY", 42);
+      assert.ok(watchlistUrl, "updatePlayhead must have issued its HTTP request");
       assert.ok(
-        watchlistUrl!.includes(`/content/v2/${newAccountId}/watchlist/GMWHE5QWY`),
-        `watchlist URL must embed the REFRESHED account_id ${newAccountId}, got ${watchlistUrl}`
+        watchlistUrl!.includes(`/content/v2/${newAccountId}/playheads`),
+        `playhead URL must embed the REFRESHED account_id ${newAccountId}, got ${watchlistUrl}`
       );
       assert.ok(!watchlistUrl!.includes(oldAccountId), "the STALE account_id must not appear in the URL");
     } finally {

@@ -4,8 +4,8 @@
 // reader, a fake execution channel, synthetic descriptors, no browser, no
 // network, no credentials, no provider.
 //
-// BT8.2 registers only ADD_TO_WATCHLIST. REMOVE_FROM_WATCHLIST and
-// UPDATE_PLAYHEAD stay absent and refused, which is asserted below.
+// BT8.3 registers ADD_TO_WATCHLIST and REMOVE_FROM_WATCHLIST. UPDATE_PLAYHEAD
+// stays absent and refused, which is asserted below.
 //
 // Frozen design: CRUNCHYROLL-BT8-MUTATIONS-DESIGN.md §12 (registry evolution),
 // §13 (body ownership), §14 (response model), §18 (browser boundary).
@@ -54,10 +54,9 @@ const SRC = join(REPO_ROOT, "src");
 const ACCOUNT_SENTINEL = "SYNTHETIC-ACCOUNT-ID-BT8";
 const BEARER_SENTINEL = "SYNTHETIC-BEARER-BT8-MUST-NOT-LEAK";
 
-/** The mutations still intentionally absent after BT8.2. */
-const UNMIGRATED_MUTATIONS = ["REMOVE_FROM_WATCHLIST", "UPDATE_PLAYHEAD"];
+/** The mutation intentionally absent after BT8.3. */
+const UNMIGRATED_MUTATIONS = ["UPDATE_PLAYHEAD"];
 const REAL_MUTATION_TOOLS: Array<[string, Record<string, unknown>]> = [
-  ["crunchyroll_remove_from_watchlist", { content_id: "GY8VEQ95Y" }],
   ["crunchyroll_update_playhead", { content_id: "GE00377909ENUS", playhead: 42 }],
 ];
 
@@ -357,10 +356,10 @@ describe("BT8.1 — mutation and method are closed at construction", () => {
 
 // ── The critical exit requirement: zero production mutations ────────────────
 
-describe("BT8.2 — the capability is used only by ADD_TO_WATCHLIST", () => {
-  test("BT7 production reads remain reads and ADD is the only production mutation", () => {
+describe("BT8.3 — the capability is used only by migrated watchlist mutations", () => {
+  test("BT7 production reads remain reads and ADD/REMOVE are the production mutations", () => {
     for (const d of PRODUCTION_OPERATIONS) {
-      if (String(d.id) === "ADD_TO_WATCHLIST") continue;
+      if (["ADD_TO_WATCHLIST", "REMOVE_FROM_WATCHLIST"].includes(String(d.id))) continue;
       assert.equal(d.mutation, false, `${String(d.id)} must remain a read`);
       assert.equal(d.method, "GET", `${String(d.id)} must remain a GET`);
       assert.equal(d.body, undefined, `${String(d.id)} must carry no body`);
@@ -369,18 +368,22 @@ describe("BT8.2 — the capability is used only by ADD_TO_WATCHLIST", () => {
     const add = PRODUCTION_OPERATIONS.find((d) => String(d.id) === "ADD_TO_WATCHLIST")!;
     assert.equal(add.mutation, "ACCOUNT");
     assert.equal(add.method, "POST");
+    const remove = PRODUCTION_OPERATIONS.find((d) => String(d.id) === "REMOVE_FROM_WATCHLIST")!;
+    assert.equal(remove.mutation, "ACCOUNT");
+    assert.equal(remove.method, "DELETE");
   });
 
-  test("REMOVE and UPDATE are absent from the production table", () => {
+  test("ADD and REMOVE are registered while UPDATE remains absent", () => {
     const ids = PRODUCTION_OPERATIONS.map((d) => String(d.id));
     assert.equal(ids.includes("ADD_TO_WATCHLIST"), true);
+    assert.equal(ids.includes("REMOVE_FROM_WATCHLIST"), true);
     for (const id of UNMIGRATED_MUTATIONS) {
-      assert.equal(ids.includes(id), false, `${id} must not be registered at BT8.1`);
+      assert.equal(ids.includes(id), false, `${id} must not be registered at BT8.3`);
     }
-    assert.equal(PRODUCTION_OPERATIONS.length, 14);
+    assert.equal(PRODUCTION_OPERATIONS.length, 15);
   });
 
-  test("L/M: the three mutation tools stay refused, with zero transport calls", async () => {
+  test("UPDATE stays refused, with zero transport calls", async () => {
     for (const [tool, args] of REAL_MUTATION_TOOLS) {
       const h = gatewayHarness();
       await assert.rejects(
@@ -400,10 +403,10 @@ describe("BT8.2 — the capability is used only by ADD_TO_WATCHLIST", () => {
   });
 
   test("no legacy mutation owner acquired a caller inside src/", () => {
-    // They stay in src/api.ts as BT8.2–BT8.4's to remove; what must remain true
+    // UPDATE stays in src/api.ts for BT8.4; what must remain true
     // is that nothing calls them, so the refusal is the only reachable path.
     const gateway = readFileSync(join(SRC, "transport", "content-gateway.ts"), "utf-8");
-    for (const fn of ["addToWatchlist", "removeFromWatchlist", "updatePlayhead"]) {
+    for (const fn of ["updatePlayhead"]) {
       assert.equal(gateway.includes(fn), false, `the gateway must not reach ${fn}`);
     }
   });

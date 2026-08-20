@@ -65,7 +65,8 @@ describe("MCP server harness", () => {
             // Per-tool structural equivalence of the published schema (names may be
             // re-ordered by the tool registry; descriptions are informational).
             const expectedSchema =
-              expected.name === "crunchyroll_add_to_watchlist"
+              expected.name === "crunchyroll_add_to_watchlist" ||
+              expected.name === "crunchyroll_remove_from_watchlist"
                 ? { ...(expected.inputSchema as Record<string, unknown>), additionalProperties: false }
                 : expected.inputSchema;
             assert.deepEqual(actual.inputSchema, expectedSchema);
