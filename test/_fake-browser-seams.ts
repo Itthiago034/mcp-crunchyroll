@@ -25,6 +25,7 @@ import {
   type BrowserSessionSeams,
   type LifecycleEvent,
 } from "../src/transport/browser-session-manager.js";
+import { BrowserLifecycleError } from "../src/transport/browser-lifecycle-error.js";
 
 interface FakeTimer {
   due: number;
@@ -173,8 +174,11 @@ export class FakeSpawner implements ProcessSpawner {
 }
 
 export class FakeConnection implements CdpConnection {
-  readonly calls: Array<{ method: string; params?: Record<string, unknown> }> = [];
-  private readonly eventListeners = new Map<string, Set<(params: unknown) => void>>();
+  readonly calls: Array<{ method: string; params?: Record<string, unknown>; sessionId?: string }> = [];
+  private readonly eventListeners = new Map<
+    string,
+    Set<(params: unknown, sessionId?: string) => void>
+  >();
   private readonly closeListeners = new Set<() => void>();
   private readonly historicalCloseListeners = new Set<() => void>();
   private closed = false;
@@ -185,10 +189,15 @@ export class FakeConnection implements CdpConnection {
     private readonly allowSendAfterClose = false,
     private readonly failHandshake = false,
     private readonly onBrowserClose?: () => void,
+    private readonly apiExecution: WireFakeOptions["apiExecution"] = "success",
   ) {}
 
-  async send(method: string, params?: Record<string, unknown>): Promise<unknown> {
-    this.calls.push({ method, ...(params ? { params } : {}) });
+  async send(
+    method: string,
+    params?: Record<string, unknown>,
+    sessionId?: string,
+  ): Promise<unknown> {
+    this.calls.push({ method, ...(params ? { params } : {}), ...(sessionId ? { sessionId } : {}) });
     if (this.closed && !this.allowSendAfterClose) throw new Error("fake connection closed");
     if (method === "Browser.getVersion") {
       if (this.failHandshake) throw new Error("synthetic handshake failure");
@@ -203,10 +212,40 @@ export class FakeConnection implements CdpConnection {
     if (method === "Target.createTarget") {
       return { targetId: `managed-${this.nextTargetId++}` };
     }
+    if (method === "Target.attachToTarget") {
+      return { sessionId: "fake-page-session" };
+    }
+    if (method === "Runtime.enable") {
+      this.emitEvent(
+        "Runtime.executionContextCreated",
+        {
+          context: {
+            id: 7,
+            origin: "https://www.crunchyroll.com",
+            auxData: { isDefault: true },
+          },
+        },
+        "fake-page-session",
+      );
+      return {};
+    }
+    if (method === "Runtime.callFunctionOn") {
+      if (this.apiExecution === "pending") return new Promise(() => undefined);
+      if (this.apiExecution === "disconnect") {
+        throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
+      }
+      if (this.apiExecution === "page-exception") return { exceptionDetails: {} };
+      if (this.apiExecution === "malformed") return { result: { value: { status: "bad" } } };
+      return {
+        result: {
+          value: { status: 204, contentType: "", body: "", truncated: false },
+        },
+      };
+    }
     return {};
   }
 
-  on(event: string, listener: (params: unknown) => void): void {
+  on(event: string, listener: (params: unknown, sessionId?: string) => void): void {
     const listeners = this.eventListeners.get(event) ?? new Set();
     listeners.add(listener);
     this.eventListeners.set(event, listeners);
@@ -235,8 +274,8 @@ export class FakeConnection implements CdpConnection {
     for (const listener of [...this.historicalCloseListeners]) listener();
   }
 
-  emitEvent(event: string, params: unknown): void {
-    for (const listener of this.eventListeners.get(event) ?? []) listener(params);
+  emitEvent(event: string, params: unknown, sessionId?: string): void {
+    for (const listener of this.eventListeners.get(event) ?? []) listener(params, sessionId);
   }
 }
 
@@ -266,6 +305,7 @@ export class FakeConnector {
           this.inspector.setStartTime(this.inspector.adoptedPid, null);
         }
       },
+      this.options.apiExecution,
     );
     this.connections.push(connection);
     if (isFirst && this.options.closeImmediatelyAfterConnect) connection.emitClose();
@@ -341,6 +381,7 @@ export interface WireFakeOptions {
   adoptedExitsOnClose?: boolean;
   distinctRuntimeExecutable?: boolean;
   runtimeCmdlineRewritten?: boolean;
+  apiExecution?: "success" | "pending" | "disconnect" | "page-exception" | "malformed";
 }
 
 export function wireFakes(options: WireFakeOptions = {}) {

@@ -641,14 +641,16 @@ describe("BT8.1 — a mutation gets the response contract it declared", () => {
     assert.equal(result.json, undefined);
   });
 
-  test("an EMPTY contract refuses a body it would have had to interpret", async () => {
+  test("an EMPTY mutation contract treats an unexpected body as an unknown outcome", async () => {
     const h = backendHarness(
       Object.freeze({ status: 204, contentType: "", body: "{\"surprise\":1}", truncated: false })
     );
     await assert.rejects(
       h.backend.executeResolved(syntheticCall(SYNTHETIC_ERASE, { content_id: "GY8VEQ95Y" })),
       (e: unknown) =>
-        e instanceof TransportError && e.kind === "INVALID_RESPONSE" && e.detail === "body"
+        e instanceof TransportError &&
+        e.kind === "MUTATION_OUTCOME_UNKNOWN" &&
+        e.detail === "malformed"
     );
   });
 
