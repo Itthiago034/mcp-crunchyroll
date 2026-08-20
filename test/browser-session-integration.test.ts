@@ -1,8 +1,10 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, statSync, existsSync } from "node:fs";
+import {
+  chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   createBrowserSessionManager, createRealBrowserSessionSeams,
 } from "../src/transport/browser-session-manager.js";
@@ -46,8 +48,13 @@ async function harness(): Promise<Harness> {
     server,
     cleanup: async () => {
       await manager.stop().catch(() => undefined);
-      rmSync(base, { recursive: true, force: true });
       await server.close();
+      rmSync(base, {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 100,
+      });
     },
   };
 }
@@ -143,5 +150,30 @@ describe("BT2 integration — real browser against a loopback server", {
     }
     assert.equal(cleaned, true);
     assert.equal(existsSync(h.profileDir), false, "temporary profile removed");
+  });
+
+  test("cleanup closes the loopback server even when profile removal fails", async () => {
+    const h = await harness();
+    const base = dirname(h.profileDir);
+    const locked = join(base, "locked");
+    mkdirSync(locked);
+    writeFileSync(join(locked, "sentinel"), "synthetic");
+    chmodSync(locked, 0);
+
+    let cleanupError: unknown;
+    try {
+      await h.cleanup();
+    } catch (error) {
+      cleanupError = error;
+    }
+
+    try {
+      assert.equal((cleanupError as NodeJS.ErrnoException | undefined)?.code, "EACCES");
+      await assert.rejects(fetch(`${h.server.origin}/ok`));
+    } finally {
+      await h.server.close();
+      if (existsSync(locked)) chmodSync(locked, 0o700);
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 });
