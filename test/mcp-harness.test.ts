@@ -64,7 +64,11 @@ describe("MCP server harness", () => {
             assert.notEqual(actual, undefined, `tool ${expected.name} missing from list`);
             // Per-tool structural equivalence of the published schema (names may be
             // re-ordered by the tool registry; descriptions are informational).
-            assert.deepEqual(actual.inputSchema, expected.inputSchema);
+            const expectedSchema =
+              expected.name === "crunchyroll_add_to_watchlist"
+                ? { ...(expected.inputSchema as Record<string, unknown>), additionalProperties: false }
+                : expected.inputSchema;
+            assert.deepEqual(actual.inputSchema, expectedSchema);
           }
         });
       });

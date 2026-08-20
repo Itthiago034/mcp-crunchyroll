@@ -160,15 +160,15 @@ function sources(): Array<{ path: string; code: string }> {
 // ── The table ───────────────────────────────────────────────────────────────
 
 describe("BT7 — the production table after the account-read migration", () => {
-  test("holds exactly the BT5/BT6 catalog reads plus the five BT7 account reads", () => {
+  test("holds the BT5/BT6 catalog reads, five BT7 reads and BT8.2 ADD", () => {
     // Was 14 before the F-1 ruling. Thirteen is not a smaller migration, it is
     // an honest one: an operation nobody can serve does not belong in a table
     // whose whole meaning is "this is served here now".
     assert.deepEqual(
       PRODUCTION_OPERATIONS.map((d) => String(d.id)).sort(),
-      [...BT5_BT6_OPERATIONS, ...BT7_OPERATIONS].sort()
+      [...BT5_BT6_OPERATIONS, ...BT7_OPERATIONS, "ADD_TO_WATCHLIST"].sort()
     );
-    assert.equal(PRODUCTION_OPERATIONS.length, 13);
+    assert.equal(PRODUCTION_OPERATIONS.length, 14);
   });
 
   test("both deferred operations are absent — D-1c and F-1, neither forgotten", () => {
@@ -177,8 +177,9 @@ describe("BT7 — the production table after the account-read migration", () => 
     }
   });
 
-  test("no BT8 mutation entered the table", () => {
-    for (const id of ["ADD_TO_WATCHLIST", "REMOVE_FROM_WATCHLIST", "UPDATE_PLAYHEAD"]) {
+  test("only ADD entered the table; REMOVE and UPDATE remain deferred", () => {
+    assert.equal(PRODUCTION_OPERATIONS.some((d) => String(d.id) === "ADD_TO_WATCHLIST"), true);
+    for (const id of ["REMOVE_FROM_WATCHLIST", "UPDATE_PLAYHEAD"]) {
       assert.equal(PRODUCTION_OPERATIONS.some((d) => String(d.id) === id), false, id);
     }
   });
@@ -632,7 +633,6 @@ describe("BT7 — nothing here can become a write", () => {
 describe("BT7 — the deferred and BT8 boundaries hold", () => {
   for (const [tool, args] of [
     ["crunchyroll_get_subscription", {}],
-    ["crunchyroll_add_to_watchlist", { content_id: "A" }],
     ["crunchyroll_remove_from_watchlist", { content_id: "A" }],
     ["crunchyroll_update_playhead", { content_id: "A", playhead: 1 }],
   ] as Array<[string, Record<string, unknown>]>) {
@@ -770,12 +770,7 @@ describe("BT7 — transport ownership moved out of the legacy client", () => {
         owners.push([match[1], url[0]]);
       }
     }
-    const ALLOWED_OWNERS = new Set([
-      "addToWatchlist",
-      "removeFromWatchlist",
-      "updatePlayhead",
-      "getSubscription",
-    ]);
+    const ALLOWED_OWNERS = new Set(["removeFromWatchlist", "updatePlayhead", "getSubscription"]);
     for (const [fn, url] of owners) {
       assert.ok(
         ALLOWED_OWNERS.has(fn),
@@ -807,7 +802,8 @@ describe("BT7 — transport ownership moved out of the legacy client", () => {
   test("the deferred and BT8 operations keep their legacy owners", () => {
     const api = readFileSync(join(SRC, "api.ts"), "utf-8");
     assert.match(api, /export async function getSubscription\b/, "GET_SUBSCRIPTION is deferred, not deleted");
-    for (const fn of ["addToWatchlist", "removeFromWatchlist", "updatePlayhead"]) {
+    assert.equal(/export async function addToWatchlist\b/.test(api), false, "ADD owner must be removed");
+    for (const fn of ["removeFromWatchlist", "updatePlayhead"]) {
       assert.match(api, new RegExp(`export async function ${fn}\\b`), `${fn} belongs to BT8`);
     }
   });

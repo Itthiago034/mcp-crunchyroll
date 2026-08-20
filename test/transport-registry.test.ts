@@ -83,6 +83,7 @@ describe("BT1 registry — construction and lookup", () => {
     assert.deepEqual(
       [...PRODUCTION_OPERATIONS].map((d) => String(d.id)).sort(),
       [
+        "ADD_TO_WATCHLIST",
         "BROWSE",
         "GET_CATEGORIES",
         "GET_EPISODE",

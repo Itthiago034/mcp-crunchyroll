@@ -219,6 +219,21 @@ export function createContentGateway(
             (await transport.execute(operation, withDefined({ content_ids: args.content_ids }))).json
           );
 
+        case "ADD_TO_WATCHLIST": {
+          await transport.execute(operation, args);
+          return {
+            tool: "crunchyroll_add_to_watchlist",
+            operation: "ADD_TO_WATCHLIST",
+            mutation: true,
+            mutation_class: "ACCOUNT",
+            content_id: args.content_id,
+            outcome: "APPLIED",
+            outcome_certainty: "CERTAIN",
+            retry_performed: false,
+            verify_with: "crunchyroll_get_watchlist",
+          };
+        }
+
         default:
           // A descriptor exists but this boundary has no parser for it: refuse
           // rather than improvise. Migrating an operation means adding both.

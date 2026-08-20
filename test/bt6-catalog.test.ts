@@ -88,12 +88,7 @@ describe("BT6 — the production table after the catalog migration", () => {
   test("no mutation and no deferred operation slipped in", () => {
     // RETIRED AT BT7 for the six account READS, which are now legitimately
     // migrated. Mutations and the deferred subscription must still be absent.
-    for (const forbidden of [
-      "GET_SUBSCRIPTION",
-      "ADD_TO_WATCHLIST",
-      "REMOVE_FROM_WATCHLIST",
-      "UPDATE_PLAYHEAD",
-    ]) {
+    for (const forbidden of ["GET_SUBSCRIPTION", "REMOVE_FROM_WATCHLIST", "UPDATE_PLAYHEAD"]) {
       assert.equal(
         PRODUCTION_OPERATIONS.some((d) => String(d.id) === forbidden),
         false,
@@ -149,7 +144,6 @@ describe("BT6 — transport knowledge moved, not copied", () => {
     // RETIRED AT BT7: BT7 moved the account READS. What remains true is that
     // BT6 did not touch the mutations or the deferred operation.
     const api = readFileSync(join(SRC, "api.ts"), "utf-8");
-    assert.match(api, /export async function addToWatchlist\b/);
     assert.match(api, /export async function removeFromWatchlist\b/);
     assert.match(api, /export async function updatePlayhead\b/);
     assert.match(api, /export async function getSubscription\b/);
@@ -370,7 +364,6 @@ describe("BT6 — account reads and mutations stay refused", () => {
   // deferred operation and the BT8 mutations.
   for (const [tool, args] of [
     ["crunchyroll_get_subscription", {}],
-    ["crunchyroll_add_to_watchlist", { content_id: "A" }],
     ["crunchyroll_remove_from_watchlist", { content_id: "A" }],
     ["crunchyroll_update_playhead", { content_id: "A", playhead: 1 }],
   ] as Array<[string, Record<string, unknown>]>) {

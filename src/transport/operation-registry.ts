@@ -519,8 +519,8 @@ function accountRead(spec: {
  * sent no query string at all. That last point is preserved VERBATIM and is
  * itself subject to BT8.0 confirming the live endpoints accept none.
  *
- * It registers nothing. `PRODUCTION_OPERATIONS` below still contains zero
- * mutations, and all three mutation tools stay refused at the gateway.
+ * BT8.2 uses this factory for ADD_TO_WATCHLIST; later BT8 stages may add the
+ * other mutation descriptors only when their own provider contract is adopted.
  */
 export function accountMutation(spec: {
   id: string;
@@ -572,12 +572,11 @@ export function accountMutation(spec: {
  * overloaded ACCOUNT and would have made PROFILE_READY enforcement ambiguous
  * for the real account operations arriving at BT7.
  *
- * BT8.1 taught this registry to EXPRESS a mutation and registered none. The
- * table below is still entirely `mutation: false`, so `ADD_TO_WATCHLIST`,
- * `REMOVE_FROM_WATCHLIST` and `UPDATE_PLAYHEAD` remain absent and their tools
- * remain refused with `OPERATION_NOT_MIGRATED` before any transport. Their
- * descriptors arrive at BT8.2–BT8.4, each on the provider evidence BT8.0 owes
- * it, and each in the same auditable stage that removes its legacy owner.
+ * BT8.1 taught this registry to express mutations. BT8.2 registers only
+ * ADD_TO_WATCHLIST from the BT8.0 collection contract; REMOVE_FROM_WATCHLIST
+ * and UPDATE_PLAYHEAD remain absent and their tools remain refused with
+ * `OPERATION_NOT_MIGRATED` before any transport. Each later descriptor belongs
+ * to its own auditable stage and provider contract.
  */
 export const PRODUCTION_OPERATIONS: readonly OperationDescriptor[] = Object.freeze([
   publicRead({
@@ -683,5 +682,18 @@ export const PRODUCTION_OPERATIONS: readonly OperationDescriptor[] = Object.free
     // first value when the bare key is repeated. Comma-joined is the one
     // encoding that resolved more than one id, so it is the contract.
     joinedQueryParams: { content_ids: { callerParam: "content_ids", separator: "," } },
+  }),
+  accountMutation({
+    id: "ADD_TO_WATCHLIST",
+    method: "POST",
+    pathTemplate: "/content/v2/{accountId}/watchlist",
+    mutation: "ACCOUNT",
+    callerParams: { content_id: contentId },
+    body: {
+      contentType: "application/json",
+      fields: { content_id: "content_id" },
+      fixedFields: {},
+    },
+    response: { successStatuses: [204], body: "EMPTY" },
   }),
 ]);

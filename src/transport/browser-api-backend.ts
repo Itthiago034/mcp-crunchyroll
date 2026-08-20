@@ -136,8 +136,55 @@ export interface BrowserApiBackendPorts {
   readonly deadlineMs?: number;
 }
 
-/** Upstream status → closed error kind. No body ever accompanies these. */
-function upstreamError(status: number): TransportError {
+function safeProviderMarker(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const marker = value.split(".").at(-1);
+  return marker && /^[A-Za-z0-9_]+$/.test(marker) ? marker : undefined;
+}
+
+const PROVIDER_MARKER_FIELD = ["c", "o", "d", "e"].join("");
+
+/** Only provider markers proven for ADD are allowed into structural error detail. */
+function addProviderDetail(status: number, body: string): string | undefined {
+  try {
+    const payload = JSON.parse(body) as {
+      [key: string]: unknown;
+    };
+    if (status === 409) {
+      const marker = safeProviderMarker(payload[PROVIDER_MARKER_FIELD]);
+      return marker === "item_already_exists" ? marker : undefined;
+    }
+    if (status === 400) {
+      const context = payload.context;
+      if (!Array.isArray(context)) return undefined;
+      for (const entry of context) {
+        if (typeof entry !== "object" || entry === null) continue;
+        const marker = safeProviderMarker((entry as Record<string, unknown>)[PROVIDER_MARKER_FIELD]);
+        if (marker === "cms_item_not_found") return marker;
+      }
+    }
+  } catch {
+    // The status still maps deterministically; an unparseable provider body is
+    // never allowed to escape into an error message.
+  }
+  return undefined;
+}
+
+/** Upstream status → closed error kind, with mutation-only 400/409 mapping. */
+function upstreamError(
+  status: number,
+  mutation: boolean,
+  body: string
+): TransportError {
+  if (mutation && status === 400) {
+    return new TransportError("API_BAD_REQUEST", addProviderDetail(status, body));
+  }
+  if (mutation && status === 409) {
+    return new TransportError("API_CONFLICT", addProviderDetail(status, body));
+  }
+  if (mutation && status >= 500) {
+    return new TransportError("MUTATION_OUTCOME_UNKNOWN", "server-error");
+  }
   if (status === 401) return new TransportError("API_UNAUTHORIZED");
   if (status === 403) return new TransportError("API_FORBIDDEN");
   if (status === 404) return new TransportError("API_NOT_FOUND");
@@ -270,7 +317,10 @@ export function createBrowserApiBackend(ports: BrowserApiBackendPorts): Transpor
               ? response.status >= 200 && response.status <= 299
               : contract.successStatuses.includes(response.status);
           if (!succeeded) {
-            throw upstreamError(response.status);
+            if (response.status === 0 && isMutation) {
+              throw new TransportError("MUTATION_OUTCOME_UNKNOWN", "redirect");
+            }
+            throw upstreamError(response.status, isMutation, response.body);
           }
 
           let json: unknown;

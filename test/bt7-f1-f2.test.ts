@@ -81,11 +81,12 @@ const render = (operation: string, params: Record<string, unknown>): string =>
 // ── F-1 ─────────────────────────────────────────────────────────────────────
 
 describe("F-1 — GET_CONTINUE_WATCHING is deferred, not migrated", () => {
-  test("the production table holds thirteen operations and not this one", () => {
+  test("the production table holds fourteen operations and not this one", () => {
     const ids = PRODUCTION_OPERATIONS.map((d) => d.id as unknown as string).sort();
-    assert.equal(ids.length, 13, "PRODUCTION_OPERATIONS must be exactly 13");
+    assert.equal(ids.length, 14, "PRODUCTION_OPERATIONS must be exactly 14");
     assert.equal(ids.includes("GET_CONTINUE_WATCHING"), false);
     assert.deepEqual(ids, [
+      "ADD_TO_WATCHLIST",
       "BROWSE",
       "GET_CATEGORIES",
       "GET_EPISODE",
@@ -428,7 +429,6 @@ describe("F-1/F-2 — the rest of BT7 is untouched", () => {
   test("BT8 mutations remain refused with no transport", async () => {
     const { gateway, backend } = harness();
     for (const [tool, args] of [
-      ["crunchyroll_add_to_watchlist", { content_id: "A" }],
       ["crunchyroll_remove_from_watchlist", { content_id: "A" }],
       ["crunchyroll_update_playhead", { content_id: "A", playhead: 1 }],
     ] as Array<[string, Record<string, unknown>]>) {

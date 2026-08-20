@@ -4,10 +4,8 @@
 // reader, a fake execution channel, synthetic descriptors, no browser, no
 // network, no credentials, no provider.
 //
-// NOTHING here registers a real mutation. Every state-changing descriptor in
-// this file is SYNTHETIC and exists only to exercise the machinery; the three
-// real mutations stay absent from the production table and stay refused, which
-// is itself asserted below.
+// BT8.2 registers only ADD_TO_WATCHLIST. REMOVE_FROM_WATCHLIST and
+// UPDATE_PLAYHEAD stay absent and refused, which is asserted below.
 //
 // Frozen design: CRUNCHYROLL-BT8-MUTATIONS-DESIGN.md §12 (registry evolution),
 // §13 (body ownership), §14 (response model), §18 (browser boundary).
@@ -56,10 +54,9 @@ const SRC = join(REPO_ROOT, "src");
 const ACCOUNT_SENTINEL = "SYNTHETIC-ACCOUNT-ID-BT8";
 const BEARER_SENTINEL = "SYNTHETIC-BEARER-BT8-MUST-NOT-LEAK";
 
-/** The three real mutations. Absent here is the point of the whole stage. */
-const REAL_MUTATIONS = ["ADD_TO_WATCHLIST", "REMOVE_FROM_WATCHLIST", "UPDATE_PLAYHEAD"];
+/** The mutations still intentionally absent after BT8.2. */
+const UNMIGRATED_MUTATIONS = ["REMOVE_FROM_WATCHLIST", "UPDATE_PLAYHEAD"];
 const REAL_MUTATION_TOOLS: Array<[string, Record<string, unknown>]> = [
-  ["crunchyroll_add_to_watchlist", { content_id: "GY8VEQ95Y" }],
   ["crunchyroll_remove_from_watchlist", { content_id: "GY8VEQ95Y" }],
   ["crunchyroll_update_playhead", { content_id: "GE00377909ENUS", playhead: 42 }],
 ];
@@ -360,23 +357,27 @@ describe("BT8.1 — mutation and method are closed at construction", () => {
 
 // ── The critical exit requirement: zero production mutations ────────────────
 
-describe("BT8.1 — the capability exists and NOTHING uses it yet", () => {
-  test("no production descriptor mutates, carries a body, or declares a response", () => {
+describe("BT8.2 — the capability is used only by ADD_TO_WATCHLIST", () => {
+  test("BT7 production reads remain reads and ADD is the only production mutation", () => {
     for (const d of PRODUCTION_OPERATIONS) {
-      assert.equal(d.mutation, false, `${String(d.id)} must still be a read`);
-      assert.equal(d.method, "GET", `${String(d.id)} must still be a GET`);
+      if (String(d.id) === "ADD_TO_WATCHLIST") continue;
+      assert.equal(d.mutation, false, `${String(d.id)} must remain a read`);
+      assert.equal(d.method, "GET", `${String(d.id)} must remain a GET`);
       assert.equal(d.body, undefined, `${String(d.id)} must carry no body`);
       assert.equal(d.response, undefined, `${String(d.id)} must declare no response contract`);
     }
+    const add = PRODUCTION_OPERATIONS.find((d) => String(d.id) === "ADD_TO_WATCHLIST")!;
+    assert.equal(add.mutation, "ACCOUNT");
+    assert.equal(add.method, "POST");
   });
 
-  test("the three real mutations are absent from the production table", () => {
+  test("REMOVE and UPDATE are absent from the production table", () => {
     const ids = PRODUCTION_OPERATIONS.map((d) => String(d.id));
-    for (const id of REAL_MUTATIONS) {
+    assert.equal(ids.includes("ADD_TO_WATCHLIST"), true);
+    for (const id of UNMIGRATED_MUTATIONS) {
       assert.equal(ids.includes(id), false, `${id} must not be registered at BT8.1`);
     }
-    // BT7 closed with thirteen reads. BT8.1 adds capability, not operations.
-    assert.equal(PRODUCTION_OPERATIONS.length, 13);
+    assert.equal(PRODUCTION_OPERATIONS.length, 14);
   });
 
   test("L/M: the three mutation tools stay refused, with zero transport calls", async () => {
@@ -393,7 +394,7 @@ describe("BT8.1 — the capability exists and NOTHING uses it yet", () => {
 
   test("the refusal happens at the registry boundary, before any transport exists", () => {
     const { registry } = gatewayHarness();
-    for (const id of REAL_MUTATIONS) {
+    for (const id of UNMIGRATED_MUTATIONS) {
       assert.equal(registry.has(id), false, `${id} must not resolve`);
     }
   });
@@ -545,7 +546,7 @@ describe("BT8.1 — the body is the descriptor's, the values are the caller's", 
       backendSource.indexOf("export function buildRequestBody"),
       backendSource.indexOf("export const CRUNCHYROLL_API_ORIGIN")
     );
-    for (const id of [...REAL_MUTATIONS, "SYNTHETIC_WRITE"]) {
+    for (const id of [...UNMIGRATED_MUTATIONS, "ADD_TO_WATCHLIST", "SYNTHETIC_WRITE"]) {
       assert.equal(fn.includes(id), false, `${id} must not be special-cased in the serializer`);
     }
   });

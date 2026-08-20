@@ -305,12 +305,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "crunchyroll_add_to_watchlist",
       description: "Add an anime series or movie to the watchlist.",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
       inputSchema: {
         type: "object",
         properties: {
           content_id: { type: "string", description: "Series or movie ID to add" },
         },
         required: ["content_id"],
+        additionalProperties: false,
       },
     },
     {

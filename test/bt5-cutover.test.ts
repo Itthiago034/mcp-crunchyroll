@@ -138,7 +138,6 @@ describe("BT5 cutover — migrated vs unmigrated, decided in one place", () => {
   for (const tool of [
     "crunchyroll_get_subscription",
     "crunchyroll_update_playhead",
-    "crunchyroll_add_to_watchlist",
     "crunchyroll_remove_from_watchlist",
   ]) {
     test(`${tool} is refused with OPERATION_NOT_MIGRATED`, async () => {
