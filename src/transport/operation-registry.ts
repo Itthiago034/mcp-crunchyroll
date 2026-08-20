@@ -584,11 +584,9 @@ export function accountMutation(spec: {
  * overloaded ACCOUNT and would have made PROFILE_READY enforcement ambiguous
  * for the real account operations arriving at BT7.
  *
- * BT8.1 taught this registry to express mutations. BT8.2 registers ADD and
- * BT8.3 registers REMOVE from their respective BT8.0 contracts; UPDATE_PLAYHEAD
- * remains absent and its tool remains refused with OPERATION_NOT_MIGRATED before
- * any transport. Each descriptor belongs to its own auditable stage and provider
- * contract.
+ * BT8.1 taught this registry to express mutations. BT8.2–BT8.4 register the
+ * three operations from their respective BT8.0 contracts. Each descriptor
+ * belongs to its own auditable stage and provider contract.
  */
 export const PRODUCTION_OPERATIONS: readonly OperationDescriptor[] = Object.freeze([
   publicRead({
@@ -722,5 +720,21 @@ export const PRODUCTION_OPERATIONS: readonly OperationDescriptor[] = Object.free
       body: "EMPTY",
       determinedNotFound: "watchlist-item-absent",
     },
+  }),
+  accountMutation({
+    id: "UPDATE_PLAYHEAD",
+    method: "POST",
+    pathTemplate: "/content/v2/{accountId}/playheads",
+    mutation: "PROGRESS",
+    callerParams: {
+      content_id: contentId,
+      playhead: requiredIntegerInRange(0, 86_400),
+    },
+    body: {
+      contentType: "application/json",
+      fields: { content_id: "content_id", playhead: "playhead" },
+      fixedFields: {},
+    },
+    response: { successStatuses: [204], body: "EMPTY" },
   }),
 ]);

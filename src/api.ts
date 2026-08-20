@@ -656,20 +656,6 @@ async function getValidToken(): Promise<{ token: string; account_id: string }> {
 
 
 
-export async function updatePlayhead(
-  contentId: string,
-  playhead: number
-): Promise<{ success: boolean; message: string }> {
-  const { token, account_id } = await getValidToken();
-  await request(`${API_BASE}/content/v2/${account_id}/playheads`, {
-    method: "POST",
-    token,
-    body: JSON.stringify({ content_id: contentId, playhead }),
-  });
-  return { success: true, message: `Updated playhead for ${contentId} to ${playhead}s` };
-}
-
-
 // ── Recommendations ───────────────────────────────────────────────────────────
 
 

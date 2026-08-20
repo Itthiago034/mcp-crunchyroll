@@ -249,6 +249,22 @@ export function createContentGateway(
           };
         }
 
+        case "UPDATE_PLAYHEAD": {
+          await transport.execute(operation, args);
+          return {
+            tool: "crunchyroll_update_playhead",
+            operation: "UPDATE_PLAYHEAD",
+            mutation: true,
+            mutation_class: "PROGRESS",
+            content_id: args.content_id,
+            playhead: args.playhead,
+            outcome: "APPLIED",
+            outcome_certainty: "CERTAIN",
+            retry_performed: false,
+            verify_with: "crunchyroll_get_playheads",
+          };
+        }
+
         default:
           // A descriptor exists but this boundary has no parser for it: refuse
           // rather than improvise. Migrating an operation means adding both.

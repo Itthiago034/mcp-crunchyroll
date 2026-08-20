@@ -378,6 +378,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "crunchyroll_update_playhead",
       description: "Update watch progress for an episode or movie.",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
       inputSchema: {
         type: "object",
         properties: {
@@ -385,6 +391,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           playhead: { type: "number", description: "Position in seconds" },
         },
         required: ["content_id", "playhead"],
+        additionalProperties: false,
       },
     },
 
