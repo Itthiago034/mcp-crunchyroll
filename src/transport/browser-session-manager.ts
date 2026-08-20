@@ -971,9 +971,15 @@ export function createBrowserSessionManager(
           }
 
           let timer: { cancel(): void } | undefined;
+          const deadlineError = new BrowserLifecycleError(
+            "BROWSER_UNAVAILABLE",
+            "deadline",
+            "POSSIBLY_DISPATCHED",
+            "deadline",
+          );
           const deadline = new Promise<never>((_resolve, reject) => {
             timer = seams.clock.setTimeout(
-              () => reject(new BrowserLifecycleError("BROWSER_UNAVAILABLE", "deadline")),
+              () => reject(deadlineError),
               input.deadlineMs
             );
           });
@@ -996,22 +1002,36 @@ export function createBrowserSessionManager(
 
           let raw: unknown;
           try {
+            // This invocation is the dispatch boundary. Once it starts, the
+            // page-side fetch may have reached Crunchyroll even if CDP loses
+            // the answer. Every failure from this promise is therefore marked
+            // structurally as possibly dispatched; pre-flight checks above
+            // retain the default PRE_DISPATCH state.
+            const dispatched = active.connection.send(
+              "Runtime.callFunctionOn",
+              {
+                functionDeclaration: CRUNCHYROLL_FETCH_FUNCTION,
+                executionContextId: contextId,
+                arguments: callArguments,
+                awaitPromise: true,
+                returnByValue: true,
+                silent: true,
+                userGesture: false,
+              },
+              sessionId
+            );
             raw = await Promise.race([
-              active.connection.send(
-                "Runtime.callFunctionOn",
-                {
-                  functionDeclaration: CRUNCHYROLL_FETCH_FUNCTION,
-                  executionContextId: contextId,
-                  arguments: callArguments,
-                  awaitPromise: true,
-                  returnByValue: true,
-                  silent: true,
-                  userGesture: false,
-                },
-                sessionId
-              ),
+              dispatched,
               deadline,
             ]);
+          } catch (error) {
+            if (error === deadlineError) throw error;
+            throw new BrowserLifecycleError(
+              "BROWSER_DISCONNECTED",
+              undefined,
+              "POSSIBLY_DISPATCHED",
+              "disconnect",
+            );
           } finally {
             timer?.cancel();
           }
@@ -1023,7 +1043,12 @@ export function createBrowserSessionManager(
           if (frame.exceptionDetails !== undefined) {
             // The page threw. Its text may quote a URL or a header, so nothing
             // from it is carried out — only the structural fact.
-            throw new BrowserLifecycleError("BROWSER_UNAVAILABLE", "page-exception");
+            throw new BrowserLifecycleError(
+              "BROWSER_UNAVAILABLE",
+              "page-exception",
+              "POSSIBLY_DISPATCHED",
+              "page-exception",
+            );
           }
           const value = frame.result?.value as Partial<ApiExecutionResponse> | undefined;
           if (
@@ -1033,7 +1058,12 @@ export function createBrowserSessionManager(
             typeof value.body !== "string" ||
             typeof value.truncated !== "boolean"
           ) {
-            throw new BrowserLifecycleError("BROWSER_UNAVAILABLE", "malformed-result");
+            throw new BrowserLifecycleError(
+              "BROWSER_UNAVAILABLE",
+              "malformed-result",
+              "POSSIBLY_DISPATCHED",
+              "malformed",
+            );
           }
           return Object.freeze({
             status: value.status,

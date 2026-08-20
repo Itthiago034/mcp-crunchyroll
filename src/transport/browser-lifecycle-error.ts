@@ -10,6 +10,22 @@ export type BrowserLifecycleErrorKind =
   | "RECOVERY_EXHAUSTED"
   | "BROWSER_STOP_TIMEOUT";
 
+/**
+ * Internal evidence about the one browser API request boundary.
+ *
+ * PRE_DISPATCH is the conservative default for lifecycle failures raised
+ * before Runtime.callFunctionOn. POSSIBLY_DISPATCHED is set only by the
+ * session manager after that CDP command has been invoked, when a page fetch
+ * may already have reached the provider.
+ */
+export type BrowserRequestDispatchState = "PRE_DISPATCH" | "POSSIBLY_DISPATCHED";
+
+export type BrowserRequestUncertaintyReason =
+  | "deadline"
+  | "disconnect"
+  | "page-exception"
+  | "malformed";
+
 const FIXED_MESSAGES: Record<BrowserLifecycleErrorKind, string> = {
   BROWSER_UNAVAILABLE: "Managed browser is not available",
   BROWSER_DISCONNECTED: "Managed browser connection was lost",
@@ -27,6 +43,8 @@ export class BrowserLifecycleError extends Error {
   constructor(
     public readonly kind: BrowserLifecycleErrorKind,
     public readonly detail?: string,
+    public readonly dispatchState: BrowserRequestDispatchState = "PRE_DISPATCH",
+    public readonly uncertaintyReason?: BrowserRequestUncertaintyReason,
   ) {
     super(FIXED_MESSAGES[kind]);
     this.name = "BrowserLifecycleError";

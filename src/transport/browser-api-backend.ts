@@ -14,7 +14,8 @@
 // It performs no I/O of its own: no fetch, no socket, no CDP. The only way out
 // is the closed execution channel it is handed.
 
-import type { AuthContextReader } from "./auth-context.js";
+import { AuthContextError, type AuthContextReader } from "./auth-context.js";
+import { BrowserLifecycleError } from "./browser-lifecycle-error.js";
 import {
   MAX_API_RESPONSE_BYTES,
   type ApiExecutionBody,
@@ -198,20 +199,49 @@ function isJsonContentType(contentType: string): boolean {
   return base === "application/json" || base.endsWith("+json");
 }
 
+function responseValidationError(
+  isMutation: boolean,
+  detail: "over-cap" | "body" | "content-type" | "json",
+): TransportError {
+  if (isMutation) {
+    return new TransportError(
+      "MUTATION_OUTCOME_UNKNOWN",
+      detail === "over-cap" ? "over-cap" : "malformed",
+    );
+  }
+  return new TransportError("INVALID_RESPONSE", detail);
+}
+
 /** BT3 speaks its own error vocabulary; translate it, never reinterpret it. */
-function asTransportError(error: unknown): TransportError {
+function asTransportError(
+  error: unknown,
+  context: { readonly isMutation: boolean; readonly requestCompleted: boolean } = {
+    isMutation: false,
+    requestCompleted: false,
+  },
+): TransportError {
   if (error instanceof TransportError) return error;
-  const name = (error as { name?: unknown } | null)?.name;
-  const kind = (error as { kind?: unknown } | null)?.kind;
-  if (name === "AuthContextError") {
-    if (kind === "AUTH_CONTEXT_STALE" || kind === "AUTH_IDENTITY_CHANGED") {
+  if (error instanceof AuthContextError) {
+    if (error.kind === "AUTH_CONTEXT_STALE" || error.kind === "AUTH_IDENTITY_CHANGED") {
+      if (context.isMutation && context.requestCompleted) {
+        return new TransportError("MUTATION_OUTCOME_UNKNOWN", "auth-generation");
+      }
       return new TransportError("AUTH_GENERATION_CHANGED");
     }
     return new TransportError("AUTH_NOT_READY");
   }
   // A browser/lifecycle failure is a transport failure — never a reason to try
   // another route, because there is no other route.
-  if (name === "BrowserLifecycleError") return new TransportError("BROWSER_UNAVAILABLE");
+  if (error instanceof BrowserLifecycleError) {
+    if (
+      context.isMutation &&
+      error.dispatchState === "POSSIBLY_DISPATCHED" &&
+      error.uncertaintyReason !== undefined
+    ) {
+      return new TransportError("MUTATION_OUTCOME_UNKNOWN", error.uncertaintyReason);
+    }
+    return new TransportError("BROWSER_UNAVAILABLE");
+  }
   return new TransportError("TRANSPORT_FAILURE");
 }
 
@@ -255,6 +285,7 @@ export function createBrowserApiBackend(ports: BrowserApiBackendPorts): Transpor
       // a placeholder with nothing to fill it, and would mean a request could
       // be shaped before the authority had been consulted at all.
       let execution;
+      let requestCompleted = false;
       try {
         execution = ports.reader.bind(call);
       } catch (error) {
@@ -296,6 +327,7 @@ export function createBrowserApiBackend(ports: BrowserApiBackendPorts): Transpor
               // keeps exactly the fields it has always carried.
               ...(body === undefined ? {} : { body }),
             });
+            requestCompleted = true;
           } finally {
             // Teardown must never mask the outcome.
             await channel.close().catch(() => undefined);
@@ -306,7 +338,7 @@ export function createBrowserApiBackend(ports: BrowserApiBackendPorts): Transpor
             response.truncated ||
             Buffer.byteLength(response.body, "utf-8") > MAX_API_RESPONSE_BYTES
           ) {
-            throw new TransportError("INVALID_RESPONSE", "over-cap");
+            throw responseValidationError(isMutation, "over-cap");
           }
           // BT8.1. A read has no declared contract and keeps the implicit one
           // it has always had: any 2xx, and a JSON document. A mutation must
@@ -330,19 +362,19 @@ export function createBrowserApiBackend(ports: BrowserApiBackendPorts): Transpor
             // unreadable response — so what is checked instead is that nothing
             // arrived that we would have had to interpret.
             if (response.body.length > 0) {
-              throw new TransportError("INVALID_RESPONSE", "body");
+              throw responseValidationError(isMutation, "body");
             }
             json = undefined;
           } else {
             if (!isJsonContentType(response.contentType)) {
               // An HTML challenge page is the expected shape of this failure and
               // none of its content may travel: only the fact does.
-              throw new TransportError("INVALID_RESPONSE", "content-type");
+              throw responseValidationError(isMutation, "content-type");
             }
             try {
               json = JSON.parse(response.body);
             } catch {
-              throw new TransportError("INVALID_RESPONSE", "json");
+              throw responseValidationError(isMutation, "json");
             }
           }
 
@@ -353,7 +385,7 @@ export function createBrowserApiBackend(ports: BrowserApiBackendPorts): Transpor
           });
         });
       } catch (error) {
-        throw asTransportError(error);
+        throw asTransportError(error, { isMutation, requestCompleted });
       }
     },
   };
