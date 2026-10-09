@@ -1,8 +1,10 @@
 # Revisão de arquitetura, segurança e rede
 
 Revisão de 2026-10-08. As correções mantêm o contrato das 21 ferramentas MCP
-e o transporte de produção via stdio. Nenhuma chamada autenticada ao Crunchyroll
-ou alteração em conta foi realizada.
+e o transporte de produção via stdio. Na revisão inicial da nuvem não houve
+chamadas autenticadas ao Crunchyroll. A validação posterior no PC Linux,
+reportada pelo operador, aprovou 12 chamadas de leitura; não houve teste de
+mutação de conta. Veja o [relatório de navegador](browser-validation.md).
 
 ## Arquitetura e mudanças
 
@@ -80,21 +82,50 @@ WebSocket adversariais, geração de identidade, mutações e MCP stdio no códi
 fonte e no bundle. A matriz Node.js 18/20/22 não foi executada localmente;
 permanece no CI.
 
+## Autenticação no Linux e continuidade do perfil
+
+O SDK stdio herda um conjunto limitado de variáveis de ambiente. O runner
+inicial detectava sessão gráfica no processo pai, mas não encaminhava
+`DISPLAY`/`WAYLAND_DISPLAY` ao MCP. O primeiro ajuste encaminhou essas variáveis
+e os recursos de runtime da sessão.
+
+A abertura manual posterior herdava todo o ambiente do terminal, enquanto o
+MCP continuava com uma lista reduzida. O ajuste `a59dd13` usa a mesma função
+`browserLaunchEnvironment()` para ambas as etapas e preserva a identificação
+do desktop e os diretórios XDG. Isso remove uma diferença de configuração que
+poderia afetar o acesso do Chromium ao armazenamento protegido no Linux; não
+demonstra que essa era a única causa do pedido repetido de login.
+
+O fluxo de validação integra login manual no perfil dedicado e aguarda o
+fechamento normal antes de abrir o navegador gerenciado. A autenticação depende
+de material observado e validado pelo MCP, preservando a autoridade e os gates
+existentes. Perfil ocupado é recusado sem apagar locks ou encerrar processos
+alheios. A execução salva fases e distingue um relatório incompleto de uma
+aprovação, sem incluir dados de conta ou valores do ambiente.
+
+Os 85 testes relacionados passaram na nuvem, incluindo sessão sintética
+persistente em Chromium real e verificação do ambiente recebido por um
+subprocesso real do SDK. O operador confirmou no PC o teste de persistência,
+`PROFILE_READY` e 12/12 leituras com concorrência 2. Essa evidência valida o fluxo
+nessa execução; não isola todas as diferenças do provedor ou chaveiro.
+
 ## Limites e próximas medições
 
-- Não há medidas de latência, throughput, RSS ou percentis do Crunchyroll real.
-  A redução de blocos consumidos demonstra trabalho evitado na fixture,
-  sem extrapolar ganho percentual para produção.
+- Há 12 latências de chamadas MCP autenticadas ao Crunchyroll real, reportadas
+  pelo operador. Não há medidas de throughput, RSS, tempo até headers ou
+  percentis estáveis do provedor. A redução de blocos consumidos demonstra
+  trabalho evitado na fixture, sem extrapolar ganho percentual para produção.
 - O deadline limita a espera local; o cancelamento de uma requisição ainda
   ativa no navegador após esse deadline precisa de um experimento específico.
   Uma futura mudança com `AbortController` deve preservar mutações incertas.
 - O guard de egress do Node envolve `globalThis.fetch`, não todos os sockets,
   nem a política de saída de rede do sistema operacional. Não deve ser tratado
   como firewall geral contra código arbitrário.
-- A sessão, o CDP e a leitura local foram testados. DNS, proxy, TLS, redirects,
-  rate limits e login do provedor real não foram validados. Um próximo ensaio
-  autorizado pode medir somente leituras, com concorrência limitada e sem
-  retries de mutações, registrando tempos e categorias de erro sem credenciais.
+- A sessão, o CDP, a leitura local e o fluxo de autenticação no PC foram
+  testados. O navegador também recebeu respostas HTTPS do provedor em probes
+  anônimos; DNS, proxy e TLS não foram medidos separadamente. Os casos de
+  redirects e rate limits foram verificados em fixtures, não induzidos no
+  Crunchyroll. A retomada após reiniciar o PC ainda não foi observada.
 - Cache, pooling de sessões e uma divisão ampla dos módulos de autenticação
   não foram introduzidos: faltam medidas que justifiquem os riscos de estado
   compartilhado, respostas obsoletas e invalidação. O primeiro passo é medir

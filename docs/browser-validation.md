@@ -1,8 +1,9 @@
 # Validação com navegador real e várias requisições
 
-Execução em Chromium 151.0.7922.173 com sandbox nativo habilitado e Node.js
-24.19.0. Os resultados são observações desta máquina, não uma estimativa de
-capacidade do Crunchyroll em produção.
+As medições iniciais na nuvem usam Chromium 151.0.7922.173 com sandbox nativo
+habilitado e Node.js 24.19.0. A seção de validação autenticada no Linux registra
+separadamente o relatório enviado pelo operador do seu PC. Os resultados são
+observações dessas execuções, não uma estimativa de capacidade do Crunchyroll.
 
 ## Carga controlada
 
@@ -84,7 +85,7 @@ configurações do ambiente e publique.
 
 Dados da execução: [live-browser-probe.json](validation-results/live-browser-probe.json).
 
-## Validação autenticada pendente
+## Tentativa autenticada na nuvem — bloqueada
 
 O runner `scripts/validate-live.ts` inicializou o MCP real via stdio e confirmou
 as 21 ferramentas. `crunchyroll_status` retornou `LOGIN_REQUIRED`, sem sessão
@@ -96,10 +97,53 @@ O runner está preparado para 12 leituras autenticadas, com concorrência 2,
 usando categorias, busca e browse, sem mutações nem retries. Ele verifica o
 formato e a contagem das coleções retornadas, e reporta operação, resultado e
 duração sem conteúdo da conta ou credenciais. **Essas 12 leituras não foram
-executadas.** O exit code 2 sinaliza pré-requisito ausente, sem contabilizar
+executadas nessa tentativa na nuvem.** O exit code 2 sinaliza pré-requisito ausente, sem contabilizar
 o cenário como aprovado.
 
 Dados da tentativa: [live-mcp.json](validation-results/live-mcp.json).
+
+## Validação autenticada no PC Linux — aprovada
+
+Em 2026-10-08, o operador enviou a saída de execução em CachyOS/Linux do commit
+`a59dd134d9b84474517fda564783e71f8a57c584`, usando `/usr/bin/chromium`.
+O build passou. O teste local de persistência de sessão em dois subprocessos
+passou em 840,23 ms, sem falha ou teste ignorado. As versões exatas do navegador
+e Node não aparecem nesse relatório de execução.
+
+A preparação manual encerrou normalmente, o MCP confirmou autenticação e
+conexão com `authState: "PROFILE_READY"`, e todas as 12 chamadas de leitura
+passaram com concorrência 2: `complete: true`, `status: "passed"`, zero falhas
+e nenhum bloqueio. Foram quatro chamadas de categorias, quatro de busca por
+Naruto e quatro de browse. O runner conferiu formato e contagem das coleções.
+
+| Ferramenta | Chamadas aprovadas | Média | Mínimo | Máximo |
+| --- | ---: | ---: | ---: | ---: |
+| Categorias | 4/4 | 433,23 ms | 265,40 ms | 606,39 ms |
+| Busca | 4/4 | 676,71 ms | 315,23 ms | 1.740,07 ms |
+| Browse | 4/4 | 478,25 ms | 7,41 ms | 1.806,96 ms |
+
+São latências de chamada MCP, incluindo transporte, autenticação corrente,
+rede/navegador e normalização. O relatório não mede tempo até headers, TLS,
+RSS, duração total do lote nem tentativas físicas de rede. A função de produção
+não fixa `fetch.cache`; o cache HTTP do navegador pode participar dessas
+leituras. As chamadas repetem os mesmos argumentos. A queda de latência nas
+leituras posteriores é observada, mas cache, aquecimento e variação do provedor
+não foram isolados. Quatro amostras por operação não estabelecem um gargalo
+do provedor nem justificam introduzir cache no MCP.
+
+Essa execução comprova o fluxo manual → perfil persistente → autenticação MCP
+→ leituras naquele PC. As variáveis de sessão gráfica/desktop e o ambiente de
+subprocesso foram alinhados antes da aprovação. A sequência de resultados não
+isola qual mudança determinou a aprovação, nem prova a seleção específica de
+chaveiro, ausência futura de desafios ou continuidade após reiniciar o PC.
+Nenhuma mutação de conta foi testada.
+
+Proveniência: o JSON foi transcrito da saída fornecida pelo usuário; esta
+execução não foi feita nem acompanhada remotamente pelo agente. Não foram
+recebidos cookies, tokens, dados de conta ou conteúdo das coleções. As tentativas
+anteriores permanecem registradas e o resultado da nuvem não foi sobrescrito.
+
+Dados da execução: [live-mcp-linux.json](validation-results/live-mcp-linux.json).
 
 ## Reproduzir
 
@@ -169,7 +213,8 @@ npm run validate:live -- --login
 
 Na nuvem, execute o teste do Chromium fora do isolamento adicional dos comandos
 quando ele bloquear namespaces; mantenha o sandbox do navegador habilitado.
-O login deve acontecer exclusivamente na janela do navegador gerenciado.
+O login acontece exclusivamente nas janelas do navegador, pela interface do
+Crunchyroll; o runner usa primeiro a etapa manual no perfil dedicado.
 O runner repassa explicitamente ao processo MCP as variáveis da sessão gráfica
 (`DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`, `XDG_SESSION_TYPE`, `XAUTHORITY`
 e `DBUS_SESSION_BUS_ADDRESS`) e os overrides de navegador e sandbox. O SDK não
