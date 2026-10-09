@@ -103,6 +103,13 @@ Dados da tentativa: [live-mcp.json](validation-results/live-mcp.json).
 
 ## Reproduzir
 
+No CachyOS/Arch, instale um navegador suportado com
+`sudo pacman -S --needed chromium` e execute a validação com o usuário normal.
+O npm 12 bloqueia scripts de dependências por padrão; o projeto aprova apenas
+`esbuild@0.28.2` em `allowScripts`, para executar seu postinstall sem liberar
+scripts de outras dependências. Instalação, tipos e build foram verificados
+também com npm 12.2.0.
+
 ```bash
 # Carga controlada: exige Chromium e seu sandbox funcional.
 CRUNCHYROLL_BROWSER_EXECUTABLE=/usr/bin/chromium npm run test:browser

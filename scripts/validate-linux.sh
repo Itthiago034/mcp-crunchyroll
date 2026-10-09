@@ -22,7 +22,14 @@ echo "Relatórios desta execução: $TASK_OUTPUT_DIR"
 npm ci --cache "$TASK_REPO_ROOT/.npm-cache" --no-audit --no-fund
 node --import tsx --input-type=module -e '
   import { resolveBrowserExecutable } from "./src/transport/browser-profile.ts";
-  console.log("Navegador: " + resolveBrowserExecutable(process.env));
+  try {
+    console.log("Navegador: " + resolveBrowserExecutable(process.env));
+  } catch {
+    console.error("Chrome/Chromium não encontrado ou caminho configurado inválido.");
+    console.error("No CachyOS/Arch, instale: sudo pacman -S --needed chromium");
+    console.error("Se já estiver instalado, indique o executável com CRUNCHYROLL_BROWSER_EXECUTABLE.");
+    process.exit(2);
+  }
 '
 npm run typecheck
 npm run build
