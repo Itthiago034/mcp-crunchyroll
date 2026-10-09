@@ -5,6 +5,7 @@ import { performance } from "node:perf_hooks";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { browserSubprocessEnvironment } from "./browser-subprocess-environment.js";
+import { openManualBrowser, OnboardingBlocked } from "./onboard-browser.js";
 
 // Opt-in integration runner. No writes, watch history, account IDs or credentials
 // are accepted as arguments or copied into the diagnostic report.
@@ -37,9 +38,23 @@ try {
     if (process.platform === "linux" && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
       report.blockers = ["interactive_login_required", "interactive_browser_display_unavailable"];
     } else {
-      console.error("Complete sign-in in the managed Crunchyroll browser window. Do not enter credentials in the terminal.");
-      await client.callTool({ name: "crunchyroll_login", arguments: {} }, undefined, { timeout: 360_000 });
-      readiness = payload(await client.callTool({ name: "crunchyroll_status", arguments: {} }));
+      report.loginFlow = "manual_browser_then_managed_mcp";
+      report.phase = "manual_browser";
+      try {
+        await openManualBrowser();
+        report.manualBrowserClosedNormally = true;
+        report.phase = "managed_auth_validation";
+        console.error("Validando a sessão no navegador gerenciado. As leituras começarão somente após confirmação pelo MCP.");
+        await client.callTool({ name: "crunchyroll_login", arguments: {} }, undefined, { timeout: 360_000 });
+        readiness = payload(await client.callTool({ name: "crunchyroll_status", arguments: {} }));
+        if (readiness.authenticated !== true) report.blockers = ["auth_not_established_after_manual_browser"];
+      } catch (error) {
+        if (!(error instanceof OnboardingBlocked)) throw error;
+        report.blockers = [error.reason === "profile_in_use" ? "dedicated_profile_in_use_or_locked"
+          : error.reason === "display_unavailable" ? "interactive_browser_display_unavailable"
+          : "manual_browser_did_not_close_normally"];
+        console.error("Preparação interrompida. Feche as janelas anteriores do perfil dedicado e confira o bloqueio no relatório.");
+      }
     }
   }
   // Only structural readiness is retained; no identity, profile or auth material.
@@ -51,6 +66,7 @@ try {
     }
     process.exitCode = 2;
   } else {
+    report.phase = "authenticated_reads";
     const operations = [
       { name: "crunchyroll_get_categories", arguments: {}, collection: "categories" },
       { name: "crunchyroll_search", arguments: { query: "Naruto", n: 5 }, collection: "results" },
@@ -85,7 +101,8 @@ try {
   }
 } catch {
   report.status = "failed";
-  report.blockers = ["mcp_initialization_or_login_failed"];
+  report.blockers = [report.phase === "manual_browser" ? "manual_browser_setup_failed"
+    : "mcp_initialization_or_login_failed"];
   process.exitCode = 1;
 } finally {
   await client.close();

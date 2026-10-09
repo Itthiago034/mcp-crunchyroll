@@ -14,7 +14,8 @@
     "typecheck": "tsc --noEmit",
     "test": "tsx --test test/*.test.ts",
     "test:browser": "tsx --test test/browser-load.test.ts",
-    "validate:live": "tsx scripts/validate-live.ts"
+    "validate:live": "tsx scripts/validate-live.ts",
+    "onboard:browser": "tsx scripts/onboard-browser.ts"
   },
   "files": [
     "dist/",

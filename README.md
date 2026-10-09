@@ -118,6 +118,17 @@ Useful local tools:
 
 The managed browser profile is stored under `~/.strider/crunchyroll/browser-profile`. Do not point the server at a personal browser profile.
 
+The live validator (`npm run validate:live -- --login`) first opens the selected
+browser directly for manual sign-in in the same dedicated profile, without CDP.
+Complete verification and sign-in in Crunchyroll's own UI, decline browser-data
+import, and close that window normally. The validator then opens the managed
+browser and confirms MCP authentication before issuing its 12 reads. Close any
+earlier windows of that dedicated profile before starting. You can also run
+`npm run onboard:browser` separately to check the manual stage. Only an observed
+and validated authentication response grants MCP readiness; this flow does not
+guarantee that the provider will accept the session. See the
+[recorded onboarding procedure](CRUNCHYROLL-BT4-N5-ONBOARDING-ERRATA.md).
+
 ## Tool surface
 
 ### Catalog and discovery

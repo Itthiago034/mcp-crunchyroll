@@ -103,6 +103,51 @@ Dados da tentativa: [live-mcp.json](validation-results/live-mcp.json).
 
 ## Reproduzir
 
+### Verificação de segurança presa no navegador gerenciado
+
+Uma página de verificação da Cloudflare não demonstra, por si só, erro de senha
+ou falta de conectividade. O repositório já registra uma tentativa de login
+manual no mesmo perfil dedicado em
+[BT4-N5](../CRUNCHYROLL-BT4-N5-ONBOARDING-ERRATA.md). Esse registro histórico não
+prova que o procedimento funcionará em outra máquina ou navegador.
+
+O runner `npm run validate:live -- --login` agora integra a preparação manual
+antes de tentar autenticar pelo navegador gerenciado, quando a sessão MCP não
+está autenticada. Aguarda o encerramento normal da janela manual e só executa
+as 12 leituras após confirmação explícita de autenticação e conexão pelo MCP.
+Um lock de perfil ou falha nessa preparação impede a tentativa gerenciada.
+
+Também é possível testar apenas a etapa manual. Feche a janela gerenciada e
+encerre o runner de validação antes de executar:
+
+```bash
+npm run onboard:browser
+```
+
+O comando usa o mesmo resolvedor de navegador do MCP e o mesmo perfil dedicado,
+com as opções de abertura documentadas, sem porta de depuração, MCP ou CDP.
+Recusa um perfil com `SingletonLock`, inclusive symlink pendente, e não apaga
+controles de sessão. Não aceita argumentos de login, URL, perfil ou flags.
+Faça a verificação e o login manualmente na página do provedor, decline qualquer
+importação de dados de outro navegador e feche a janela normalmente. O script
+não lê cookies, campos, conteúdo da página ou estado de autenticação.
+
+Depois execute `npm run validate:live -- --login` para validar a autenticação
+pelo MCP e as 12 leituras; ele abrirá novamente a etapa manual no mesmo perfil.
+Informe separadamente se o login manual funcionou e se o MCP concluiu essas
+leituras. Encerrar o navegador com sucesso não é um teste de autenticação
+aprovado. O relatório distingue a fase de preparação, a validação gerenciada e
+as leituras. Se a janela manual encerrar mas o MCP não autenticar, retorna
+`auth_not_established_after_manual_browser` e zero leituras, sem repetir login.
+
+Se a verificação também falhar nesta abertura direta, o problema não depende
+exclusivamente da execução com MCP/CDP. Se funcionar e voltar a falhar no MCP,
+a diferença na execução gerenciada é uma hipótese a investigar. O teste não
+isola CDP das outras diferenças entre as execuções. O sucesso em Firefox ou
+outro navegador não estabelece o resultado desse Chromium.
+
+### Instalação e comandos de validação
+
 No CachyOS/Arch, instale um navegador suportado com
 `sudo pacman -S --needed chromium` e execute a validação com o usuário normal.
 O npm 12 bloqueia scripts de dependências por padrão; o projeto aprova apenas
