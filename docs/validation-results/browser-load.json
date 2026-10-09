@@ -1,0 +1,60 @@
+{
+  "browser": "Chrome/151.0.7922.173",
+  "node": "v24.19.0",
+  "transport": "real Chromium + CDP + loopback HTTP/1.1",
+  "logicalRequests": 317,
+  "serverHttpAttempts": 323,
+  "successfulResponses": 257,
+  "expectedHttpErrors": 24,
+  "manualRedirects": 12,
+  "expectedConnectionResets": 12,
+  "cancelledOversizedResponses": 12,
+  "cdpBurst": {
+    "accepted": 128,
+    "rejectedAtCapacity": 1,
+    "recovered": true
+  },
+  "cookiesOmitted": true,
+  "implicitGetRetriesOnReset": 6,
+  "duplicateNormalRequests": 0,
+  "remainingActiveHttp": 0,
+  "stopped": true,
+  "timings": [
+    {
+      "requests": 64,
+      "concurrency": 1,
+      "peakActiveHttp": 1,
+      "durationMs": 1526.46,
+      "p50Ms": 23.18,
+      "p95Ms": 27.69,
+      "requestsPerSecond": 41.93
+    },
+    {
+      "requests": 64,
+      "concurrency": 6,
+      "peakActiveHttp": 6,
+      "durationMs": 273.89,
+      "p50Ms": 24.76,
+      "p95Ms": 26.27,
+      "requestsPerSecond": 233.67
+    },
+    {
+      "requests": 64,
+      "concurrency": 24,
+      "peakActiveHttp": 6,
+      "durationMs": 246.95,
+      "p50Ms": 85.81,
+      "p95Ms": 91.88,
+      "requestsPerSecond": 259.16
+    },
+    {
+      "requests": 64,
+      "concurrency": 64,
+      "peakActiveHttp": 6,
+      "durationMs": 243.15,
+      "p50Ms": 130.79,
+      "p95Ms": 237.75,
+      "requestsPerSecond": 263.21
+    }
+  ]
+}

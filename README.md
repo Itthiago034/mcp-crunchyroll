@@ -191,6 +191,13 @@ npm test
 
 The test command runs the unit suites and MCP stdio harness. GitHub Actions repeats install, typecheck, build, and tests independently on Node.js 18, 20, and 22, including the sandboxed browser lifecycle checks.
 
+The [architecture, security, and network review](docs/architecture-review.md) records transport resource limits, regression evidence, dependency audit results, and measurements still needed against the real provider.
+
+Run `npm run test:browser` for concurrent HTTP validation in real Chromium. The
+[browser validation report](docs/browser-validation.md) includes measured load
+results and the optional anonymous/live MCP commands; `npm run validate:live -- --login`
+requires interactive sign-in in a visible managed browser.
+
 ## Known limitations
 
 - `crunchyroll_continue_watching` is deferred and fails closed.

@@ -1,4 +1,4 @@
-import WebSocket from "ws";
+import WebSocket, { type ClientOptions } from "ws";
 
 /**
  * The single binding site for the WebSocket dependency. BT1 introduces it so
@@ -8,8 +8,8 @@ import WebSocket from "ws";
  */
 export type WebSocketClient = WebSocket;
 
-export function createWebSocketClient(url: string): WebSocketClient {
-  return new WebSocket(url);
+export function createWebSocketClient(url: string, options?: ClientOptions): WebSocketClient {
+  return new WebSocket(url, options);
 }
 
 /** Lets a test prove the dependency loaded and bundled without connecting. */

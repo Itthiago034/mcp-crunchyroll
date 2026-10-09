@@ -1,0 +1,54 @@
+{
+  "target": "https://www.crunchyroll.com",
+  "status": "anonymous_responses_received",
+  "browser": "Chrome/151.0.7922.173",
+  "httpStatus": 200,
+  "concurrency": 2,
+  "anonymousReads": [
+    {
+      "index": 0,
+      "endpoint": "/",
+      "status": 200,
+      "responseReceived": true,
+      "durationMs": 4.27
+    },
+    {
+      "index": 1,
+      "endpoint": "/robots.txt",
+      "status": 200,
+      "responseReceived": true,
+      "durationMs": 53.8
+    },
+    {
+      "index": 2,
+      "endpoint": "/content/v2/discover/categories",
+      "status": 401,
+      "responseReceived": true,
+      "durationMs": 113.49
+    },
+    {
+      "index": 3,
+      "endpoint": "/",
+      "status": 200,
+      "responseReceived": true,
+      "durationMs": 4.88
+    },
+    {
+      "index": 4,
+      "endpoint": "/robots.txt",
+      "status": 200,
+      "responseReceived": true,
+      "durationMs": 42.25
+    },
+    {
+      "index": 5,
+      "endpoint": "/content/v2/discover/categories",
+      "status": 401,
+      "responseReceived": true,
+      "durationMs": 100.3
+    }
+  ],
+  "completedRequests": 6,
+  "authenticatedOperationsValidated": false,
+  "browserStopped": true
+}

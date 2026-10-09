@@ -695,7 +695,7 @@ describe("BT8.1 — the page primitive grew two arguments and no authority", () 
   test("the body pair arrives as trailing STRUCTURED parameters", () => {
     assert.match(
       CRUNCHYROLL_FETCH_FUNCTION,
-      /async function\s*\(\s*url\s*,\s*method\s*,\s*authorization\s*,\s*maxChars\s*,\s*bodyText\s*,\s*bodyContentType\s*\)/
+      /async function\s*\(\s*url\s*,\s*method\s*,\s*authorization\s*,\s*maxBytes\s*,\s*bodyText\s*,\s*bodyContentType\s*\)/
     );
   });
 

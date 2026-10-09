@@ -18,11 +18,34 @@ interface CdpFrame {
   readonly sessionId?: unknown;
 }
 
-export function createCdpConnector(commandTimeoutMs: number): CdpConnector {
+export interface CdpLimits {
+  readonly maxPendingCommands: number;
+  readonly maxPayloadBytes: number;
+}
+
+// CDP carries JSON-escaped API bodies and base64 authentication responses;
+// leave room above the separate 512 KiB provider-body cap.
+export const DEFAULT_CDP_LIMITS: CdpLimits = Object.freeze({
+  maxPendingCommands: 128,
+  maxPayloadBytes: 4 * 1024 * 1024,
+});
+
+export function createCdpConnector(
+  commandTimeoutMs: number,
+  limits: CdpLimits = DEFAULT_CDP_LIMITS,
+): CdpConnector {
+  if (![commandTimeoutMs, limits.maxPendingCommands, limits.maxPayloadBytes].every(
+    (value) => Number.isSafeInteger(value) && value > 0,
+  )) throw new RangeError("CDP timeouts and limits must be positive safe integers");
+  const { maxPendingCommands, maxPayloadBytes } = limits;
   return {
     connect(webSocketDebuggerUrl: string): Promise<CdpConnection> {
       return new Promise<CdpConnection>((resolve, reject) => {
-        const socket = createWebSocketClient(webSocketDebuggerUrl);
+        const socket = createWebSocketClient(webSocketDebuggerUrl, {
+          handshakeTimeout: commandTimeoutMs,
+          maxPayload: maxPayloadBytes,
+          perMessageDeflate: false,
+        });
         let opened = false;
         let closed = false;
         let nextId = 1;
@@ -40,18 +63,22 @@ export function createCdpConnector(commandTimeoutMs: number): CdpConnector {
             command.reject(disconnectError());
           }
           pending.clear();
+          eventListeners.clear();
           for (const listener of [...closeListeners]) listener();
           closeListeners.clear();
+          socket.terminate();
           if (!opened) reject(disconnectError());
         };
 
         socket.on("message", (data) => {
-          let frame: CdpFrame;
+          let parsed: unknown;
           try {
-            frame = JSON.parse(String(data)) as CdpFrame;
+            parsed = JSON.parse(String(data));
           } catch {
             return;
           }
+          if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return;
+          const frame = parsed as CdpFrame;
 
           if (typeof frame.id === "number") {
             const command = pending.get(frame.id);
@@ -81,6 +108,9 @@ export function createCdpConnector(commandTimeoutMs: number): CdpConnector {
             send(method, params, sessionId) {
               if (closed || socket.readyState !== WEBSOCKET_OPEN) {
                 return Promise.reject(disconnectError());
+              }
+              if (pending.size >= maxPendingCommands) {
+                return Promise.reject(new BrowserLifecycleError("BROWSER_UNAVAILABLE", "cdp-capacity"));
               }
               const id = nextId++;
               return new Promise<unknown>((resolveCommand, rejectCommand) => {
@@ -119,9 +149,15 @@ export function createCdpConnector(commandTimeoutMs: number): CdpConnector {
                 eventListeners.set(event, listeners);
               }
               listeners.add(listener);
+              return () => {
+                listeners.delete(listener);
+                if (listeners.size === 0 && eventListeners.get(event) === listeners) {
+                  eventListeners.delete(event);
+                }
+              };
             },
             close() {
-              if (!closed) socket.close();
+              finishClose();
             },
             onClose(listener) {
               let active = true;

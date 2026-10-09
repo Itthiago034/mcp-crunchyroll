@@ -236,6 +236,7 @@ export class FakeConnection implements CdpConnection {
       }
       if (this.apiExecution === "page-exception") return { exceptionDetails: {} };
       if (this.apiExecution === "malformed") return { result: { value: { status: "bad" } } };
+      if (this.apiExecution === "null-result") return null;
       return {
         result: {
           value: { status: 204, contentType: "", body: "", truncated: false },
@@ -245,10 +246,20 @@ export class FakeConnection implements CdpConnection {
     return {};
   }
 
-  on(event: string, listener: (params: unknown, sessionId?: string) => void): void {
+  listenerCount(event: string): number {
+    return this.eventListeners.get(event)?.size ?? 0;
+  }
+
+  on(event: string, listener: (params: unknown, sessionId?: string) => void): () => void {
     const listeners = this.eventListeners.get(event) ?? new Set();
     listeners.add(listener);
     this.eventListeners.set(event, listeners);
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0 && this.eventListeners.get(event) === listeners) {
+        this.eventListeners.delete(event);
+      }
+    };
   }
 
   close(): void { this.emitClose(); }
@@ -381,7 +392,7 @@ export interface WireFakeOptions {
   adoptedExitsOnClose?: boolean;
   distinctRuntimeExecutable?: boolean;
   runtimeCmdlineRewritten?: boolean;
-  apiExecution?: "success" | "pending" | "disconnect" | "page-exception" | "malformed";
+  apiExecution?: "success" | "pending" | "disconnect" | "page-exception" | "malformed" | "null-result";
 }
 
 export function wireFakes(options: WireFakeOptions = {}) {

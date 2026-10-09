@@ -118,7 +118,7 @@ const CRUNCHYROLL_PAGE_ORIGIN = "https://www.crunchyroll.com";
  * write can never be sent under whatever default the page would have chosen.
  */
 export const CRUNCHYROLL_FETCH_FUNCTION = `
-  async function (url, method, authorization, maxChars, bodyText, bodyContentType) {
+  async function (url, method, authorization, maxBytes, bodyText, bodyContentType) {
     const headers = { Authorization: authorization };
     const init = { method, headers, credentials: "omit", redirect: "manual" };
     if (typeof bodyText === "string") {
@@ -127,12 +127,41 @@ export const CRUNCHYROLL_FETCH_FUNCTION = `
     }
     const response = await fetch(url, init);
     const contentType = response.headers.get("content-type") || "";
-    const text = await response.text();
-    const truncated = text.length > maxChars;
+    let text = "";
+    let truncated = false;
+    if (response.body) {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let bytes = 0;
+      let finished = false;
+      try {
+        while (true) {
+          const chunk = await reader.read();
+          if (chunk.done) {
+            finished = true;
+            text += decoder.decode();
+            break;
+          }
+          const remaining = maxBytes - bytes;
+          if (chunk.value.byteLength > remaining) {
+            text += decoder.decode(chunk.value.subarray(0, remaining), { stream: true });
+            truncated = true;
+            break;
+          }
+          bytes += chunk.value.byteLength;
+          text += decoder.decode(chunk.value, { stream: true });
+        }
+      } finally {
+        if (!finished) {
+          try { await reader.cancel(); } catch {}
+        }
+        reader.releaseLock();
+      }
+    }
     return {
       status: response.status,
       contentType,
-      body: truncated ? text.slice(0, maxChars) : text,
+      body: text,
       truncated,
     };
   }
@@ -143,8 +172,7 @@ function isCrunchyrollApiUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
     return (
-      parsed.protocol === "https:" &&
-      parsed.hostname === "www.crunchyroll.com" &&
+      parsed.origin === CRUNCHYROLL_PAGE_ORIGIN &&
       parsed.username === "" &&
       parsed.password === ""
     );
@@ -818,7 +846,7 @@ export function createBrowserSessionManager(
       const listeners = new Set<(event: PausedResponse) => void>();
       let closed = false;
 
-      active.connection.on("Fetch.requestPaused", (params, frameSessionId) => {
+      const unsubscribePaused = active.connection.on("Fetch.requestPaused", (params, frameSessionId) => {
         if (closed) return;
         if (frameSessionId !== sessionId) return;
         if (generation !== activeConnectionGeneration) return;
@@ -842,11 +870,17 @@ export function createBrowserSessionManager(
 
       // Response stage only, for exactly the pattern the caller fixed. No
       // request-stage pause, so nothing here can modify an outgoing request.
-      await active.connection.send(
-        "Fetch.enable",
-        { patterns: [{ urlPattern, requestStage: "Response" }] },
-        sessionId
-      );
+      try {
+        await active.connection.send(
+          "Fetch.enable",
+          { patterns: [{ urlPattern, requestStage: "Response" }] },
+          sessionId
+        );
+      } catch (error) {
+        unsubscribePaused();
+        try { await active.connection.send("Target.detachFromTarget", { sessionId }); } catch {}
+        throw error;
+      }
 
       const interception: ResponseInterception = {
         connectionGeneration: generation,
@@ -870,6 +904,7 @@ export function createBrowserSessionManager(
         async close() {
           if (closed) return;
           closed = true;
+          unsubscribePaused();
           listeners.clear();
           // Best effort: a disconnected browser is already the outcome close
           // wants, and teardown must never throw over it.
@@ -915,7 +950,7 @@ export function createBrowserSessionManager(
       // An extension, a devtools page or an unrelated isolated world can never
       // match, and nothing is ever "recovered" by falling back to another one.
       let executionContextId: number | undefined;
-      active.connection.on("Runtime.executionContextCreated", (params, frameSessionId) => {
+      const unsubscribeContext = active.connection.on("Runtime.executionContextCreated", (params, frameSessionId) => {
         if (frameSessionId !== sessionId) return;
         if (generation !== activeConnectionGeneration) return;
         const context = (params as { context?: { id?: unknown; origin?: unknown; auxData?: unknown } })
@@ -926,8 +961,6 @@ export function createBrowserSessionManager(
         executionContextId = context.id;
       });
 
-      await active.connection.send("Runtime.enable", undefined, sessionId);
-
       const detach = async (): Promise<void> => {
         try {
           await active.connection.send("Target.detachFromTarget", { sessionId });
@@ -935,6 +968,15 @@ export function createBrowserSessionManager(
           // a disconnected browser is already the outcome close wants
         }
       };
+
+      try {
+        await active.connection.send("Runtime.enable", undefined, sessionId);
+      } catch (error) {
+        await detach();
+        throw error;
+      } finally {
+        unsubscribeContext();
+      }
 
       if (executionContextId === undefined) {
         // Fail closed: no legitimate Crunchyroll page context exists right now.
@@ -1036,7 +1078,10 @@ export function createBrowserSessionManager(
             timer?.cancel();
           }
 
-          const frame = raw as {
+          // A valid JSON/CDP result can still be null or a primitive. Preserve
+          // post-dispatch uncertainty instead of leaking an incidental TypeError.
+          const frame = (typeof raw === "object" && raw !== null && !Array.isArray(raw)
+            ? raw : {}) as {
             result?: { value?: unknown };
             exceptionDetails?: unknown;
           };

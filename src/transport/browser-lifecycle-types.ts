@@ -69,7 +69,8 @@ export interface CdpConnection {
    * source-compatible.
    */
   send(method: string, params?: Record<string, unknown>, sessionId?: string): Promise<unknown>;
-  on(event: string, listener: (params: unknown, sessionId?: string) => void): void;
+  /** The returned disposer releases the subscriber without closing CDP. */
+  on(event: string, listener: (params: unknown, sessionId?: string) => void): () => void;
   close(): void;
   onClose(listener: () => void): () => void;
 }

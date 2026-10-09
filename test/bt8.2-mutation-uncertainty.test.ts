@@ -126,6 +126,7 @@ describe("BT8.2 remediation — session manager owns the dispatch boundary", () 
     ["disconnect", "disconnect"],
     ["page-exception", "page-exception"],
     ["malformed", "malformed"],
+    ["null-result", "malformed"],
   ] as const) {
     test(`${mode} after Runtime.callFunctionOn carries structured uncertainty`, async () => {
       const h = wireFakes({ apiExecution: mode });
