@@ -14,6 +14,7 @@
     "typecheck": "tsc --noEmit",
     "test": "tsx --test test/*.test.ts",
     "test:browser": "tsx --test test/browser-load.test.ts",
+    "test:handoff": "tsx --test test/browser-profile-handoff.test.ts",
     "validate:live": "tsx scripts/validate-live.ts",
     "onboard:browser": "tsx scripts/onboard-browser.ts"
   },

@@ -176,6 +176,19 @@ e `DBUS_SESSION_BUS_ADDRESS`) e os overrides de navegador e sandbox. O SDK não
 as herda por padrão: sem esse repasse, o terminal pode detectar uma sessão
 gráfica enquanto o navegador iniciado pelo MCP não consegue abrir uma janela.
 O repasse usa uma lista restrita e não registra os valores dessas variáveis.
+As etapas manual e MCP também usam o mesmo ambiente de subprocesso, incluindo
+`XDG_CURRENT_DESKTOP`, `DESKTOP_SESSION`, identificadores KDE/GNOME e diretórios
+XDG. O Chromium usa identificadores da sessão para reconhecer o desktop Linux;
+alterá-los entre as etapas é uma diferença que pode afetar o armazenamento
+protegido. O runner não seleciona um armazenamento inseguro nem copia cookies.
+Um teste com sessão sintética e Chromium real verifica a persistência no mesmo
+perfil após reiniciar o navegador em outro subprocesso via SDK. Ambas as
+execuções da fixture usam headless e CDP para encerramento normal na nuvem.
+Esse teste local não comprova o login manual, a continuidade da conta
+Crunchyroll nem o comportamento do chaveiro do seu PC.
+Execute-o isoladamente com `npm run test:handoff`. O wrapper Linux também o
+executa antes dos probes no provedor. A seleção de desktop do Chromium está em
+[GetDesktopEnvironment](https://github.com/chromium/chromium/blob/main/base/nix/xdg_util.cc).
 Depois da validação autenticada, feche essa janela; o runner fecha o processo
 MCP, mas não chama logout nem apaga a sessão do usuário.
 
@@ -184,3 +197,7 @@ Os relatórios JSON podem ser salvos em caminhos escolhidos usando
 `CRUNCHYROLL_LIVE_REPORT_PATH`, respectivamente. São caminhos de saída,
 não credenciais. A suíte padrão usa fixtures locais; probes no provedor real
 são executados somente por comandos explícitos.
+
+Quando `CRUNCHYROLL_LIVE_REPORT_PATH` é definido, o runner também salva a fase
+em andamento. `complete: false` e `status: "running"` indicam uma execução sem
+resultado final; não representam aprovação. O JSON final usa `complete: true`.

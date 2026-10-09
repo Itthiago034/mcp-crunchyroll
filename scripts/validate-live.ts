@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { browserSubprocessEnvironment } from "./browser-subprocess-environment.js";
+import { browserLaunchEnvironment } from "./browser-subprocess-environment.js";
 import { openManualBrowser, OnboardingBlocked } from "./onboard-browser.js";
 
 // Opt-in integration runner. No writes, watch history, account IDs or credentials
@@ -13,12 +13,21 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 const client = new Client({ name: "crunchyroll-live-validation", version: "1.0.0" });
 const transport = new StdioClientTransport({ command: process.execPath,
   args: [fileURLToPath(new URL("../dist/index.js", import.meta.url))], cwd: root,
-  env: browserSubprocessEnvironment(), stderr: "pipe" });
+  env: browserLaunchEnvironment(), stderr: "pipe" });
 transport.stderr?.on("data", () => { /* Avoid retaining or printing credential-bearing diagnostics. */ });
 const report: Record<string, unknown> = {
   target: "Crunchyroll real via MCP stdio", plannedRequests: 12, concurrency: 2,
   completedRequests: 0, status: "blocked", blockers: [],
+  complete: false,
 };
+
+async function saveProgress(phase: string): Promise<void> {
+  report.phase = phase;
+  report.status = "running";
+  if (process.env.CRUNCHYROLL_LIVE_REPORT_PATH) {
+    await writeFile(process.env.CRUNCHYROLL_LIVE_REPORT_PATH, JSON.stringify(report, null, 2) + "\n");
+  }
+}
 
 function payload(result: unknown): Record<string, unknown> {
   const tool = result as { isError?: boolean; content?: Array<{ type: string; text?: string }> };
@@ -39,11 +48,11 @@ try {
       report.blockers = ["interactive_login_required", "interactive_browser_display_unavailable"];
     } else {
       report.loginFlow = "manual_browser_then_managed_mcp";
-      report.phase = "manual_browser";
+      await saveProgress("manual_browser");
       try {
         await openManualBrowser();
         report.manualBrowserClosedNormally = true;
-        report.phase = "managed_auth_validation";
+        await saveProgress("managed_auth_validation");
         console.error("Validando a sessão no navegador gerenciado. As leituras começarão somente após confirmação pelo MCP.");
         await client.callTool({ name: "crunchyroll_login", arguments: {} }, undefined, { timeout: 360_000 });
         readiness = payload(await client.callTool({ name: "crunchyroll_status", arguments: {} }));
@@ -61,12 +70,13 @@ try {
   report.readiness = { authenticated: readiness.authenticated === true,
     browserConnected: readiness.browser_connected === true, authState: readiness.auth_state };
   if (readiness.authenticated !== true || readiness.browser_connected !== true) {
+    report.status = "blocked";
     if (!(report.blockers as string[]).length) {
       report.blockers = [readiness.authenticated !== true ? "interactive_login_required" : "managed_browser_not_connected"];
     }
     process.exitCode = 2;
   } else {
-    report.phase = "authenticated_reads";
+    await saveProgress("authenticated_reads");
     const operations = [
       { name: "crunchyroll_get_categories", arguments: {}, collection: "categories" },
       { name: "crunchyroll_search", arguments: { query: "Naruto", n: 5 }, collection: "results" },
@@ -105,7 +115,12 @@ try {
     : "mcp_initialization_or_login_failed"];
   process.exitCode = 1;
 } finally {
-  await client.close();
+  try { await client.close(); } catch {
+    report.status = "failed";
+    report.blockers = [...report.blockers as string[], "mcp_cleanup_failed"];
+    process.exitCode = 1;
+  }
+  report.complete = true;
   const serialized = JSON.stringify(report, null, 2) + "\n";
   if (process.env.CRUNCHYROLL_LIVE_REPORT_PATH) await writeFile(process.env.CRUNCHYROLL_LIVE_REPORT_PATH, serialized);
   process.stdout.write(serialized);

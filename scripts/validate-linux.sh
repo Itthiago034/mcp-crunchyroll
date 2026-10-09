@@ -35,6 +35,7 @@ npm run typecheck
 npm run build
 
 CRUNCHYROLL_LOAD_REPORT_PATH="$TASK_OUTPUT_DIR/local-browser.json" npm run test:browser
+npm run test:handoff
 CRUNCHYROLL_LIVE_PROBE_REPORT_PATH="$TASK_OUTPUT_DIR/live-browser.json" \
   node --import tsx scripts/probe-live-browser.ts
 

@@ -1,13 +1,22 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { browserSubprocessEnvironment } from "../scripts/browser-subprocess-environment.js";
+import { browserSubprocessEnvironment, browserLaunchEnvironment } from "../scripts/browser-subprocess-environment.js";
+import { getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 const desktopFixture = {
   DISPLAY: ":42",
   WAYLAND_DISPLAY: "wayland-test",
   XDG_RUNTIME_DIR: "/tmp/desktop-fixture",
   XDG_SESSION_TYPE: "wayland",
+  XDG_CURRENT_DESKTOP: "KDE",
+  DESKTOP_SESSION: "plasma",
+  KDE_SESSION_VERSION: "6",
+  KDE_FULL_SESSION: "true",
+  GNOME_DESKTOP_SESSION_ID: "synthetic-desktop-session",
+  XDG_CONFIG_HOME: "/tmp/desktop-fixture/config",
+  XDG_DATA_HOME: "/tmp/desktop-fixture/data",
+  XDG_CACHE_HOME: "/tmp/desktop-fixture/cache",
   XAUTHORITY: "/tmp/desktop-fixture/xauth",
   DBUS_SESSION_BUS_ADDRESS: "unix:path=/tmp/desktop-fixture/bus",
   CRUNCHYROLL_BROWSER_EXECUTABLE: "/usr/bin/chromium-fixture",
@@ -77,7 +86,9 @@ test("real SDK drops desktop variables by default and preserves them with the br
     const before = await inspectChildEnvironment();
     assert.ok(Object.values(before).every((value) => value === false));
 
-    const after = await inspectChildEnvironment(browserSubprocessEnvironment());
+    const launchEnvironment = browserLaunchEnvironment();
+    assert.deepEqual(launchEnvironment, { ...getDefaultEnvironment(), ...desktopFixture });
+    const after = await inspectChildEnvironment(launchEnvironment);
     for (const key of Object.keys(desktopFixture)) assert.equal(after[key], true, key);
     assert.equal(after.unrelatedSecretPresent, false);
   } finally {

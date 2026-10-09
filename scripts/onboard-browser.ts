@@ -3,6 +3,7 @@ import { lstat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { CRUNCHYROLL_LOGIN_URL } from "../src/transport/browser-auth.js";
+import { browserLaunchEnvironment } from "./browser-subprocess-environment.js";
 import {
   browserProfileDir,
   ensureBrowserProfile,
@@ -51,7 +52,9 @@ export async function openManualBrowser(): Promise<void> {
   console.error("Abrindo o perfil dedicado para login manual, sem conexão CDP.");
   console.error("Faça a verificação e o login diretamente no Crunchyroll. Não importe dados de outro navegador.");
   console.error("Depois de confirmar o login na página, feche esta janela normalmente para liberar o perfil.");
-  const child = spawn(plan.executable, plan.args, { stdio: "ignore", shell: false });
+  const child = spawn(plan.executable, plan.args, {
+    stdio: "ignore", shell: false, env: browserLaunchEnvironment(),
+  });
   const interrupt = (): void => { child.kill("SIGTERM"); };
   process.on("SIGINT", interrupt);
   process.on("SIGTERM", interrupt);
