@@ -746,20 +746,35 @@ export function createBrowserSessionManager(
 
     if (processHandle.source === "spawned") {
       const handle = processHandle;
-      let timeout: { cancel(): void } | undefined;
       const exited = new Promise<void>((resolve) => {
         stopExitResolve = resolve;
       });
-      const timedOut = new Promise<"timeout">((resolve) => {
-        timeout = seams.clock.setTimeout(() => resolve("timeout"), config.cdpCommandTimeoutMs);
-      });
-      handle.requestTermination();
-      const outcome = await Promise.race([exited.then(() => "exit" as const), timedOut]);
-      if (outcome === "timeout") {
-        handle.forceKill();
-        await exited;
+      const waitForExit = async () => {
+        let timeout: { cancel(): void } | undefined;
+        const timedOut = new Promise<"timeout">((resolve) => {
+          timeout = seams.clock.setTimeout(() => resolve("timeout"), config.cdpCommandTimeoutMs);
+        });
+        try {
+          return await Promise.race([exited.then(() => "exit" as const), timedOut]);
+        } finally {
+          timeout?.cancel();
+        }
+      };
+      // Let Chromium flush the persistent profile before stopping the process.
+      // SIGTERM alone can exit before recently accepted cookies reach disk.
+      // A CDP acknowledgement is not an exit: wait for the owned child itself.
+      let closedNormally = false;
+      if (connection) {
+        void connection.send("Browser.close").catch(() => undefined);
+        closedNormally = (await waitForExit()) === "exit";
       }
-      timeout?.cancel();
+      if (!closedNormally) {
+        handle.requestTermination();
+        if ((await waitForExit()) === "timeout") {
+          handle.forceKill();
+          await exited;
+        }
+      }
       stopExitResolve = undefined;
       disposeActive();
       await clearOwnershipRecord(config.profileDir);

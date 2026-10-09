@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
+import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -45,6 +46,7 @@ test("real Chromium validates concurrent HTTP requests, resource limits and reco
   const seen = new Map<string, number>();
   const guards: Array<{ cookieAbsent: boolean; authorizationExpected: boolean }> = [];
   const streamResults: Array<{ bytes: number; cancelled: boolean }> = [];
+  const sockets = new Set<Socket>();
   let active = 0;
   let peakActive = 0;
   const server = createServer((req, res) => {
@@ -88,6 +90,10 @@ test("real Chromium validates concurrent HTTP requests, resource limits and reco
       res.end(JSON.stringify({ id: url.searchParams.get("id"), marker: "á😀", status }));
     }, 20);
     res.once("close", () => clearTimeout(timer));
+  });
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address() as { port: number };
@@ -180,6 +186,7 @@ test("real Chromium validates concurrent HTTP requests, resource limits and reco
       assert.equal(result.response.status, 0, "browser returns an opaque manual redirect");
     });
     assert.equal([...seen.keys()].some((path) => path.startsWith("/redirect-target")), false);
+    const reusableConnectionsBeforeReset = sockets.size;
     await pool(12, 12, async (id) => {
       const result = await request(`/disconnect?id=${id}`);
       assert.equal(result.failed, true, "real connection reset rejects the browser fetch");
@@ -202,10 +209,13 @@ test("real Chromium validates concurrent HTTP requests, resource limits and reco
     const resetAttempts = [...seen.entries()].filter(([path]) => path.startsWith("/disconnect"));
     t.diagnostic(JSON.stringify({ resetAttempts: Object.fromEntries(resetAttempts) }));
     assert.equal(resetAttempts.length, 12);
-    // Chromium HttpNetworkTransaction permits two retries in addition to the
-    // original attempt (kMaxRetryAttempts), so this reset fixture allows 3.
-    assert.ok(resetAttempts.every(([, count]) => count >= 1 && count <= 3),
-      "Chromium may retry an idempotent GET after a connection reset, but attempts remain bounded");
+    // ShouldResendRequest permits another attempt on a reused connection
+    // before headers arrive. Each reset destroys that socket; a fresh socket
+    // has no successful response and cannot trigger this resend path. These
+    // retries do not use Chromium's separate kMaxRetryAttempts counter.
+    const implicitGetRetries = resetAttempts.reduce((sum, [, count]) => sum + count - 1, 0);
+    assert.ok(implicitGetRetries <= reusableConnectionsBeforeReset,
+      "reset retries cannot exceed the pool of previously established connections");
     assert.ok([...seen.entries()].filter(([path]) => !path.startsWith("/disconnect"))
       .every(([, count]) => count === 1), "responses, redirects and oversize requests are not duplicated");
     assert.ok(guards.every((guard) => guard.cookieAbsent && guard.authorizationExpected));
@@ -227,7 +237,6 @@ test("real Chromium validates concurrent HTTP requests, resource limits and reco
     assert.equal(manager.state(), "BROWSER_READY");
     assert.ok(guards.every((guard) => guard.cookieAbsent && guard.authorizationExpected));
     assert.equal(seen.size, 317, "every logical request reached the fixture server");
-    const implicitGetRetries = resetAttempts.reduce((sum, [, count]) => sum + count - 1, 0);
     assert.equal(guards.length, 317 + implicitGetRetries);
 
     connection.close();
@@ -239,6 +248,7 @@ test("real Chromium validates concurrent HTTP requests, resource limits and reco
       manualRedirects: 12, expectedConnectionResets: 12, cancelledOversizedResponses: 12,
       cdpBurst: { accepted: 128, rejectedAtCapacity: 1, recovered: true },
       cookiesOmitted: true, implicitGetRetriesOnReset: implicitGetRetries,
+      reusableConnectionsBeforeReset,
       duplicateNormalRequests: 0, remainingActiveHttp: active,
       stopped: true, timings,
     };

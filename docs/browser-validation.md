@@ -55,6 +55,13 @@ o MCP não implementou retries nesta execução. Não houve duplicação nos dem
 cenários. A fonte oficial de rede do Chromium descreve retries em
 [HttpNetworkTransaction](https://github.com/chromium/chromium/blob/main/net/http/http_network_transaction.cc).
 Esse resultado não estabelece a ausência de retries nativos em mutações.
+O limite de duas repetições de `kMaxRetryAttempts` não se aplica ao caminho
+`ShouldResendRequest` de erro antes dos headers em conexão reutilizada. Em uma
+execução posterior da suíte, um GET da fixture teve sete tentativas. O teste
+conta agora os sockets existentes antes do lote de resets e verifica que o
+total de tentativas extras não ultrapassa esse conjunto: cada reset destrói
+um socket e uma conexão nova ainda não é elegível a esse resend. O relatório
+inicial acima permanece como observação daquela execução.
 
 Dados da execução: [browser-load.json](validation-results/browser-load.json).
 
@@ -234,6 +241,12 @@ Crunchyroll nem o comportamento do chaveiro do seu PC.
 Execute-o isoladamente com `npm run test:handoff`. O wrapper Linux também o
 executa antes dos probes no provedor. A seleção de desktop do Chromium está em
 [GetDesktopEnvironment](https://github.com/chromium/chromium/blob/main/base/nix/xdg_util.cc).
+O encerramento gerenciado usa `Browser.close` e aguarda a saída do processo
+para permitir a gravação do perfil. Para processos iniciados pelo próprio MCP,
+se a saída não ocorrer no prazo de um comando CDP, recorre a `SIGTERM`; somente
+após um segundo prazo sem saída usa `SIGKILL`. Esses caminhos de recuperação
+não garantem a gravação da sessão. Processos adotados continuam sem receber
+sinais do sistema operacional.
 Depois da validação autenticada, feche essa janela; o runner fecha o processo
 MCP, mas não chama logout nem apaga a sessão do usuário.
 
@@ -246,3 +259,26 @@ são executados somente por comandos explícitos.
 Quando `CRUNCHYROLL_LIVE_REPORT_PATH` é definido, o runner também salva a fase
 em andamento. `complete: false` e `status: "running"` indicam uma execução sem
 resultado final; não representam aprovação. O JSON final usa `complete: true`.
+
+## Correção de persistência no encerramento
+
+Na execução de CI `37868812177`, o teste de retomada falhou em Node 20 e 22:
+o servidor local recebeu a segunda navegação sem o cookie sintético esperado.
+A mesma falha foi reproduzida na nuvem com Chromium 151.0.7922.173, Node
+20.20.2 e o código anterior, repetindo o teste isolado. O processo iniciado pelo
+MCP recebia `SIGTERM` diretamente, sem solicitar antes o fechamento pelo CDP.
+
+Após usar `Browser.close` e aguardar a saída do processo, 20 execuções isoladas
+consecutivas do teste de retomada passaram. A suíte completa passou com 1.031
+testes, zero falhas e zero testes ignorados em cada versão: Node 18.20.8,
+20.20.2 e 22.23.3. O teste de carga com a contagem corrigida de conexões também
+passou nas três versões. Os testes unitários verificam que a resposta ao
+comando de fechamento não substitui a espera pela saída, que não há sinais
+no fechamento normal e que os dois prazos de recuperação são respeitados.
+
+Essas verificações usaram o Chromium local com sandbox, fixtures sem conta e
+`umask 022`. A máscara `077` do shell da nuvem torna
+segura uma fixture antiga que tenta criar um diretório inseguro com `mkdir`
+e causa uma falha de teste distinta; não indica perda de sessão. O Chrome
+for Testing 131 do CI não foi executado nesta máquina: seu download respondeu
+403. A aprovação da nova execução no GitHub deve ser verificada separadamente.

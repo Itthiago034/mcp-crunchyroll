@@ -98,21 +98,56 @@ describe("BT2 session manager — start and stop", () => {
     );
   });
 
-  test("stop terminates only the owned process, gracefully first", async () => {
-    const { manager, spawner, profileDir } = wireFakes();
+  test("stop closes Chromium through CDP without signals and preserves the profile", async () => {
+    const { manager, spawner, connector, profileDir } = wireFakes();
     await manager.start();
     await manager.stop();
     assert.equal(manager.state(), "STOPPED");
-    assert.equal(spawner.launches[0].terminationRequested, true);
-    assert.equal(spawner.launches[0].forceKilled, false, "graceful first");
+    assert.equal(connector.connections[0].calls.filter((call) => call.method === "Browser.close").length, 1);
+    assert.equal(spawner.launches[0].terminationRequested, false);
+    assert.equal(spawner.launches[0].forceKilled, false);
     assert.equal(statSync(profileDir).mode & 0o777, 0o700, "the profile survives stop");
   });
 
-  test("stop escalates to force kill only when the child ignores SIGTERM", async () => {
-    const { manager, spawner, clock } = wireFakes({ ignoreSigterm: true });
+  test("a close acknowledgement does not stop the manager before the child exits", async () => {
+    const { manager, spawner, clock } = wireFakes({ ignoreBrowserClose: true, cdpCommandTimeoutMs: 100 });
     await manager.start();
     const stopping = manager.stop();
+    await clock.advance(99);
+    assert.equal(manager.state(), "BROWSER_READY");
+    assert.equal(spawner.launches[0].terminationRequested, false);
+    await spawner.launches[0].emitExit(0, null);
+    await stopping;
+    assert.equal(manager.state(), "STOPPED");
+    assert.equal(spawner.launches[0].terminationRequested, false);
     await clock.drain();
+    assert.equal(spawner.launches[0].forceKilled, false);
+  });
+
+  for (const options of [{ ignoreBrowserClose: true }, { failBrowserClose: true }]) {
+    test(`stop falls back to SIGTERM after the CDP deadline (${Object.keys(options)[0]})`, async () => {
+      const { manager, spawner, clock } = wireFakes({ ...options, cdpCommandTimeoutMs: 100 });
+      await manager.start();
+      const stopping = manager.stop();
+      await clock.advance(99);
+      assert.equal(spawner.launches[0].terminationRequested, false);
+      await clock.advance(1);
+      await stopping;
+      assert.equal(spawner.launches[0].terminationRequested, true);
+      assert.equal(spawner.launches[0].forceKilled, false);
+    });
+  }
+
+  test("stop escalates to force kill only after CDP close and SIGTERM deadlines", async () => {
+    const { manager, spawner, clock } = wireFakes({ ignoreBrowserClose: true, ignoreSigterm: true, cdpCommandTimeoutMs: 100 });
+    await manager.start();
+    const stopping = manager.stop();
+    await clock.advance(100);
+    assert.equal(spawner.launches[0].terminationRequested, true);
+    assert.equal(spawner.launches[0].forceKilled, false);
+    await clock.advance(99);
+    assert.equal(spawner.launches[0].forceKilled, false);
+    await clock.advance(1);
     await stopping;
     assert.equal(spawner.launches[0].forceKilled, true);
   });

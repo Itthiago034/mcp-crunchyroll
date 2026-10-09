@@ -190,6 +190,7 @@ export class FakeConnection implements CdpConnection {
     private readonly failHandshake = false,
     private readonly onBrowserClose?: () => void,
     private readonly apiExecution: WireFakeOptions["apiExecution"] = "success",
+    private readonly failBrowserClose = false,
   ) {}
 
   async send(
@@ -205,6 +206,7 @@ export class FakeConnection implements CdpConnection {
       return { product: "FakeBrowser/1.0" };
     }
     if (method === "Browser.close") {
+      if (this.failBrowserClose) throw new Error("synthetic close failure");
       this.onBrowserClose?.();
       this.emitClose();
       return {};
@@ -296,6 +298,7 @@ export class FakeConnector {
   constructor(
     private readonly options: WireFakeOptions,
     private readonly inspector: FakeProcessIdentityInspector,
+    private readonly spawner: FakeSpawner,
   ) {}
 
   async connect(_url: string): Promise<CdpConnection> {
@@ -315,8 +318,12 @@ export class FakeConnector {
         if (this.options.adoptedExitsOnClose) {
           this.inspector.setStartTime(this.inspector.adoptedPid, null);
         }
+        if (!this.options.ignoreBrowserClose) {
+          void this.spawner.launches.at(-1)?.emitExit(0, null);
+        }
       },
       this.options.apiExecution,
+      Boolean(this.options.failBrowserClose),
     );
     this.connections.push(connection);
     if (isFirst && this.options.closeImmediatelyAfterConnect) connection.emitClose();
@@ -381,6 +388,8 @@ export interface WireFakeOptions {
   exitBeforeReady?: boolean;
   neverReady?: boolean;
   ignoreSigterm?: boolean;
+  ignoreBrowserClose?: boolean;
+  failBrowserClose?: boolean;
   launchDeadlineMs?: number;
   cdpCommandTimeoutMs?: number;
   initialPageUrl?: string;
@@ -475,7 +484,7 @@ export function wireFakes(options: WireFakeOptions = {}) {
   }
   const spawner = new FakeSpawner(profileDir, options, processInspector);
   const clock = new FakeClock();
-  const connector = new FakeConnector(options, processInspector);
+  const connector = new FakeConnector(options, processInspector, spawner);
   const seams: BrowserSessionSeams = { spawner, clock, connector, processInspector };
   const config: BrowserSessionConfig = {
     launchMode: options.launchMode ?? "visible",
