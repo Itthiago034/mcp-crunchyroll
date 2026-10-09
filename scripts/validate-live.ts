@@ -4,13 +4,15 @@ import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { browserSubprocessEnvironment } from "./browser-subprocess-environment.js";
 
 // Opt-in integration runner. No writes, watch history, account IDs or credentials
 // are accepted as arguments or copied into the diagnostic report.
 const root = fileURLToPath(new URL("../", import.meta.url));
 const client = new Client({ name: "crunchyroll-live-validation", version: "1.0.0" });
 const transport = new StdioClientTransport({ command: process.execPath,
-  args: [fileURLToPath(new URL("../dist/index.js", import.meta.url))], cwd: root, stderr: "pipe" });
+  args: [fileURLToPath(new URL("../dist/index.js", import.meta.url))], cwd: root,
+  env: browserSubprocessEnvironment(), stderr: "pipe" });
 transport.stderr?.on("data", () => { /* Avoid retaining or printing credential-bearing diagnostics. */ });
 const report: Record<string, unknown> = {
   target: "Crunchyroll real via MCP stdio", plannedRequests: 12, concurrency: 2,

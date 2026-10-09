@@ -125,6 +125,12 @@ npm run validate:live -- --login
 Na nuvem, execute o teste do Chromium fora do isolamento adicional dos comandos
 quando ele bloquear namespaces; mantenha o sandbox do navegador habilitado.
 O login deve acontecer exclusivamente na janela do navegador gerenciado.
+O runner repassa explicitamente ao processo MCP as variáveis da sessão gráfica
+(`DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`, `XDG_SESSION_TYPE`, `XAUTHORITY`
+e `DBUS_SESSION_BUS_ADDRESS`) e os overrides de navegador e sandbox. O SDK não
+as herda por padrão: sem esse repasse, o terminal pode detectar uma sessão
+gráfica enquanto o navegador iniciado pelo MCP não consegue abrir uma janela.
+O repasse usa uma lista restrita e não registra os valores dessas variáveis.
 Depois da validação autenticada, feche essa janela; o runner fecha o processo
 MCP, mas não chama logout nem apaga a sessão do usuário.
 
