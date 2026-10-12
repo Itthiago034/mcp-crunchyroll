@@ -375,7 +375,7 @@ describe("BT8.4 — the capability is used only by the three migrated mutations"
   test("all three BT8 mutations are registered", () => {
     const ids = PRODUCTION_OPERATIONS.map((d) => String(d.id));
     for (const id of BT8_MUTATIONS) assert.equal(ids.includes(id), true, `${id} must be registered`);
-    assert.equal(PRODUCTION_OPERATIONS.length, 16);
+    assert.equal(PRODUCTION_OPERATIONS.length, 17, "16 tool operations + internal GET_OBJECTS");
   });
 
   test("UPDATE reaches the same dispatcher/gateway mutation boundary", async () => {

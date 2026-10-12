@@ -166,9 +166,17 @@ describe("BT7 — the production table after the account-read migration", () => 
     // whose whole meaning is "this is served here now".
     assert.deepEqual(
       PRODUCTION_OPERATIONS.map((d) => String(d.id)).sort(),
-      [...BT5_BT6_OPERATIONS, ...BT7_OPERATIONS, "ADD_TO_WATCHLIST", "REMOVE_FROM_WATCHLIST", "UPDATE_PLAYHEAD"].sort()
+      [
+        ...BT5_BT6_OPERATIONS,
+        ...BT7_OPERATIONS,
+        "ADD_TO_WATCHLIST",
+        "REMOVE_FROM_WATCHLIST",
+        "UPDATE_PLAYHEAD",
+        // Internal read with no tool of its own: names the watchlist's bare ids.
+        "GET_OBJECTS",
+      ].sort()
     );
-    assert.equal(PRODUCTION_OPERATIONS.length, 16);
+    assert.equal(PRODUCTION_OPERATIONS.length, 17);
   });
 
   test("both deferred operations are absent — D-1c and F-1, neither forgotten", () => {

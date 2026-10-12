@@ -103,3 +103,46 @@ describe("get_episodes episode_number filter", () => {
     await assert.rejects(gateway.callTool("crunchyroll_get_episodes", { season_id: "GS1", episode_number: "2" }));
   });
 });
+
+describe("watchlist names its ids", () => {
+  async function gatewayWith(backend: unknown) {
+    const { createContentGateway } = await import("../src/transport/content-gateway.js");
+    const { createTransportDispatcher } = await import("../src/transport/dispatcher.js");
+    const { createOperationRegistry, PRODUCTION_OPERATIONS } = await import("../src/transport/operation-registry.js");
+    const registry = createOperationRegistry(PRODUCTION_OPERATIONS);
+    return createContentGateway(createTransportDispatcher(registry, backend as never), registry);
+  }
+
+  test("one GET_OBJECTS read adds title and type, and n is honoured", async () => {
+    const calls: Array<{ id: string; params: Record<string, unknown> }> = [];
+    const backend = {
+      async executeResolved(call: { descriptor: { id: unknown }; callerParams: Record<string, unknown> }) {
+        const id = String(call.descriptor.id);
+        calls.push({ id, params: call.callerParams });
+        const json = id === "GET_WATCHLIST"
+          ? { data: [{ id: "GA" }, { id: "GB" }, { id: "GC" }] }
+          : { data: [{ id: "GA", title: "Alpha", type: "series" }, { id: "GB", title: "Beta", type: "movie_listing" }] };
+        return { status: 200, contentType: "application/json", json };
+      },
+    };
+    const gateway = await gatewayWith(backend);
+    const result = await gateway.callTool("crunchyroll_get_watchlist", { n: 2 });
+    assert.deepEqual(result, {
+      count: 2,
+      items: [{ id: "GA", title: "Alpha", type: "series" }, { id: "GB", title: "Beta", type: "movie_listing" }],
+    });
+    assert.deepEqual(calls.map((c) => c.id), ["GET_WATCHLIST", "GET_OBJECTS"]);
+    assert.equal(calls[1].params.object_ids, "GA,GB");
+  });
+
+  test("a failed title lookup still returns the watchlist", async () => {
+    const backend = {
+      async executeResolved(call: { descriptor: { id: unknown } }) {
+        if (String(call.descriptor.id) === "GET_OBJECTS") throw new Error("boom");
+        return { status: 200, contentType: "application/json", json: { data: [{ id: "GA" }] } };
+      },
+    };
+    const gateway = await gatewayWith(backend);
+    assert.deepEqual(await gateway.callTool("crunchyroll_get_watchlist", {}), { count: 1, items: [{ id: "GA" }] });
+  });
+});

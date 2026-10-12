@@ -81,9 +81,9 @@ const render = (operation: string, params: Record<string, unknown>): string =>
 // ── F-1 ─────────────────────────────────────────────────────────────────────
 
 describe("F-1 — GET_CONTINUE_WATCHING is deferred, not migrated", () => {
-  test("the production table holds sixteen operations and not this one", () => {
+  test("the production table holds seventeen operations and not this one", () => {
     const ids = PRODUCTION_OPERATIONS.map((d) => d.id as unknown as string).sort();
-    assert.equal(ids.length, 16, "PRODUCTION_OPERATIONS must be exactly 16");
+    assert.equal(ids.length, 17, "PRODUCTION_OPERATIONS must be exactly 17 (16 + internal GET_OBJECTS)");
     assert.equal(ids.includes("GET_CONTINUE_WATCHING"), false);
     assert.deepEqual(ids, [
       "ADD_TO_WATCHLIST",
@@ -92,6 +92,7 @@ describe("F-1 — GET_CONTINUE_WATCHING is deferred, not migrated", () => {
       "GET_EPISODE",
       "GET_EPISODES",
       "GET_HISTORY",
+      "GET_OBJECTS",
       "GET_PLAYHEADS",
       "GET_RECOMMENDATIONS",
       "GET_SEASONS",

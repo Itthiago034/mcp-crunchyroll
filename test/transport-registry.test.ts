@@ -89,6 +89,7 @@ describe("BT1 registry — construction and lookup", () => {
         "GET_EPISODE",
         "GET_EPISODES",
         "GET_HISTORY",
+        "GET_OBJECTS",
         "GET_PLAYHEADS",
         "GET_RECOMMENDATIONS",
         "GET_SEASONS",

@@ -41,6 +41,7 @@ const DEFAULT_PAGE_SIZE = 20;
 const DEFAULT_BROWSE_START = 0;
 /** The watchlist has always been newest-first unless the caller says otherwise. */
 const DEFAULT_WATCHLIST_ORDER = "desc";
+const GET_OBJECTS = "GET_OBJECTS" as unknown as OperationId;
 
 /** Only defined values are forwarded: an absent option must stay absent. */
 function withDefined(params: Record<string, unknown>): CallerParams {
@@ -97,6 +98,41 @@ export function createContentGateway(
   transport: CrunchyrollTransport,
   registry: OperationRegistry
 ): ContentGateway {
+  /**
+   * Add `title` and `type` to items that carry only an `id`, with ONE extra
+   * read. Best effort: if that read fails the items are returned as they were,
+   * because the watchlist itself was read successfully.
+   */
+  const withTitles = async (items: readonly unknown[]): Promise<unknown[]> => {
+    const ids = items
+      .map((item) => (item as { id?: unknown }).id)
+      .filter((id): id is string => typeof id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(id));
+    if (ids.length === 0 || !registry.has(GET_OBJECTS)) return [...items];
+    let names: Map<string, { title?: unknown; type?: unknown }>;
+    try {
+      const json = (await transport.execute(GET_OBJECTS, { object_ids: ids.join(",") })).json as {
+        data?: unknown;
+      };
+      const objects = Array.isArray(json?.data) ? json.data : [];
+      names = new Map(
+        objects
+          .filter((o): o is Record<string, unknown> => typeof o === "object" && o !== null)
+          .map((o) => [String(o.id), { title: o.title, type: o.type }])
+      );
+    } catch {
+      return [...items];
+    }
+    return items.map((item) => {
+      const named = names.get(String((item as { id?: unknown }).id));
+      if (!named || typeof item !== "object" || item === null) return item;
+      return {
+        ...(item as Record<string, unknown>),
+        ...(typeof named.title === "string" ? { title: named.title } : {}),
+        ...(typeof named.type === "string" ? { type: named.type } : {}),
+      };
+    });
+  };
+
   return {
     isContentTool(name: string): boolean {
       return CONTENT_TOOL_OPERATIONS.has(name);
@@ -218,14 +254,21 @@ export function createContentGateway(
           );
 
         case "GET_WATCHLIST": {
+          const n = args.n ?? DEFAULT_PAGE_SIZE;
           const result = await transport.execute(
             operation,
             withDefined({
-              n: args.n ?? DEFAULT_PAGE_SIZE,
+              n,
               order: args.order ?? DEFAULT_WATCHLIST_ORDER,
             })
           );
-          return parseWatchlist(result.json);
+          const watchlist = parseWatchlist(result.json);
+          // The provider ignores `n` and answers bare ids (126 of them for a
+          // real account). Honour `n` here and name what the ids are, so a
+          // client does not have to look up every series one by one.
+          const limit = typeof n === "number" && n > 0 ? Math.min(n, 50) : DEFAULT_PAGE_SIZE;
+          const items = watchlist.items.slice(0, limit);
+          return { count: items.length, items: await withTitles(items) };
         }
 
         case "GET_HISTORY":

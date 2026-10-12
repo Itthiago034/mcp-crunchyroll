@@ -306,7 +306,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "crunchyroll_get_seasons",
-      description: "Get all seasons of an anime series.",
+      description:
+        "Get all seasons of an anime series: id, title, season_number, number_of_episodes, original_audio and audio_versions (audio locale -> season id).",
       inputSchema: {
         type: "object",
         properties: {
@@ -346,7 +347,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     // Watchlist
     {
       name: "crunchyroll_get_watchlist",
-      description: "Get the user's anime watchlist (series saved to watch later).",
+      description:
+        "Get the user's watchlist (series saved to watch later): id, title, type, is_favorite, date_added. Honours n (default 20).",
       inputSchema: {
         type: "object",
         properties: {
@@ -395,7 +397,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     // History & Progress
     {
       name: "crunchyroll_get_history",
-      description: "Get recently watched episodes and their progress.",
+      description:
+        "Get recently watched episodes, newest first: episode id, title, series/season/episode numbers, playhead (seconds), fully_watched and audio_versions (audio locale -> episode id to play).",
       inputSchema: {
         type: "object",
         properties: {
@@ -694,7 +697,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
       const safe = safeErrorWithCleanStack(err);
       const message = safe.message;
-      const isAuthError = message.includes("Not logged in") || message.includes("401");
+      const isAuthError =
+        message.includes("Not logged in") || message.includes("401") || message.includes("Not authenticated");
       const errResult = {
         content: [
           {
@@ -702,7 +706,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             text: JSON.stringify(
               {
                 error: message,
-                ...(isAuthError ? { hint: "Use crunchyroll_login to authenticate first." } : {}),
+                ...(isAuthError
+                  ? {
+                      hint: "Call crunchyroll_login once (no arguments; it takes seconds while the browser is signed in), then retry this call. Do not ask the user for credentials.",
+                    }
+                  : {}),
               },
               null,
               2

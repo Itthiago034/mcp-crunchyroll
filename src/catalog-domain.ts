@@ -153,11 +153,17 @@ export function parseBrowse(json: unknown): { count: number; items: BrowseEntry[
   return { count: items.length, items };
 }
 
-/** The series object, passed through as the tool has always published it. */
+/** Image URL sets: the bulk of a detail record, and of no use to an agent. */
+function withoutImages(record: Record<string, unknown>): Record<string, unknown> {
+  const { images: _images, images_localized: _localized, ...rest } = record;
+  return rest;
+}
+
+/** The series object, passed through as the tool has always published it, minus images. */
 export function parseSeries(json: unknown): Record<string, unknown> {
   const [first] = dataArray(json, "series");
   if (first === undefined) throw new CatalogShapeError("series.data[0]");
-  return requireObject(first, "series.data[0]");
+  return withoutImages(requireObject(first, "series.data[0]"));
 }
 
 // Season and episode LISTS are what an agent reads to pick something to play.
@@ -223,7 +229,7 @@ export function parseEpisodes(json: unknown): { count: number; episodes: unknown
 export function parseEpisode(json: unknown): Record<string, unknown> {
   const [first] = dataArray(json, "episode");
   if (first === undefined) throw new CatalogShapeError("episode.data[0]");
-  return requireObject(first, "episode.data[0]");
+  return withoutImages(requireObject(first, "episode.data[0]"));
 }
 
 export function parseSimulcastSeasons(json: unknown): { count: number; seasons: unknown[] } {

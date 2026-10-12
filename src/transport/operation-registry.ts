@@ -647,6 +647,21 @@ export const PRODUCTION_OPERATIONS: readonly OperationDescriptor[] = Object.free
     callerParams: { episode_id: contentId },
   }),
   publicRead({
+    // Internal (no tool of its own): titles for the watchlist, which the
+    // provider returns as bare ids. Up to 50 comma-joined ids in one request.
+    id: "GET_OBJECTS",
+    pathTemplate: "/content/v2/cms/objects/{object_ids}",
+    callerParams: {
+      object_ids: {
+        required: true,
+        validate: (v) =>
+          typeof v === "string" &&
+          v.split(",").length <= 50 &&
+          v.split(",").every((id) => contentId.validate(id)),
+      },
+    },
+  }),
+  publicRead({
     id: "GET_SIMULCAST_SEASONS",
     pathTemplate: "/content/v2/discover/seasonal_tags",
   }),
