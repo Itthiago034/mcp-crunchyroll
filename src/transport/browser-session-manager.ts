@@ -79,6 +79,20 @@ export interface BrowserSessionManager {
    */
   openResponseInterception(urlPattern: string): Promise<ResponseInterception>;
   /**
+   * Navigate an EXISTING managed page back to the configured initial page, so
+   * the provider's own page mints a fresh bearer while an interception is
+   * armed. The URL is the fixed composition-time constant; callers cannot
+   * choose it. A missing page is a no-op: creating one already navigates.
+   */
+  reloadManagedPage(): Promise<void>;
+  /**
+   * Open a Crunchyroll playback page for ONE content id in a new, focused tab
+   * of the signed-in browser. The id must be a plain Crunchyroll id; the URL is
+   * the configured fixed prefix plus that id. The tab is not the managed page,
+   * so re-authentication never navigates away from what is playing.
+   */
+  openWatchPage(contentId: string): Promise<void>;
+  /**
    * BT5: open the closed browser-context execution channel on the managed
    * Crunchyroll page.
    *
@@ -836,6 +850,55 @@ export function createBrowserSessionManager(
       }
       if (managedTargetId) return managedTargetId;
       return beginManagedPageCreation(false);
+    },
+    async reloadManagedPage() {
+      const active = connectionRegistration;
+      const targetId = managedTargetId;
+      if (
+        lifecycleState !== "BROWSER_READY" ||
+        stopRequested ||
+        !active ||
+        active.generation !== activeConnectionGeneration ||
+        !targetId
+      ) {
+        return;
+      }
+      const attached = (await active.connection.send("Target.attachToTarget", {
+        targetId,
+        flatten: true,
+      })) as { sessionId?: unknown };
+      const sessionId = attached.sessionId;
+      if (typeof sessionId !== "string" || sessionId.length === 0) {
+        throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
+      }
+      try {
+        await active.connection.send("Page.navigate", { url: config.initialPageUrl }, sessionId);
+      } finally {
+        try { await active.connection.send("Target.detachFromTarget", { sessionId }); } catch {}
+      }
+    },
+    async openWatchPage(contentId: string) {
+      if (typeof contentId !== "string" || !/^[A-Z0-9]{1,32}$/.test(contentId)) {
+        throw new BrowserLifecycleError("BROWSER_UNAVAILABLE");
+      }
+      const base = config.watchPageBaseUrl;
+      const active = connectionRegistration;
+      if (
+        !base ||
+        lifecycleState !== "BROWSER_READY" ||
+        stopRequested ||
+        !active ||
+        active.generation !== activeConnectionGeneration
+      ) {
+        throw new BrowserLifecycleError("BROWSER_UNAVAILABLE");
+      }
+      const result = (await active.connection.send("Target.createTarget", {
+        url: `${base}${contentId}`,
+      })) as { targetId?: unknown };
+      if (typeof result.targetId !== "string" || result.targetId.length === 0) {
+        throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
+      }
+      await active.connection.send("Target.activateTarget", { targetId: result.targetId });
     },
     async openResponseInterception(urlPattern: string) {
       const active = connectionRegistration;

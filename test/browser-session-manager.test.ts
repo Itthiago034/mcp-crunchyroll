@@ -164,6 +164,9 @@ describe("BT2 session manager — start and stop", () => {
     // BT5 adds `openApiExecutionChannel`: one more CLOSED channel, not a
     // generic surface. It runs one frozen function with structured arguments
     // on the managed Crunchyroll page and exposes no method string.
+    // `reloadManagedPage` navigates the existing managed page back to the
+    // fixed composition-time URL so an expired bearer can be re-minted; the
+    // caller supplies no URL, method or argument.
     assert.deepEqual(Object.keys(manager).sort(), [
       "connectionGeneration",
       "ensureManagedPage",
@@ -172,6 +175,8 @@ describe("BT2 session manager — start and stop", () => {
       "onStateChange",
       "openApiExecutionChannel",
       "openResponseInterception",
+      "openWatchPage",
+      "reloadManagedPage",
       "restart",
       "start",
       "state",
@@ -419,6 +424,43 @@ describe("BT2 session manager — managed page", () => {
     const create = createCalls(connector.connections[0])[0];
     assert.equal(create.params?.url, "http://127.0.0.1:9/ok");
     assert.equal(manager.ensureManagedPage.length, 0, "no caller-supplied URL parameter exists");
+  });
+
+  test("reloadManagedPage navigates the existing page to the configured URL only", async () => {
+    const { manager, connector } = wireFakes({ initialPageUrl: "http://127.0.0.1:9/ok" });
+    await manager.start();
+    await manager.reloadManagedPage();
+    const before = connector.connections[0].calls.filter((call) => call.method === "Page.navigate");
+    assert.equal(before.length, 0, "no page yet: nothing to reload and none is created");
+    assert.equal(manager.managedPageId(), undefined);
+
+    await manager.ensureManagedPage();
+    await manager.reloadManagedPage();
+    const navigations = connector.connections[0].calls.filter((call) => call.method === "Page.navigate");
+    assert.equal(navigations.length, 1);
+    assert.equal(navigations[0].params?.url, "http://127.0.0.1:9/ok");
+    assert.equal(manager.reloadManagedPage.length, 0, "no caller-supplied URL parameter exists");
+  });
+
+  test("openWatchPage opens one focused tab at the fixed prefix and refuses anything but an id", async () => {
+    const { manager, connector } = wireFakes({ watchPageBaseUrl: "http://127.0.0.1:9/watch/" });
+    await manager.start();
+    for (const bad of ["", "g8dhv78zm", "../login", "G8DHV78ZM/x", "https://evil.example/", "A".repeat(33)]) {
+      await assert.rejects(manager.openWatchPage(bad), BrowserLifecycleError, bad);
+    }
+    await manager.openWatchPage("GRVN8MNQY");
+    const calls = connector.connections[0].calls;
+    const creates = calls.filter((call) => call.method === "Target.createTarget");
+    assert.equal(creates.length, 1);
+    assert.equal(creates[0].params?.url, "http://127.0.0.1:9/watch/GRVN8MNQY");
+    assert.equal(calls.filter((call) => call.method === "Target.activateTarget").length, 1);
+    assert.equal(manager.managedPageId(), undefined, "the playback tab is not the managed page");
+  });
+
+  test("openWatchPage is unavailable without a configured prefix", async () => {
+    const { manager } = wireFakes();
+    await manager.start();
+    await assert.rejects(manager.openWatchPage("GRVN8MNQY"), BrowserLifecycleError);
   });
 
   test("a destroyed page is AUTOMATICALLY recreated exactly once", async () => {

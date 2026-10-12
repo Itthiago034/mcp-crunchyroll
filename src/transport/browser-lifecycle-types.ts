@@ -203,6 +203,11 @@ export interface BrowserSessionConfig {
   readonly launchDeadlineMs: number;
   readonly cdpCommandTimeoutMs: number;
   readonly initialPageUrl: string;
+  /**
+   * Fixed prefix for playback pages (`<prefix><content id>`). A build constant
+   * set by the composition root; without it playback is unavailable.
+   */
+  readonly watchPageBaseUrl?: string;
   readonly profileDir: string;
   readonly executablePath: string;
 }

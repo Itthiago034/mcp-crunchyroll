@@ -18,13 +18,14 @@ An unofficial [Model Context Protocol](https://modelcontextprotocol.io/) server 
 
 ## Release status
 
-v0.1.0 exposes 21 public tools. Nineteen are operational: three local authentication/status tools and sixteen production API operations. Two published tools remain deliberately deferred and fail closed.
+v0.1.0 exposes 22 public tools. Twenty are operational: three local authentication/status tools, sixteen production API operations and one playback tool. Two published tools remain deliberately deferred and fail closed.
 
 | Surface | Count | Status |
 |---|---:|---|
-| Public MCP tools | 21 | Published |
+| Public MCP tools | 22 | Published |
 | Authentication and status tools | 3 | Operational |
 | Production API operations | 16 | Operational |
+| Playback | 1 | Operational |
 | Deferred tools | 2 | `OPERATION_NOT_MIGRATED` |
 
 The production operations cover catalog reads, account reads, adding and removing watchlist items, and updating playheads. CI validates the project on Node.js 18, 20, and 22 with sandboxed Chrome for Testing.
@@ -140,6 +141,10 @@ and validated authentication response grants MCP readiness; this flow does not
 guarantee that the provider will accept the session. See the
 [recorded onboarding procedure](CRUNCHYROLL-BT4-N5-ONBOARDING-ERRATA.md).
 
+### Session expiry
+
+The bearer observed from the browser carries no refresh token and expires within minutes. `crunchyroll_status` reports an expired bearer as not authenticated, and `crunchyroll_login` then re-establishes it by reloading the signed-in managed page, which makes Crunchyroll mint a fresh bearer under observation. A content call that finds the session expired does this once on its own (waiting up to 45 s) and retries; the failure happens before anything is dispatched, so nothing is sent twice. Login waits at most 240 s, below the 300 s tool timeout of clients such as Hermes.
+
 ## Tool surface
 
 ### Catalog and discovery
@@ -176,6 +181,14 @@ guarantee that the provider will accept the session. See the
 Mutation identity is derived from the authenticated browser context. The caller supplies only the functional inputs in each closed tool schema and cannot select `accountId`.
 
 A provider response such as bad request, conflict, or operation-specific not found is reported deterministically. If a write may have been dispatched but its result cannot be known—for example, because the browser disconnects after possible dispatch—the operation returns `MUTATION_OUTCOME_UNKNOWN`. The server does not blindly retry mutations. Callers can reconcile playhead state with `crunchyroll_get_playheads` when appropriate.
+
+### Playback
+
+| Tool | Purpose |
+|---|---|
+| `crunchyroll_play` | Open an episode's watch page (`https://www.crunchyroll.com/watch/<episode_id>`) in a new, focused tab of the signed-in managed browser |
+
+`episode_id` must be a plain uppercase Crunchyroll id from `crunchyroll_get_episodes`; nothing else reaches the URL. Playback uses the browser's own signed-in session and makes no provider API request from the server.
 
 ### Deferred tools
 

@@ -393,6 +393,7 @@ export interface WireFakeOptions {
   launchDeadlineMs?: number;
   cdpCommandTimeoutMs?: number;
   initialPageUrl?: string;
+  watchPageBaseUrl?: string;
   alwaysCrash?: boolean;
   failReconnects?: number;
   closeImmediatelyAfterConnect?: boolean;
@@ -493,6 +494,7 @@ export function wireFakes(options: WireFakeOptions = {}) {
     launchDeadlineMs: options.launchDeadlineMs ?? 30_000,
     cdpCommandTimeoutMs: options.cdpCommandTimeoutMs ?? 10_000,
     initialPageUrl: options.initialPageUrl ?? "about:blank",
+    ...(options.watchPageBaseUrl ? { watchPageBaseUrl: options.watchPageBaseUrl } : {}),
     profileDir,
     executablePath,
   };

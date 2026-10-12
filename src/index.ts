@@ -14,6 +14,7 @@ import { setLegacyAuthTransitionSink } from "./api.js";
 import { createAuthContextAuthority } from "./transport/auth-context.js";
 import { createAuthProducer, createDefaultAuthProducerPorts } from "./transport/auth-producer.js";
 import { createAuthOrchestrator } from "./transport/auth-orchestrator.js";
+import { TransportError } from "./transport/transport-error.js";
 import { createBrowserAuthObserver, CRUNCHYROLL_LOGIN_URL } from "./transport/browser-auth.js";
 import {
   createBrowserSessionManager,
@@ -103,6 +104,9 @@ const authProducer = createAuthProducer(createDefaultAuthProducerPorts(authAutho
  */
 let browserSession: BrowserSessionManager | undefined;
 
+const CRUNCHYROLL_WATCH_URL_PREFIX = "https://www.crunchyroll.com/watch/";
+const CONTENT_ID_PATTERN = /^[A-Z0-9]{1,32}$/;
+
 function managedBrowser(): BrowserSessionManager {
   if (!browserSession) {
     browserSession = createBrowserSessionManager(
@@ -112,6 +116,9 @@ function managedBrowser(): BrowserSessionManager {
         // constant of this build: never a tool argument, never an environment
         // variable, never assembled from a caller-supplied fragment.
         initialPageUrl: CRUNCHYROLL_LOGIN_URL,
+        // Playback opens `<this><episode id>`; the id is validated, the prefix
+        // is a constant of this build.
+        watchPageBaseUrl: CRUNCHYROLL_WATCH_URL_PREFIX,
         profileDir: browserProfileDir(),
         executablePath: resolveBrowserExecutable(),
       },
@@ -131,7 +138,10 @@ function managedBrowser(): BrowserSessionManager {
  */
 const authOrchestrator = createAuthOrchestrator({
   diagnostics: {
-    availability: () => authAuthority.diagnostics().availability,
+    // An expired browser bearer is not a usable session: report it as
+    // unavailable so status is honest and login re-establishes instead of
+    // answering "already authenticated".
+    availability: () => (authAuthority.hasUsableRecord() ? "READY" : "UNAVAILABLE"),
     hasProfileId: () => authAuthority.diagnostics().hasProfileId,
   },
   browser: {
@@ -157,8 +167,45 @@ const authOrchestrator = createAuthOrchestrator({
       timer.unref?.();
       return { cancel: () => clearTimeout(timer) };
     },
+    // A signed-in page that is already open mints only on its own schedule;
+    // navigating it again makes the provider mint now, under observation.
+    afterArmed: () => managedBrowser().reloadManagedPage(),
   }),
 });
+
+/** How long a content call waits for a silent re-establishment. */
+const SILENT_REAUTH_WAIT_MS = 45_000;
+
+/**
+ * The observed bearer expires within minutes and carries no refresh token.
+ * When a content call finds the session EXPIRED (it was established in this
+ * process and has simply run out), re-establish it from the signed-in browser
+ * once and retry. AUTH_NOT_READY is raised before anything is dispatched, so
+ * the retry can never repeat a request. A session that was never established
+ * still gets the honest error and the login hint.
+ */
+async function callContentTool(name: string, args: Record<string, unknown>): Promise<unknown> {
+  try {
+    return await contentGateway.callTool(name, args);
+  } catch (error) {
+    const expired =
+      error instanceof TransportError &&
+      error.kind === "AUTH_NOT_READY" &&
+      authAuthority.diagnostics().availability === "READY" &&
+      !authAuthority.hasUsableRecord();
+    if (!expired) throw error;
+    let timer: NodeJS.Timeout | undefined;
+    const outcome = await Promise.race([
+      authOrchestrator.login(),
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), SILENT_REAUTH_WAIT_MS);
+        timer.unref?.();
+      }),
+    ]).finally(() => clearTimeout(timer));
+    if (!outcome?.accepted || !authAuthority.hasUsableRecord()) throw error;
+    return await contentGateway.callTool(name, args);
+  }
+}
 
 // ── BT5 cutover ──────────────────────────────────────────────────────────────
 //
@@ -466,6 +513,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       description: "Get current Crunchyroll subscription details and renewal info.",
       inputSchema: { type: "object", properties: {} },
     },
+
+    // Playback
+    {
+      name: "crunchyroll_play",
+      description:
+        "Play an episode or movie: opens its Crunchyroll watch page in a new tab of the signed-in managed browser. Use the episode id from crunchyroll_get_episodes (not a series or season id).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          episode_id: { type: "string", description: "Crunchyroll episode or movie id, e.g. GRVN8MNQY" },
+        },
+        required: ["episode_id"],
+        additionalProperties: false,
+      },
+    },
   ],
 }));
 
@@ -516,7 +578,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // legacy Node client, because this boundary is the only route left and
         // it has no legacy branch.
         if (contentGateway.isContentTool(name)) {
-          const payload = await contentGateway.callTool(name, args as Record<string, unknown>);
+          const payload = await callContentTool(name, args as Record<string, unknown>);
           return {
             content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
           };
@@ -555,6 +617,36 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const presentation = formatLogoutResult(logoutResult);
         return {
           content: [{ type: "text", text: JSON.stringify(presentation) }],
+        };
+      }
+
+      case "crunchyroll_play": {
+        const input = args as Record<string, unknown>;
+        const episodeId = input.episode_id;
+        if (
+          Object.keys(input).some((key) => key !== "episode_id") ||
+          typeof episodeId !== "string" ||
+          !CONTENT_ID_PATTERN.test(episodeId)
+        ) {
+          throw new McpError(
+            ErrorCode.InvalidParams,
+            "crunchyroll_play takes exactly one argument, episode_id: an uppercase Crunchyroll id such as GRVN8MNQY."
+          );
+        }
+        const session = managedBrowser();
+        await session.start();
+        await session.openWatchPage(episodeId);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                { opened: true, episode_id: episodeId, url: `${CRUNCHYROLL_WATCH_URL_PREFIX}${episodeId}` },
+                null,
+                2
+              ),
+            },
+          ],
         };
       }
 
