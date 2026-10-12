@@ -24,6 +24,7 @@ import type {
 import { MAX_API_RESPONSE_BYTES } from "./browser-lifecycle-types.js";
 import { BrowserLifecycleError } from "./browser-lifecycle-error.js";
 import { createCdpConnector } from "./cdp-client.js";
+import { desktopSessionEnvironment } from "./desktop-session.js";
 import {
   clearOwnershipRecord,
   clearStaleEndpoint,
@@ -1158,7 +1159,11 @@ const REAL_CLOCK: Clock = {
 
 const REAL_SPAWNER: ProcessSpawner = {
   spawn(executable, args) {
-    const child = spawn(executable, [...args], { stdio: "ignore", detached: false });
+    const child = spawn(executable, [...args], {
+      stdio: "ignore",
+      detached: false,
+      env: desktopSessionEnvironment(),
+    });
     let terminal: BrowserProcessExit | undefined;
     const listeners = new Set<(exit: BrowserProcessExit) => void>();
     const finish = (code: number | null, signal: string | null) => {

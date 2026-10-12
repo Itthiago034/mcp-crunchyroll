@@ -98,6 +98,17 @@ A generic MCP client configuration for the built bundle looks like this:
 
 The repository also includes `manifest.yaml` for compatible Hermes Agent installations.
 
+### Hermes Agent
+
+After building, register the bundle with Hermes:
+
+```bash
+hermes mcp add crunchyroll --command node --args /absolute/path/to/mcp-crunchyroll/dist/index.js
+hermes mcp test crunchyroll
+```
+
+Hermes exposes the tools as `mcp__crunchyroll__crunchyroll_*` and starts stdio servers with a filtered environment that keeps `HOME`, `PATH` and `XDG_*` but drops `DISPLAY`, `WAYLAND_DISPLAY` and `DBUS_SESSION_BUS_ADDRESS`. On Linux, when no display variable reaches the server, it recovers the user's own desktop session from sockets owned by the current user (`$XDG_RUNTIME_DIR/wayland-N`, `$XDG_RUNTIME_DIR/bus`, `/tmp/.X11-unix/XN`), so `crunchyroll_login` can open its window without extra `env` entries. Variables the client does pass are never replaced.
+
 ## Authentication
 
 Call:
