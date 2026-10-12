@@ -195,6 +195,21 @@ describe("BT6 — the URL is built from the descriptor alone", () => {
     );
   });
 
+  test("search without a type asks only for the series and movies it can surface", async () => {
+    const h = harness({ data: [] });
+    await h.gateway.callTool("crunchyroll_search", { query: "One Piece" });
+    await h.gateway.callTool("crunchyroll_search", { query: "One Piece", type: "" });
+    await h.gateway.callTool("crunchyroll_search", { query: "One Piece", type: "movie_listing" });
+    assert.deepEqual(
+      h.backend.calls.map((call) => call.callerParams.type),
+      ["series,movie_listing", "series,movie_listing", "movie_listing"]
+    );
+    assert.equal(
+      urlFor("SEARCH", { q: "x", n: 5, type: "series,movie_listing" }),
+      "https://www.crunchyroll.com/content/v2/discover/search?q=x&n=5&type=series%2Cmovie_listing&locale=en-US"
+    );
+  });
+
   test("optional query parameters appear only when supplied", () => {
     assert.equal(
       urlFor("SEARCH", { q: "x", n: 5, type: "series" }),

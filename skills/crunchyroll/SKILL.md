@@ -99,23 +99,29 @@ Exemplo: "coloca Clevatess temporada 2 episódio 12".
 
 ## Receita B — Próximo episódio / episódio seguinte
 
-- Se você acabou de abrir um episódio, ele tem `next_episode_id`: chame `crunchyroll_play` com esse ID
-  (ou a versão no mesmo idioma, veja abaixo).
-- Senão, use a Receita C para descobrir o último episódio visto e então `crunchyroll_get_episode`
-  com esse ID para ler `next_episode_id`.
+1. Descubra o episódio atual: o que você acabou de abrir, ou o primeiro do histórico (Receita C).
+2. `crunchyroll_get_episode` com esse ID → leia `next_episode_id` (vem num idioma qualquer, ex.:
+   `...ENUS`).
+3. Para tocar no mesmo idioma do atual, chame `crunchyroll_get_episode` com o `next_episode_id` e pegue
+   em `versions` a `guid` do `audio_locale` desejado. **Não monte o ID trocando o sufixo na mão**
+   (`ENUS` → `PTBR`): nem todo episódio tem todas as dublagens, e o ID inventado pode não existir.
+4. `crunchyroll_play` com essa `guid`. Sem `next_episode_id`, a temporada acabou: diga isso e ofereça a
+   próxima temporada (`crunchyroll_get_seasons`).
 
 ## Receita C — "Continua de onde parei" / "o que eu estava vendo?"
 
 1. `crunchyroll_get_history` com `{"n": 10}`.
-   - `items[]` vem do mais recente para o mais antigo, cada um com `id` (episódio, ex.:
-     `GE00377814PTBR`), `parent_id` (série), `playhead` (segundos já vistos), `fully_watched` e
-     `date_played`. O campo `panel` é grande (imagens): use só `slug_title` dele, se precisar.
+   - `items[]` vem do mais recente para o mais antigo. Cada item tem `id` (episódio, ex.:
+     `GE00377814PTBR`), `title` (título do episódio), `parent_id` (série), `playhead` (segundos já
+     vistos), `fully_watched`, `date_played` e `episode_metadata` com `series_title`,
+     `season_title`, `season_number`, `episode_number`, `duration_ms` e `versions`.
+   - Pode haver vários itens do mesmo episódio ou da mesma série; o primeiro é o mais recente.
 2. Pegue o primeiro item (ou o primeiro da série que o usuário citou, comparando `parent_id`).
    - `fully_watched: false` → abra **esse mesmo** `id` com `crunchyroll_play`; o player retoma do
      `playhead`.
-   - `fully_watched: true` → abra o próximo: `crunchyroll_get_episode` com o `id` e use
-     `next_episode_id`. Sem próximo, diga que a temporada acabou e ofereça a seguinte
-     (`crunchyroll_get_seasons`).
+   - `fully_watched: true` → abra o próximo (Receita B, a partir do passo 2).
+   - "Continuar" = retomar o mesmo episódio se não terminou. "Próximo" = sempre o seguinte (Receita B),
+     mesmo que o atual não tenha terminado.
 3. O sufixo do `id` no histórico mostra o idioma que o usuário costuma assistir (`...PTBR` = dublado
    em português; `...JAJP` = original japonês). Use isso como preferência padrão.
 

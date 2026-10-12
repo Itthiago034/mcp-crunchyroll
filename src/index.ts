@@ -317,11 +317,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "crunchyroll_get_episodes",
-      description: "Get all episodes in a specific season.",
+      description:
+        "Get all episodes in a specific season. Pass episode_number to get just that episode (recommended for long seasons).",
       inputSchema: {
         type: "object",
         properties: {
           season_id: { type: "string", description: "Crunchyroll season ID" },
+          episode_number: {
+            type: "number",
+            description: "Optional: return only the episode with this episode_number",
+          },
         },
         required: ["season_id"],
       },

@@ -150,6 +150,11 @@ export interface OperationDescriptor {
    */
   readonly queryParams: Readonly<Record<string, string>>;
   /**
+   * Response cap for this operation, when it legitimately exceeds the default
+   * MAX_API_RESPONSE_BYTES. A constant of this build, never a caller value.
+   */
+  readonly maxResponseBytes?: number;
+  /**
    * BT7. Query key → a DECLARED, array-valued caller param, emitted once per
    * element in caller order (`wire[]=A&wire[]=B`).
    *

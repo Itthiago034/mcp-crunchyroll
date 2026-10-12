@@ -94,7 +94,17 @@ function captureDescriptor(d: OperationDescriptor): OperationDescriptor {
     // keeps exactly the key set it has always had.
     ...(d.body === undefined ? {} : { body: freezeBody(d.body) }),
     ...(d.response === undefined ? {} : { response: freezeResponse(d.response) }),
+    ...(d.maxResponseBytes === undefined ? {} : { maxResponseBytes: captureResponseCap(d) }),
   });
+}
+
+/** A raised cap must be a sane constant: a positive integer of at most 16 MiB. */
+function captureResponseCap(d: OperationDescriptor): number {
+  const cap = d.maxResponseBytes;
+  if (typeof cap !== "number" || !Number.isInteger(cap) || cap <= 0 || cap > 16 * 1024 * 1024) {
+    throw new Error(`Operation ${String(d.id)} declares an invalid maxResponseBytes`);
+  }
+  return cap;
 }
 
 /**
@@ -464,8 +474,10 @@ function publicRead(spec: {
   pathTemplate: string;
   callerParams?: Record<string, ParamSpec>;
   queryParams?: Record<string, string>;
+  maxResponseBytes?: number;
 }): OperationDescriptor {
   return Object.freeze({
+    ...(spec.maxResponseBytes === undefined ? {} : { maxResponseBytes: spec.maxResponseBytes }),
     id: spec.id as OperationId,
     method: "GET",
     pathTemplate: spec.pathTemplate,
@@ -596,7 +608,15 @@ export const PRODUCTION_OPERATIONS: readonly OperationDescriptor[] = Object.free
   publicRead({
     id: "SEARCH",
     pathTemplate: "/content/v2/discover/search",
-    callerParams: { q: searchText, n: requiredIntegerInRange(1, 100), type: optionalOneOf(["series", "movie_listing"]) },
+    // "series,movie_listing" is the gateway's default when the caller names no
+    // type: without it the provider also returns episode, music and top-result
+    // buckets that the tool never surfaces, and a popular title exceeds the
+    // 512 KiB response cap.
+    callerParams: {
+      q: searchText,
+      n: requiredIntegerInRange(1, 100),
+      type: optionalOneOf(["series", "movie_listing", "series,movie_listing"]),
+    },
     queryParams: { q: "q", n: "n", type: "type" },
   }),
   publicRead({
@@ -616,6 +636,10 @@ export const PRODUCTION_OPERATIONS: readonly OperationDescriptor[] = Object.free
     id: "GET_EPISODES",
     pathTemplate: "/content/v2/cms/seasons/{season_id}/episodes",
     callerParams: { season_id: contentId },
+    // The provider returns a whole season in one page, ~8 KiB per episode: a
+    // long-running season (One Piece's Wano arc, 208 episodes) is ~1.7 MiB.
+    // The tool compacts it before it reaches the client.
+    maxResponseBytes: 4 * 1024 * 1024,
   }),
   publicRead({
     id: "GET_EPISODE",

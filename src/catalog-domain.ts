@@ -161,6 +161,7 @@ export function parseSeries(json: unknown): Record<string, unknown> {
 }
 
 // Season and episode LISTS are what an agent reads to pick something to play.
+// Hermes spills any MCP result over 50 000 characters to a file.
 // The provider records carry images, ratings and localized copies that make a
 // 13-episode season ~110 KB, which small local models cannot hold. Lists keep
 // only the fields needed to choose and play; get_series/get_episode still
@@ -171,21 +172,32 @@ const SEASON_LIST_FIELDS = [
   "subtitle_locales", "description",
 ] as const;
 
+// Episodes share their season's subtitle list and ids, so a list entry keeps
+// only what tells episodes apart.
 const EPISODE_LIST_FIELDS = [
-  "id", "title", "series_id", "series_title", "season_id", "season_title", "season_number",
-  "episode", "episode_number", "sequence_number", "duration_ms", "audio_locale",
-  "subtitle_locales", "is_premium_only", "availability_status", "is_subbed", "is_dubbed",
-  "next_episode_id", "next_episode_title", "episode_air_date",
+  "id", "title", "season_number", "episode", "episode_number", "duration_ms", "audio_locale",
+  "is_premium_only", "availability_status", "next_episode_id", "next_episode_title",
 ] as const;
 
-/** Versions reduced to the choice that matters: which audio, which id. */
-function compactVersions(raw: unknown): unknown {
+/**
+ * Versions reduced to the choice that matters: audio locale → id to play, plus
+ * which audio is the original. A season with fifteen dubs is ~2 KB of version
+ * records per episode; as a map it is a few hundred bytes.
+ */
+export function compactAudioVersions(raw: unknown): Record<string, unknown> | undefined {
   if (!Array.isArray(raw)) return undefined;
-  return raw.map((version) => {
-    if (typeof version !== "object" || version === null) return version;
-    const v = version as Record<string, unknown>;
-    return { audio_locale: v.audio_locale, guid: v.guid, original: v.original };
-  });
+  const audioVersions: Record<string, string> = {};
+  let originalAudio: string | undefined;
+  for (const version of raw) {
+    if (typeof version !== "object" || version === null) continue;
+    const { audio_locale: locale, guid, original } = version as Record<string, unknown>;
+    if (typeof locale !== "string" || typeof guid !== "string") continue;
+    audioVersions[locale] = guid;
+    if (original === true) originalAudio = locale;
+  }
+  return originalAudio === undefined
+    ? { audio_versions: audioVersions }
+    : { original_audio: originalAudio, audio_versions: audioVersions };
 }
 
 function compactRecord(raw: unknown, fields: readonly string[]): unknown {
@@ -195,9 +207,7 @@ function compactRecord(raw: unknown, fields: readonly string[]): unknown {
   for (const field of fields) {
     if (source[field] !== undefined) out[field] = source[field];
   }
-  const versions = compactVersions(source.versions);
-  if (versions !== undefined) out.versions = versions;
-  return out;
+  return { ...out, ...compactAudioVersions(source.versions) };
 }
 
 export function parseSeasons(json: unknown): { count: number; seasons: unknown[] } {

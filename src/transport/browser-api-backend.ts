@@ -315,6 +315,7 @@ export function createBrowserApiBackend(ports: BrowserApiBackendPorts): Transpor
       // Serialized BEFORE the channel is opened, so a body this transport
       // cannot build fails while the request is still provably unsent.
       const body = buildRequestBody(call);
+      const responseCap = descriptor.maxResponseBytes ?? MAX_API_RESPONSE_BYTES;
 
       try {
         // runCurrent snapshots the record ONCE, and re-checks it after the
@@ -329,7 +330,7 @@ export function createBrowserApiBackend(ports: BrowserApiBackendPorts): Transpor
               method: descriptor.method,
               authorization: `${view.tokenType} ${view.accessToken}`,
               deadlineMs,
-              maxBytes: MAX_API_RESPONSE_BYTES,
+              maxBytes: responseCap,
               // Omitted entirely when there is none, so a read's request record
               // keeps exactly the fields it has always carried.
               ...(body === undefined ? {} : { body }),
@@ -343,7 +344,7 @@ export function createBrowserApiBackend(ports: BrowserApiBackendPorts): Transpor
           // Bound and normalize BEFORE anything is interpreted.
           if (
             response.truncated ||
-            Buffer.byteLength(response.body, "utf-8") > MAX_API_RESPONSE_BYTES
+            Buffer.byteLength(response.body, "utf-8") > responseCap
           ) {
             throw responseValidationError(isMutation, "over-cap");
           }

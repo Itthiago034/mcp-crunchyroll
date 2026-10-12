@@ -137,7 +137,10 @@ export function createContentGateway(
             withDefined({
               q: args.query,
               n: args.n ?? DEFAULT_PAGE_SIZE,
-              type: args.type,
+              // Only series and movies are ever surfaced (parseSearch); asking
+              // for nothing else keeps big franchises under the response cap
+              // and drops the top-results bucket that duplicated them.
+              type: args.type === undefined || args.type === "" ? "series,movie_listing" : args.type,
             })
           );
           return parseSearch(result.json);
@@ -153,10 +156,26 @@ export function createContentGateway(
             (await transport.execute(operation, withDefined({ series_id: args.series_id }))).json
           );
 
-        case "GET_EPISODES":
-          return parseEpisodes(
+        case "GET_EPISODES": {
+          const wanted = args.episode_number;
+          if (
+            wanted !== undefined &&
+            (typeof wanted !== "number" || !Number.isInteger(wanted) || wanted < 0 || wanted > 100_000)
+          ) {
+            throw new TransportError("INVALID_ARGUMENTS", "episode_number");
+          }
+          const list = parseEpisodes(
             (await transport.execute(operation, withDefined({ season_id: args.season_id }))).json
           );
+          if (wanted === undefined) return list;
+          // A local filter over the season the provider returned: long seasons
+          // (One Piece arcs run past 200 episodes) do not fit a client's
+          // context, and an agent playing one episode needs only that one.
+          const episodes = list.episodes.filter(
+            (episode) => (episode as { episode_number?: unknown }).episode_number === wanted
+          );
+          return { count: episodes.length, season_episode_count: list.count, episodes };
+        }
 
         case "GET_EPISODE":
           return parseEpisode(
