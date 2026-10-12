@@ -49,9 +49,11 @@ As ferramentas aparecem com o prefixo `mcp__crunchyroll__`, por exemplo
 
 ## Antes de tudo: sessão
 
-Você **não** precisa checar o login antes de cada pedido. As ferramentas de conteúdo renovam a sessão
-sozinhas quando ela expira (o token dura poucos minutos). Só trate o login quando uma ferramenta
-responder `Not authenticated: log in before requesting content`:
+Você **não** precisa checar o login antes de cada pedido. Dentro de uma mesma conversa, as
+ferramentas de conteúdo renovam a sessão sozinhas quando ela expira (o token dura poucos minutos).
+Mas **em toda conversa nova o servidor começa sem sessão**: é normal a primeira consulta responder
+`Not authenticated: log in before requesting content`. Isso não é problema nem motivo para mudar de
+estratégia. Faça assim:
 
 1. Chame `crunchyroll_login` (sem argumentos) **uma vez**. Se a sessão do navegador ainda vale, ele
    responde em segundos com `"auth_state": "PROFILE_READY"`. Depois, refaça a chamada que falhou.

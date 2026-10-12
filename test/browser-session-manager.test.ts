@@ -426,19 +426,38 @@ describe("BT2 session manager — managed page", () => {
     assert.equal(manager.ensureManagedPage.length, 0, "no caller-supplied URL parameter exists");
   });
 
-  test("reloadManagedPage navigates the existing page to the configured URL only", async () => {
+  test("an existing page on the managed origin is reused instead of opening another tab", async () => {
+    const { manager, connector } = wireFakes({
+      initialPageUrl: "http://127.0.0.1:9/login",
+      watchPageBaseUrl: "http://127.0.0.1:9/watch/",
+    });
+    await manager.start();
+    connector.connections[0].targetInfos = [
+      { type: "page", targetId: "playing", url: "http://127.0.0.1:9/watch/GE1", attached: false },
+      { type: "page", targetId: "elsewhere", url: "http://other.invalid/", attached: false },
+      { type: "service_worker", targetId: "sw", url: "http://127.0.0.1:9/sw.js", attached: false },
+      { type: "page", targetId: "left-behind", url: "http://127.0.0.1:9/discover", attached: false },
+    ];
+    assert.equal(await manager.ensureManagedPage(), "left-behind");
+    assert.equal(createCalls(connector.connections[0]).length, 0, "no new tab was opened");
+  });
+
+  test("reloadManagedPage reloads the existing managed page and takes no URL", async () => {
     const { manager, connector } = wireFakes({ initialPageUrl: "http://127.0.0.1:9/ok" });
     await manager.start();
     await manager.reloadManagedPage();
-    const before = connector.connections[0].calls.filter((call) => call.method === "Page.navigate");
-    assert.equal(before.length, 0, "no page yet: nothing to reload and none is created");
+    const reloadsOf = () => connector.connections[0].calls.filter((call) => call.method === "Page.reload");
+    assert.equal(reloadsOf().length, 0, "no page yet: nothing to reload and none is created");
     assert.equal(manager.managedPageId(), undefined);
 
     await manager.ensureManagedPage();
     await manager.reloadManagedPage();
-    const navigations = connector.connections[0].calls.filter((call) => call.method === "Page.navigate");
-    assert.equal(navigations.length, 1);
-    assert.equal(navigations[0].params?.url, "http://127.0.0.1:9/ok");
+    assert.equal(reloadsOf().length, 1);
+    assert.equal(
+      connector.connections[0].calls.filter((call) => call.method === "Page.navigate").length,
+      0,
+      "a reload never navigates to the login URL"
+    );
     assert.equal(manager.reloadManagedPage.length, 0, "no caller-supplied URL parameter exists");
   });
 

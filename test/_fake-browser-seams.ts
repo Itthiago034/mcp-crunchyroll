@@ -183,6 +183,8 @@ export class FakeConnection implements CdpConnection {
   private readonly historicalCloseListeners = new Set<() => void>();
   private closed = false;
   private nextTargetId = 1;
+  /** Pages the fake browser already has open, answered by Target.getTargets. */
+  targetInfos: Array<Record<string, unknown>> | undefined;
 
   constructor(
     private readonly closeAfterHandshake = false,
@@ -210,6 +212,9 @@ export class FakeConnection implements CdpConnection {
       this.onBrowserClose?.();
       this.emitClose();
       return {};
+    }
+    if (method === "Target.getTargets" && this.targetInfos) {
+      return { targetInfos: this.targetInfos };
     }
     if (method === "Target.createTarget") {
       return { targetId: `managed-${this.nextTargetId++}` };

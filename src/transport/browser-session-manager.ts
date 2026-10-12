@@ -79,10 +79,9 @@ export interface BrowserSessionManager {
    */
   openResponseInterception(urlPattern: string): Promise<ResponseInterception>;
   /**
-   * Navigate an EXISTING managed page back to the configured initial page, so
-   * the provider's own page mints a fresh bearer while an interception is
-   * armed. The URL is the fixed composition-time constant; callers cannot
-   * choose it. A missing page is a no-op: creating one already navigates.
+   * Reload the EXISTING managed page, so the provider's own page mints a fresh
+   * bearer while an interception is armed. Takes no URL. A missing page is a
+   * no-op: creating one already navigates.
    */
   reloadManagedPage(): Promise<void>;
   /**
@@ -367,6 +366,19 @@ export function createBrowserSessionManager(
     ) {
       throw new BrowserLifecycleError("BROWSER_UNAVAILABLE");
     }
+    // The dedicated browser outlives this process and is adopted by the next
+    // one. Reuse a page already on the managed origin instead of opening a new
+    // tab per process: otherwise every client session leaves one more live
+    // Crunchyroll tab behind. Playback tabs are left alone.
+    const reusable = await findReusableManagedPage(active);
+    if (reusable) {
+      if (active.generation !== activeConnectionGeneration) {
+        throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
+      }
+      managedTargetId = reusable;
+      if (recreated) emit({ type: "page.recreated" });
+      return reusable;
+    }
     const result = (await active.connection.send("Target.createTarget", {
       url: config.initialPageUrl,
     })) as { targetId?: unknown };
@@ -380,6 +392,41 @@ export function createBrowserSessionManager(
     managedTargetId = result.targetId;
     if (recreated) emit({ type: "page.recreated" });
     return result.targetId;
+  };
+
+  const findReusableManagedPage = async (
+    active: ConnectionRegistration,
+  ): Promise<string | undefined> => {
+    let origin: string;
+    try {
+      origin = new URL(config.initialPageUrl).origin;
+    } catch {
+      return undefined;
+    }
+    if (origin === "null") return undefined;
+    let listed: unknown;
+    try {
+      listed = await active.connection.send("Target.getTargets", {});
+    } catch {
+      return undefined;
+    }
+    const infos = (listed as { targetInfos?: unknown } | undefined)?.targetInfos;
+    if (!Array.isArray(infos)) return undefined;
+    for (const info of infos) {
+      if (typeof info !== "object" || info === null) continue;
+      const { type, url, targetId, attached } = info as Record<string, unknown>;
+      if (type !== "page" || typeof url !== "string" || typeof targetId !== "string") continue;
+      if (attached === true) continue;
+      if (config.watchPageBaseUrl && url.startsWith(config.watchPageBaseUrl)) continue;
+      let pageOrigin: string;
+      try {
+        pageOrigin = new URL(url).origin;
+      } catch {
+        continue;
+      }
+      if (pageOrigin === origin) return targetId;
+    }
+    return undefined;
   };
 
   const beginManagedPageCreation = (recreated: boolean): Promise<string> => {
@@ -872,7 +919,10 @@ export function createBrowserSessionManager(
         throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
       }
       try {
-        await active.connection.send("Page.navigate", { url: config.initialPageUrl }, sessionId);
+        // Reload what the page shows (a signed-in Crunchyroll page) instead of
+        // returning to the login URL: a plain reload is ordinary browsing,
+        // repeated trips to /login are what bot protection flags.
+        await active.connection.send("Page.reload", {}, sessionId);
       } finally {
         try { await active.connection.send("Target.detachFromTarget", { sessionId }); } catch {}
       }
