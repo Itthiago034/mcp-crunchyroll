@@ -143,7 +143,7 @@ guarantee that the provider will accept the session. See the
 
 ### Session expiry
 
-The bearer observed from the browser carries no refresh token and expires within minutes. `crunchyroll_status` reports an expired bearer as not authenticated, and `crunchyroll_login` then re-establishes it by reloading the signed-in managed page, which makes Crunchyroll mint a fresh bearer under observation. A content call that finds the session expired does this once on its own (waiting up to 45 s) and retries; the failure happens before anything is dispatched, so nothing is sent twice. Login waits at most 240 s, below the 300 s tool timeout of clients such as Hermes.
+The bearer observed from the browser carries no refresh token and expires within minutes. `crunchyroll_status` reports an expired bearer as not authenticated, and `crunchyroll_login` then re-establishes it by reloading the signed-in managed page, which makes Crunchyroll mint a fresh bearer under observation. A content call that finds the session expired does this once on its own (waiting up to 45 s) and retries; the failure happens before anything is dispatched, so nothing is sent twice. A fresh server process still starts unauthenticated: call `crunchyroll_login` once, which takes seconds while the browser profile is signed in. Season and episode lists are compacted to the fields needed to choose and play (ids, numbers, titles, locales, availability and `versions` as `{audio_locale, guid, original}`); `crunchyroll_get_series` and `crunchyroll_get_episode` return the full record. Login waits at most 240 s, below the 300 s tool timeout of clients such as Hermes.
 
 ## Tool surface
 

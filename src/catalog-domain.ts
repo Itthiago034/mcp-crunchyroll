@@ -160,13 +160,53 @@ export function parseSeries(json: unknown): Record<string, unknown> {
   return requireObject(first, "series.data[0]");
 }
 
+// Season and episode LISTS are what an agent reads to pick something to play.
+// The provider records carry images, ratings and localized copies that make a
+// 13-episode season ~110 KB, which small local models cannot hold. Lists keep
+// only the fields needed to choose and play; get_series/get_episode still
+// return the full record.
+const SEASON_LIST_FIELDS = [
+  "id", "title", "series_id", "season_number", "season_display_number", "number_of_episodes",
+  "is_complete", "is_simulcast", "is_subbed", "is_dubbed", "audio_locale", "audio_locales",
+  "subtitle_locales", "description",
+] as const;
+
+const EPISODE_LIST_FIELDS = [
+  "id", "title", "series_id", "series_title", "season_id", "season_title", "season_number",
+  "episode", "episode_number", "sequence_number", "duration_ms", "audio_locale",
+  "subtitle_locales", "is_premium_only", "availability_status", "is_subbed", "is_dubbed",
+  "next_episode_id", "next_episode_title", "episode_air_date",
+] as const;
+
+/** Versions reduced to the choice that matters: which audio, which id. */
+function compactVersions(raw: unknown): unknown {
+  if (!Array.isArray(raw)) return undefined;
+  return raw.map((version) => {
+    if (typeof version !== "object" || version === null) return version;
+    const v = version as Record<string, unknown>;
+    return { audio_locale: v.audio_locale, guid: v.guid, original: v.original };
+  });
+}
+
+function compactRecord(raw: unknown, fields: readonly string[]): unknown {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return raw;
+  const source = raw as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const field of fields) {
+    if (source[field] !== undefined) out[field] = source[field];
+  }
+  const versions = compactVersions(source.versions);
+  if (versions !== undefined) out.versions = versions;
+  return out;
+}
+
 export function parseSeasons(json: unknown): { count: number; seasons: unknown[] } {
-  const seasons = dataArray(json, "seasons");
+  const seasons = dataArray(json, "seasons").map((raw) => compactRecord(raw, SEASON_LIST_FIELDS));
   return { count: seasons.length, seasons };
 }
 
 export function parseEpisodes(json: unknown): { count: number; episodes: unknown[] } {
-  const episodes = dataArray(json, "episodes");
+  const episodes = dataArray(json, "episodes").map((raw) => compactRecord(raw, EPISODE_LIST_FIELDS));
   return { count: episodes.length, episodes };
 }
 

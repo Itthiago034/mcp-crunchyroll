@@ -182,7 +182,8 @@ const SILENT_REAUTH_WAIT_MS = 45_000;
  * process and has simply run out), re-establish it from the signed-in browser
  * once and retry. AUTH_NOT_READY is raised before anything is dispatched, so
  * the retry can never repeat a request. A session that was never established
- * still gets the honest error and the login hint.
+ * (or was logged out) still gets the honest error: opening a browser stays an
+ * explicit crunchyroll_login decision.
  */
 async function callContentTool(name: string, args: Record<string, unknown>): Promise<unknown> {
   try {
