@@ -186,7 +186,7 @@ A provider response such as bad request, conflict, or operation-specific not fou
 
 | Tool | Purpose |
 |---|---|
-| `crunchyroll_play` | Open an episode's watch page (`https://www.crunchyroll.com/watch/<episode_id>`) in a new, focused tab of the signed-in managed browser |
+| `crunchyroll_play` | Open an episode's watch page (`https://www.crunchyroll.com/watch/<episode_id>`) in a focused tab of the signed-in managed browser, reusing the playback tab if one is open |
 
 `episode_id` must be a plain uppercase Crunchyroll id from `crunchyroll_get_episodes`; nothing else reaches the URL. Playback uses the browser's own signed-in session and makes no provider API request from the server.
 

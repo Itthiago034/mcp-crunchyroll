@@ -85,8 +85,8 @@ export interface BrowserSessionManager {
    */
   reloadManagedPage(): Promise<void>;
   /**
-   * Open a Crunchyroll playback page for ONE content id in a new, focused tab
-   * of the signed-in browser. The id must be a plain Crunchyroll id; the URL is
+   * Open a Crunchyroll playback page for ONE content id in a focused tab of the
+   * signed-in browser, reusing an existing playback tab when there is one. The id must be a plain Crunchyroll id; the URL is
    * the configured fixed prefix plus that id. The tab is not the managed page,
    * so re-authentication never navigates away from what is playing.
    */
@@ -425,6 +425,28 @@ export function createBrowserSessionManager(
         continue;
       }
       if (pageOrigin === origin) return targetId;
+    }
+    return undefined;
+  };
+
+  const findPlaybackPage = async (
+    active: ConnectionRegistration,
+    base: string,
+  ): Promise<string | undefined> => {
+    let listed: unknown;
+    try {
+      listed = await active.connection.send("Target.getTargets", {});
+    } catch {
+      return undefined;
+    }
+    const infos = (listed as { targetInfos?: unknown } | undefined)?.targetInfos;
+    if (!Array.isArray(infos)) return undefined;
+    for (const info of infos) {
+      if (typeof info !== "object" || info === null) continue;
+      const { type, url, targetId } = info as Record<string, unknown>;
+      if (type !== "page" || typeof url !== "string" || typeof targetId !== "string") continue;
+      if (targetId === managedTargetId) continue;
+      if (url.startsWith(base)) return targetId;
     }
     return undefined;
   };
@@ -942,13 +964,34 @@ export function createBrowserSessionManager(
       ) {
         throw new BrowserLifecycleError("BROWSER_UNAVAILABLE");
       }
-      const result = (await active.connection.send("Target.createTarget", {
-        url: `${base}${contentId}`,
-      })) as { targetId?: unknown };
-      if (typeof result.targetId !== "string" || result.targetId.length === 0) {
-        throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
+      const url = `${base}${contentId}`;
+      // "Play X" while something is already playing means switch to X: reuse
+      // an existing playback tab instead of stacking one tab per request.
+      let targetId = await findPlaybackPage(active, base);
+      if (targetId) {
+        const attached = (await active.connection.send("Target.attachToTarget", {
+          targetId,
+          flatten: true,
+        })) as { sessionId?: unknown };
+        const sessionId = attached.sessionId;
+        if (typeof sessionId !== "string" || sessionId.length === 0) {
+          throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
+        }
+        try {
+          await active.connection.send("Page.navigate", { url }, sessionId);
+        } finally {
+          try { await active.connection.send("Target.detachFromTarget", { sessionId }); } catch {}
+        }
+      } else {
+        const result = (await active.connection.send("Target.createTarget", { url })) as {
+          targetId?: unknown;
+        };
+        if (typeof result.targetId !== "string" || result.targetId.length === 0) {
+          throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
+        }
+        targetId = result.targetId;
       }
-      await active.connection.send("Target.activateTarget", { targetId: result.targetId });
+      await active.connection.send("Target.activateTarget", { targetId });
     },
     async openResponseInterception(urlPattern: string) {
       const active = connectionRegistration;

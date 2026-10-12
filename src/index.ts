@@ -527,7 +527,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "crunchyroll_play",
       description:
-        "Play an episode or movie: opens its Crunchyroll watch page in a new tab of the signed-in managed browser. Use the episode id from crunchyroll_get_episodes (not a series or season id).",
+        "Play an episode or movie: opens its Crunchyroll watch page in the signed-in managed browser (reusing the playback tab if one is open). Use the episode id from crunchyroll_get_episodes (not a series or season id).",
       inputSchema: {
         type: "object",
         properties: {

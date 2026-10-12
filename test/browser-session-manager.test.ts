@@ -476,6 +476,24 @@ describe("BT2 session manager — managed page", () => {
     assert.equal(manager.managedPageId(), undefined, "the playback tab is not the managed page");
   });
 
+  test("openWatchPage reuses an existing playback tab instead of stacking tabs", async () => {
+    const { manager, connector } = wireFakes({ watchPageBaseUrl: "http://127.0.0.1:9/watch/" });
+    await manager.start();
+    connector.connections[0].targetInfos = [
+      { type: "page", targetId: "home", url: "http://127.0.0.1:9/discover", attached: false },
+      { type: "page", targetId: "playing", url: "http://127.0.0.1:9/watch/GOLD/slug", attached: false },
+    ];
+    await manager.openWatchPage("GNEW");
+    const calls = connector.connections[0].calls;
+    assert.equal(calls.filter((call) => call.method === "Target.createTarget").length, 0);
+    const navigation = calls.find((call) => call.method === "Page.navigate");
+    assert.equal(navigation?.params?.url, "http://127.0.0.1:9/watch/GNEW");
+    assert.deepEqual(
+      calls.filter((call) => call.method === "Target.activateTarget").map((call) => call.params?.targetId),
+      ["playing"]
+    );
+  });
+
   test("openWatchPage is unavailable without a configured prefix", async () => {
     const { manager } = wireFakes();
     await manager.start();

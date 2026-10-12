@@ -96,12 +96,16 @@ Exemplo: "coloca Clevatess temporada 2 episódio 12".
      `season_episode_count`. Use sempre que souber o número: a resposta fica pequena.
    - Cada episódio tem `id`, `episode_number`, `title`, `is_premium_only`, `availability_status`,
      `next_episode_id`, `duration_ms`, `original_audio` e `audio_versions`.
-   - `count: 0` → o episódio não existe nessa temporada: diga quantos ela tem
-     (`season_episode_count`) ou procure em outra temporada.
+   - `count: 0` → a temporada pode **continuar a numeração da anterior** (ex.: Kaiju No. 8 temporada 2
+     começa no episódio 13). Se `M <= season_episode_count`, chame de novo **sem** `episode_number`,
+     ordene por `episode_number` e pegue o M-ésimo da temporada (o "ep 5 da temporada 2" do Kaiju
+     é o `episode_number` 16). Diga ao usuário os dois números ("5º da temporada, ep. 16"). Se
+     `M > season_episode_count`, diga quantos episódios a temporada tem.
    - Sem número (ex.: "o que tem nessa temporada?"), chame sem `episode_number` para listar todos.
 4. Escolha o idioma (veja "Idioma e versões") e chame `crunchyroll_play` com
    `{"episode_id": "<id do episódio escolhido>"}`.
-   - Sucesso: `{"opened": true, "episode_id", "url"}`. A aba abre já no player.
+   - Sucesso: `{"opened": true, "episode_id", "url"}`. O player abre numa aba do navegador dedicado;
+     se já houver um episódio tocando, a mesma aba troca para o novo.
 5. Responda: "Abri **Clevatess II – ep. 12: The Millennium of a Dark Beast Lord** (dublado em PT-BR)
    no navegador da Crunchyroll."
 
