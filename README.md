@@ -6,17 +6,64 @@
   >
 </p>
 
-# MCP Crunchyroll
+<h1 align="center">🍥 MCP Crunchyroll</h1>
+
+<p align="center">
+  <strong>Let your AI agent browse anime, check your watchlist and keep your account in sync,<br/>without ever handing it your password.</strong>
+</p>
+
+<p align="center">
+  <a href="https://github.com/Itthiago034/mcp-crunchyroll/actions/workflows/ci.yml"><img src="https://github.com/Itthiago034/mcp-crunchyroll/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <img src="https://img.shields.io/badge/version-v0.1.0-f47521" alt="v0.1.0" />
+  <img src="https://img.shields.io/badge/Node.js-18%20%7C%2020%20%7C%2022-339933?logo=nodedotjs&logoColor=white" alt="Node.js" />
+  <img src="https://img.shields.io/badge/TypeScript-5.3-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
+  <img src="https://img.shields.io/badge/MCP-server-8b5cf6" alt="MCP server" />
+  <img src="https://img.shields.io/badge/license-MIT-blue" alt="License" />
+  <img src="https://img.shields.io/badge/unofficial-community%20project-f47521" alt="Unofficial" />
+</p>
+
+<p align="center">
+  <a href="#-quick-start">Quick start</a> •
+  <a href="#-tool-surface">Tools</a> •
+  <a href="#-how-it-works">How it works</a> •
+  <a href="#-security-boundaries">Security</a> •
+  <a href="#-known-limitations">Limitations</a>
+</p>
+
+---
 
 An unofficial [Model Context Protocol](https://modelcontextprotocol.io/) server for Crunchyroll, written in TypeScript. It gives MCP clients a closed tool surface for catalog discovery, account reads, and account mutations through browser-mediated authentication and provider access.
 
-[![CI](https://github.com/Itthiago034/mcp-crunchyroll/actions/workflows/ci.yml/badge.svg)](https://github.com/Itthiago034/mcp-crunchyroll/actions/workflows/ci.yml)
-![Node.js](https://img.shields.io/badge/Node.js-18%20%7C%2020%20%7C%2022-339933)
-![TypeScript](https://img.shields.io/badge/TypeScript-5.3-3178C6)
-![License](https://img.shields.io/badge/license-MIT-blue)
-![Unofficial](https://img.shields.io/badge/unofficial-community%20project-f47521)
+<p align="center">
+  <img src="docs/assets/demo.svg" alt="Animated demo: an agent asks for this season's most popular simulcast, MCP Crunchyroll calls get_simulcast_seasons, browse and add_to_watchlist, and the title lands on the watchlist" width="100%" />
+</p>
 
-## Release status
+## ✨ Highlights
+
+<table>
+  <tr>
+    <td width="33%" valign="top">
+
+### 🔎 Discover
+Search, browse by category or simulcast season, drill into series, seasons and episodes, and get **personalized recommendations**.
+
+</td>
+    <td width="33%" valign="top">
+
+### 📚 Your account
+Read your **watchlist**, **history** and **playheads**, then add or remove titles and update progress, all from chat.
+
+</td>
+    <td width="33%" valign="top">
+
+### 🔒 Safe by design
+Sign-in happens only in a **managed browser**. No passwords, cookies or tokens in tool arguments, and uncertain writes **fail closed**.
+
+</td>
+  </tr>
+</table>
+
+## 📦 Release status
 
 v0.1.0 exposes 21 public tools. Nineteen are operational: three local authentication/status tools and sixteen production API operations. Two published tools remain deliberately deferred and fail closed.
 
@@ -29,7 +76,14 @@ v0.1.0 exposes 21 public tools. Nineteen are operational: three local authentica
 
 The production operations cover catalog reads, account reads, adding and removing watchlist items, and updating playheads. CI validates the project on Node.js 18, 20, and 22 with sandboxed Chrome for Testing.
 
-## How it works
+## 🧭 How it works
+
+<p align="center">
+  <img src="docs/assets/architecture.svg" alt="MCP client → stdio tool call → MCP Crunchyroll → closed operation descriptor with auth-derived identity → managed browser over CDP → provider request in the authenticated browser context → Crunchyroll web services" width="100%" />
+</p>
+
+<details>
+<summary>Text version</summary>
 
 ```text
 MCP client
@@ -47,17 +101,19 @@ Managed browser / CDP
 Crunchyroll web services
 ```
 
+</details>
+
 Interactive credentials are entered only in the managed browser. Usernames, passwords, cookies, and bearer tokens are not tool arguments. Migrated provider operations use the browser-mediated transport; callers cannot choose an account ID or override the HTTP method, path, headers, query, or raw request body.
 
 This project is not affiliated with or endorsed by Crunchyroll, LLC.
 
-## Requirements
+## 📋 Requirements
 
 - Node.js 18 or newer
 - npm
 - A supported Chromium-family browser for interactive authentication, unless `CRUNCHYROLL_BROWSER_EXECUTABLE` points to one explicitly
 
-## Install and build
+## 🚀 Quick start
 
 ```bash
 git clone https://github.com/Itthiago034/mcp-crunchyroll.git
@@ -69,7 +125,7 @@ npm run build
 
 The production bundle is written to `dist/index.js`.
 
-## Run
+## 🏃 Run
 
 Run the built stdio server:
 
@@ -98,7 +154,7 @@ A generic MCP client configuration for the built bundle looks like this:
 
 The repository also includes `manifest.yaml` for compatible Hermes Agent installations.
 
-## Authentication
+## 🔐 Authentication
 
 Call:
 
@@ -118,9 +174,9 @@ Useful local tools:
 
 The managed browser profile is stored under `~/.strider/crunchyroll/browser-profile`. Do not point the server at a personal browser profile.
 
-## Tool surface
+## 🧰 Tool surface
 
-### Catalog and discovery
+### 🔎 Catalog and discovery
 
 | Tool | Purpose |
 |---|---|
@@ -135,7 +191,7 @@ The managed browser profile is stored under `~/.strider/crunchyroll/browser-prof
 | `crunchyroll_get_recommendations` | Read personalized recommendations |
 | `crunchyroll_get_similar` | Read titles similar to a series |
 
-### Account reads
+### 📚 Account reads
 
 | Tool | Purpose |
 |---|---|
@@ -143,7 +199,7 @@ The managed browser profile is stored under `~/.strider/crunchyroll/browser-prof
 | `crunchyroll_get_history` | Read watch history |
 | `crunchyroll_get_playheads` | Read playheads for selected content IDs |
 
-### Account mutations
+### 📝 Account mutations
 
 | Tool | Purpose | Provider success |
 |---|---|---|
@@ -155,7 +211,7 @@ Mutation identity is derived from the authenticated browser context. The caller 
 
 A provider response such as bad request, conflict, or operation-specific not found is reported deterministically. If a write may have been dispatched but its result cannot be known—for example, because the browser disconnects after possible dispatch—the operation returns `MUTATION_OUTCOME_UNKNOWN`. The server does not blindly retry mutations. Callers can reconcile playhead state with `crunchyroll_get_playheads` when appropriate.
 
-### Deferred tools
+### 💤 Deferred tools
 
 These names remain visible for compatibility, but v0.1.0 intentionally refuses them with `OPERATION_NOT_MIGRATED`:
 
@@ -166,7 +222,7 @@ These names remain visible for compatibility, but v0.1.0 intentionally refuses t
 
 They are not counted among the 19 operational tools.
 
-## Security boundaries
+## 🧱 Security boundaries
 
 - Interactive secrets are entered in the managed browser, not passed as MCP tool arguments.
 - Provider access for migrated operations is mediated by the managed browser/CDP boundary.
@@ -180,7 +236,7 @@ They are not counted among the 19 operational tools.
 
 These controls describe the implemented boundaries; they are not a claim of absolute containment against every host or browser threat.
 
-## Development and tests
+## 🧪 Development and tests
 
 ```bash
 npm ci
@@ -191,7 +247,7 @@ npm test
 
 The test command runs the unit suites and MCP stdio harness. GitHub Actions repeats install, typecheck, build, and tests independently on Node.js 18, 20, and 22, including the sandboxed browser lifecycle checks.
 
-## Known limitations
+## 🚧 Known limitations
 
 - `crunchyroll_continue_watching` is deferred and fails closed.
 - `crunchyroll_get_subscription` is deferred and fails closed.
@@ -199,10 +255,16 @@ The test command runs the unit suites and MCP stdio harness. GitHub Actions repe
 - The project does not provide playback, media downloading, or DRM bypass.
 - Authentication can require user interaction in the managed browser.
 
-## Credits and license
+## 🙏 Credits and license
 
 Based on the open-source `@striderlabs/mcp-crunchyroll` project by StrikerLabs. Distributed under the MIT License.
 
-## Disclaimer
+## 📜 Disclaimer
 
 **Unofficial community project. Not affiliated with or endorsed by Crunchyroll, LLC.** “Crunchyroll” and related names and marks belong to their respective owners.
+
+---
+
+<p align="center">
+  Made with 🧡 by <a href="https://github.com/Itthiago034">@Itthiago034</a>. If this helped you, consider leaving a ⭐
+</p>
