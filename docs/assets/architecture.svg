@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="300" viewBox="0 0 900 300" role="img" aria-label="Architecture: MCP client sends a stdio tool call to MCP Crunchyroll, which sends a closed operation descriptor with auth-derived identity to a managed browser over CDP, which makes the provider request to Crunchyroll web services in the authenticated browser context">
+  <title>MCP Crunchyroll — how it works</title>
+  <defs>
+    <linearGradient id="bd" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f47521"/><stop offset="1" stop-color="#ff9a3c" stop-opacity=".3"/></linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <path id="p1" d="M190 130 H262"/>
+    <path id="p2" d="M418 130 H490"/>
+    <path id="p3" d="M646 130 H718"/>
+  </defs>
+  <style>
+    text { font-family: 'Inter','Segoe UI',Helvetica,Arial,sans-serif; }
+    .name { fill: #e6edf3; font-size: 15px; font-weight: 700; }
+    .sub  { fill: #8b949e; font-size: 12px; }
+    .edge { fill: #ff9a3c; font-size: 11px; font-family: 'Fira Code',Consolas,monospace; }
+    .box  { fill: #161b22; stroke: #30363d; stroke-width: 1.5; }
+    .hot  { fill: #1c1410; stroke: #f47521; stroke-width: 2; }
+    .wire { stroke: #f47521; stroke-width: 2; stroke-dasharray: 6 6; animation: flow 1s linear infinite; }
+    @keyframes flow { to { stroke-dashoffset: -12; } }
+    .pulse { animation: pulse 2.4s ease-in-out infinite; transform-box: fill-box; transform-origin: center; }
+    @keyframes pulse { 50% { opacity: .55; } }
+    .note { fill: #c9d1d9; font-size: 13px; }
+  </style>
+
+  <rect x="2" y="2" width="896" height="296" rx="16" fill="#0d1117" stroke="url(#bd)" stroke-width="2"/>
+
+  <!-- nodes -->
+  <g>
+    <rect class="box" x="34" y="84" width="156" height="92" rx="12"/>
+    <text x="112" y="122" text-anchor="middle" font-size="24">🤖</text>
+    <text x="112" y="148" text-anchor="middle" class="name">MCP client</text>
+    <text x="112" y="166" text-anchor="middle" class="sub">your AI agent</text>
+  </g>
+  <g>
+    <rect class="hot pulse" x="262" y="84" width="156" height="92" rx="12" filter="url(#glow)"/>
+    <text x="340" y="122" text-anchor="middle" font-size="24">🍥</text>
+    <text x="340" y="148" text-anchor="middle" class="name">MCP Crunchyroll</text>
+    <text x="340" y="166" text-anchor="middle" class="sub">closed tool surface</text>
+  </g>
+  <g>
+    <rect class="box" x="490" y="84" width="156" height="92" rx="12"/>
+    <text x="568" y="122" text-anchor="middle" font-size="24">🌐</text>
+    <text x="568" y="148" text-anchor="middle" class="name">Managed browser</text>
+    <text x="568" y="166" text-anchor="middle" class="sub">CDP · auth context</text>
+  </g>
+  <g>
+    <rect class="box" x="718" y="84" width="150" height="92" rx="12"/>
+    <text x="793" y="122" text-anchor="middle" font-size="24">📺</text>
+    <text x="793" y="148" text-anchor="middle" class="name">Crunchyroll</text>
+    <text x="793" y="166" text-anchor="middle" class="sub">web services</text>
+  </g>
+
+  <!-- wires -->
+  <use href="#p1" class="wire"/><use href="#p2" class="wire"/><use href="#p3" class="wire"/>
+  <circle r="5" fill="#ffd2b0" filter="url(#glow)"><animateMotion dur="1.6s" repeatCount="indefinite"><mpath href="#p1"/></animateMotion></circle>
+  <circle r="5" fill="#ffd2b0" filter="url(#glow)"><animateMotion dur="1.6s" begin="0.5s" repeatCount="indefinite"><mpath href="#p2"/></animateMotion></circle>
+  <circle r="5" fill="#ffd2b0" filter="url(#glow)"><animateMotion dur="1.6s" begin="1s" repeatCount="indefinite"><mpath href="#p3"/></animateMotion></circle>
+
+  <text x="226" y="70" text-anchor="middle" class="edge">stdio</text>
+  <text x="226" y="200" text-anchor="middle" class="sub">tool call</text>
+  <text x="454" y="70" text-anchor="middle" class="edge">descriptor</text>
+  <text x="454" y="200" text-anchor="middle" class="sub">auth-derived id</text>
+  <text x="682" y="70" text-anchor="middle" class="edge">request</text>
+  <text x="682" y="200" text-anchor="middle" class="sub">in browser ctx</text>
+
+  <!-- footer notes -->
+  <line x1="34" y1="226" x2="866" y2="226" stroke="#21262d"/>
+  <text x="34"  y="262" class="note">🔒 Secrets stay in the browser</text>
+  <text x="300" y="262" class="note">🪪 No caller-chosen accountId</text>
+  <text x="566" y="262" class="note">🛑 Uncertain writes fail closed</text>
+</svg>

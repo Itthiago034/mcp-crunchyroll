@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="440" viewBox="0 0 900 440" role="img" aria-label="Animated demo: an AI agent uses MCP Crunchyroll tools to find this season's most popular simulcast and add it to the watchlist">
+  <title>MCP Crunchyroll — agent demo</title>
+  <defs>
+    <linearGradient id="bd" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f47521"/><stop offset="1" stop-color="#ff9a3c" stop-opacity=".3"/></linearGradient>
+  </defs>
+  <style>
+    text { font-family: 'Inter','Segoe UI',Helvetica,Arial,sans-serif; }
+    .msg { font-size: 16px; font-weight: 500; }
+    .code { font-family: 'Fira Code','JetBrains Mono',Consolas,monospace; font-size: 14px; }
+    .dim { fill: #8b949e; font-size: 12px; }
+    .title { fill: #e6edf3; font-size: 14px; font-weight: 600; }
+    .spin { transform-box: fill-box; transform-origin: center; animation: spin .8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .live { animation: live 1.6s ease-in-out infinite; }
+    @keyframes live { 50% { opacity: .3; } }
+    @keyframes u{0%,1.88%{opacity:0;transform:translateY(6px)}4.06%,93.75%{opacity:1;transform:none}96.25%,100%{opacity:0}}@keyframes c0{0%,10.00%{opacity:0;transform:translateY(6px)}12.19%,93.75%{opacity:1;transform:none}96.25%,100%{opacity:0}}@keyframes s0{0%,11.25%{opacity:0}11.56%,18.13%{opacity:1}18.44%,100%{opacity:0}}@keyframes r0{0%,18.13%{opacity:0;transform:translateY(6px)}20.31%,93.75%{opacity:1;transform:none}96.25%,100%{opacity:0}}@keyframes c1{0%,21.25%{opacity:0;transform:translateY(6px)}23.44%,93.75%{opacity:1;transform:none}96.25%,100%{opacity:0}}@keyframes s1{0%,22.50%{opacity:0}22.81%,29.38%{opacity:1}29.69%,100%{opacity:0}}@keyframes r1{0%,29.38%{opacity:0;transform:translateY(6px)}31.56%,93.75%{opacity:1;transform:none}96.25%,100%{opacity:0}}@keyframes c2{0%,32.50%{opacity:0;transform:translateY(6px)}34.69%,93.75%{opacity:1;transform:none}96.25%,100%{opacity:0}}@keyframes s2{0%,33.75%{opacity:0}34.06%,40.62%{opacity:1}40.94%,100%{opacity:0}}@keyframes r2{0%,40.62%{opacity:0;transform:translateY(6px)}42.81%,93.75%{opacity:1;transform:none}96.25%,100%{opacity:0}}@keyframes a{0%,43.75%{opacity:0;transform:translateY(6px)}45.94%,93.75%{opacity:1;transform:none}96.25%,100%{opacity:0}}
+  </style>
+  <rect x="2" y="2" width="896" height="436" rx="16" fill="#0d1117" stroke="url(#bd)" stroke-width="2"/>
+  <circle cx="28" cy="28" r="6" fill="#ff5f57"/><circle cx="48" cy="28" r="6" fill="#febc2e"/><circle cx="68" cy="28" r="6" fill="#28c840"/>
+  <text x="450.0" y="33" text-anchor="middle" class="title">AI agent  ×  MCP Crunchyroll</text>
+  <circle class="live" cx="790" cy="28" r="5" fill="#22c55e"/><text x="802" y="33" class="dim">authenticated</text>
+  <line x1="2" y1="50" x2="898" y2="50" stroke="#21262d"/>
+  <g style="animation:u 16.0s ease-out infinite;opacity:0">
+  <rect x="300" y="66" width="568" height="58" rx="14" fill="#f47521"/>
+  <text x="320" y="90" class="msg" fill="#111">What's new this simulcast season? Add the most</text>
+  <text x="320" y="112" class="msg" fill="#111">popular one to my watchlist. 🍥</text>
+  <text x="852" y="140" class="dim" text-anchor="end">you</text>
+</g><g style="animation:c0 16.0s ease-out infinite;opacity:0">
+  <rect x="32" y="160" width="620" height="40" rx="10" fill="#161b22" stroke="#30363d"/>
+  <text x="50" y="186" class="code"><tspan fill="#f47521">⚙ crunchyroll_get_simulcast_seasons</tspan><tspan fill="#8b949e">({})</tspan></text>
+</g>
+<g style="animation:s0 16.0s linear infinite;opacity:0"><circle cx="680" cy="180" r="8" fill="none" stroke="#f47521" stroke-width="3" stroke-dasharray="30 20" class="spin"/><text x="698" y="185" class="dim">running…</text></g>
+<g style="animation:r0 16.0s ease-out infinite;opacity:0"><text x="670" y="186" class="code"><tspan fill="#22c55e">✓</tspan><tspan fill="#c9d1d9"> season tags loaded</tspan></text></g><g style="animation:c1 16.0s ease-out infinite;opacity:0">
+  <rect x="32" y="214" width="620" height="40" rx="10" fill="#161b22" stroke="#30363d"/>
+  <text x="50" y="240" class="code"><tspan fill="#f47521">⚙ crunchyroll_browse</tspan><tspan fill="#8b949e">({ seasonal_tag, sort_by: "popularity", n: 5 })</tspan></text>
+</g>
+<g style="animation:s1 16.0s linear infinite;opacity:0"><circle cx="680" cy="234" r="8" fill="none" stroke="#f47521" stroke-width="3" stroke-dasharray="30 20" class="spin"/><text x="698" y="239" class="dim">running…</text></g>
+<g style="animation:r1 16.0s ease-out infinite;opacity:0"><text x="670" y="240" class="code"><tspan fill="#22c55e">✓</tspan><tspan fill="#c9d1d9"> 5 titles</tspan></text></g><g style="animation:c2 16.0s ease-out infinite;opacity:0">
+  <rect x="32" y="268" width="620" height="40" rx="10" fill="#161b22" stroke="#30363d"/>
+  <text x="50" y="294" class="code"><tspan fill="#f47521">⚙ crunchyroll_add_to_watchlist</tspan><tspan fill="#8b949e">({ content_id })</tspan></text>
+</g>
+<g style="animation:s2 16.0s linear infinite;opacity:0"><circle cx="680" cy="288" r="8" fill="none" stroke="#f47521" stroke-width="3" stroke-dasharray="30 20" class="spin"/><text x="698" y="293" class="dim">running…</text></g>
+<g style="animation:r2 16.0s ease-out infinite;opacity:0"><text x="670" y="294" class="code"><tspan fill="#22c55e">✓</tspan><tspan fill="#c9d1d9"> 204 No Content</tspan></text></g><g style="animation:a 16.0s ease-out infinite;opacity:0">
+  <rect x="32" y="334" width="600" height="58" rx="14" fill="#1f2937" stroke="#f47521" stroke-opacity=".5"/>
+  <text x="52" y="358" class="msg" fill="#e6edf3">Done! ✨ The season's most popular title is now</text>
+  <text x="52" y="380" class="msg" fill="#e6edf3">on your watchlist. Want episode details next?</text>
+  <text x="40" y="408" class="dim">agent · via MCP Crunchyroll</text>
+</g>
+</svg>
