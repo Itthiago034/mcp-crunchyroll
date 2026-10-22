@@ -73,6 +73,23 @@ function harness(world: Partial<AuthWorld> = {}, options: { silentSucceeds?: boo
 }
 
 describe("session recovery — classification", () => {
+  test("a logout recorded by an earlier process classifies a cold start as LOGGED_OUT", async () => {
+    const h = harness();
+    const recovery = createSessionRecovery({
+      usable: () => false,
+      diagnostics: () => ({ availability: "UNAVAILABLE", reason: "INITIAL" }),
+      authState: () => "LOGIN_REQUIRED",
+      eligibleForColdStart: async () => true,
+      loggedOutPersisted: () => true,
+      establishSilently: async () => { throw new Error("must not be attempted"); },
+      now: () => 0,
+      schedule: () => ({ cancel() {} }),
+    });
+    assert.equal(recovery.classify(), "LOGGED_OUT");
+    assert.deepEqual(await recovery.ensureSession(), { ok: false, code: "LOGGED_OUT", from: "LOGGED_OUT" });
+    assert.equal(h.attempts, 0);
+  });
+
   test("each state is distinguished", () => {
     const cases: Array<[Partial<AuthWorld>, string]> = [
       [{ usable: true, availability: "READY", authState: "PROFILE_READY" }, "USABLE"],

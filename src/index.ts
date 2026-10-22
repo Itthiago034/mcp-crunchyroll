@@ -217,6 +217,7 @@ const sessionRecovery = createSessionRecovery({
   },
   authState: () => authOrchestrator.readiness().auth_state,
   eligibleForColdStart: () => sessionEligibility.isEligible(),
+  loggedOutPersisted: () => sessionEligibility.loggedOutPersisted(),
   establishSilently: async (observationDeadlineMs) =>
     (await authOrchestrator.establishSilently({ observationDeadlineMs })).accepted,
   now: () => Date.now(),

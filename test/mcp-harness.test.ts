@@ -1,7 +1,8 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpClient } from "./_harness-client.js";
@@ -272,6 +273,39 @@ describe("MCP server harness", () => {
             .result as { content: { text: string }[] }).content[0].text) as Record<string, unknown>;
           assert.equal(status.browser_running, false, "recovery never opens a browser for a never-authorized profile");
         });
+      });
+
+      test("a logout survives a process restart: player control and silent recovery stay refused", async () => {
+        const home = mkdtempSync(join(tmpdir(), "mcp-harness-logout-"));
+        const env = { ...process.env, HOME: home };
+        try {
+          const first = new McpClient({ command: target.command, args: target.args, cwd: ROOT, env });
+          await first.initialize();
+          await first.sendRequest("tools/call", { name: "crunchyroll_logout", arguments: {} });
+          first.kill();
+
+          const second = new McpClient({ command: target.command, args: target.args, cwd: ROOT, env });
+          try {
+            await second.initialize();
+            const player = await second.sendRequest("tools/call", {
+              name: "crunchyroll_player_control",
+              arguments: { action: "play" },
+            });
+            const report = JSON.parse((player.result as { content: { text: string }[] }).content[0].text);
+            assert.equal(report.outcome, "NOT_PERMITTED");
+            assert.equal(report.executed, false);
+            const content = await second.sendRequest("tools/call", {
+              name: "crunchyroll_get_history",
+              arguments: { n: 1 },
+            });
+            const payload = JSON.parse((content.result as { content: { text: string }[] }).content[0].text);
+            assert.equal(payload.code, "LOGGED_OUT");
+          } finally {
+            second.kill();
+          }
+        } finally {
+          rmSync(home, { recursive: true, force: true });
+        }
       });
 
       test("server shuts down cleanly", async () => {

@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, sym
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, test } from "node:test";
-import { createSessionEligibilityStore, sessionEligibilityPath } from "../src/transport/session-eligibility.js";
+import { createSessionEligibilityStore, loggedOutTombstonePath, sessionEligibilityPath } from "../src/transport/session-eligibility.js";
 
 const dirs: string[] = [];
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
@@ -62,5 +62,40 @@ describe("session eligibility marker", () => {
       writeFileSync(path, content, { mode: 0o600 });
       assert.equal(await createSessionEligibilityStore(path).isEligible(), false, content);
     }
+  });
+});
+
+describe("logout tombstone", () => {
+  test("logout removes eligibility and is remembered; the next login forgets it", async () => {
+    const path = join(scratch(), "marker.json");
+    const store = createSessionEligibilityStore(path, () => 99);
+    await store.record();
+    assert.equal(store.loggedOutPersisted(), false);
+    await store.recordLogout();
+    assert.equal(await store.isEligible(), false);
+    assert.equal(store.loggedOutPersisted(), true);
+    const tombstone = loggedOutTombstonePath(path);
+    assert.equal(statSync(tombstone).mode & 0o777, 0o600);
+    assert.deepEqual(JSON.parse(readFileSync(tombstone, "utf-8")), { version: 1, logged_out_at: 99 });
+    await store.record();
+    assert.equal(store.loggedOutPersisted(), false);
+    assert.equal(await store.isEligible(), true);
+  });
+
+  test("a loose or symlinked tombstone still counts as logged out (fail closed), and login clears it", async () => {
+    const dir = scratch();
+    const path = join(dir, "marker.json");
+    const store = createSessionEligibilityStore(path);
+    await store.recordLogout();
+    chmodSync(loggedOutTombstonePath(path), 0o644);
+    assert.equal(store.loggedOutPersisted(), true);
+    const other = join(dir, "real.json");
+    writeFileSync(other, "{}", { mode: 0o600 });
+    rmSync(loggedOutTombstonePath(path));
+    symlinkSync(other, loggedOutTombstonePath(path));
+    assert.equal(store.loggedOutPersisted(), true);
+    await store.record();
+    assert.equal(store.loggedOutPersisted(), false);
+    assert.equal(existsSync(other), true, "the symlink target is untouched");
   });
 });

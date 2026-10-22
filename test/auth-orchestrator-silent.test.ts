@@ -80,6 +80,48 @@ function harness() {
 
 const observed = (): Observation => ({ kind: "OBSERVED", material: MATERIAL, connectionGeneration: 3 });
 
+describe("orchestrator — eligibility on logout", () => {
+  test("logout records a logout (tombstone) before the producer runs", async () => {
+    const events: string[] = [];
+    const orchestrator = createAuthOrchestrator({
+      diagnostics: { availability: () => "UNAVAILABLE", hasProfileId: () => false },
+      browser: { lifecycleState: () => undefined, connectionGeneration: () => undefined, openLoginSurface: async () => {} },
+      producer: {
+        establishFromObservedMaterial: async () => ({ kind: "ESTABLISHED" }),
+        logout: async () => { events.push("producer.logout"); return { persistence: {} }; },
+      },
+      observer: { observeNextAuthMaterial: async () => ({ kind: "TIMED_OUT" }) },
+      eligibility: {
+        record: async () => { events.push("record"); },
+        clear: async () => { events.push("clear"); },
+        recordLogout: async () => { events.push("recordLogout"); },
+      },
+    });
+    await orchestrator.logout();
+    assert.deepEqual(events, ["recordLogout", "producer.logout"]);
+  });
+
+  test("a failing eligibility store never blocks the logout", async () => {
+    let loggedOut = false;
+    const orchestrator = createAuthOrchestrator({
+      diagnostics: { availability: () => "UNAVAILABLE", hasProfileId: () => false },
+      browser: { lifecycleState: () => undefined, connectionGeneration: () => undefined, openLoginSurface: async () => {} },
+      producer: {
+        establishFromObservedMaterial: async () => ({ kind: "ESTABLISHED" }),
+        logout: async () => { loggedOut = true; return { persistence: {} }; },
+      },
+      observer: { observeNextAuthMaterial: async () => ({ kind: "TIMED_OUT" }) },
+      eligibility: {
+        record: async () => {},
+        clear: async () => { throw new Error("disk"); },
+        recordLogout: async () => { throw new Error("disk"); },
+      },
+    });
+    await orchestrator.logout();
+    assert.equal(loggedOut, true);
+  });
+});
+
 describe("orchestrator — establishSilently", () => {
   test("a silent attempt carries its short observation deadline and records eligibility on success", async () => {
     const h = harness();

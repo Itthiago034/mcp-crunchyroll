@@ -57,6 +57,8 @@ export interface SessionRecoveryPorts {
   authState(): string;
   /** Whether a human-authorized session was recorded for the dedicated profile. */
   eligibleForColdStart(): Promise<boolean>;
+  /** Whether an explicit logout was recorded by an earlier process. Optional. */
+  loggedOutPersisted?(): boolean;
   /** One bounded silent attempt. Resolves true only when a session was installed. */
   establishSilently(observationDeadlineMs: number): Promise<boolean>;
   now(): number;
@@ -102,6 +104,8 @@ export function createSessionRecovery(
     if (diagnostics.availability === "READY") return "EXPIRED";
     if (diagnostics.reason === "INVALIDATED" && diagnostics.cause === "LOGOUT") return "LOGGED_OUT";
     if (diagnostics.reason === "INVALIDATED" && diagnostics.cause === "AUTH_MATERIAL_LOST") return "EXPIRED";
+    // Nothing in THIS process, but the last explicit act was a logout.
+    if (ports.loggedOutPersisted?.() === true) return "LOGGED_OUT";
     return "NEVER_ESTABLISHED";
   };
 

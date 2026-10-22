@@ -91,6 +91,8 @@ export interface AuthObserverPort {
 export interface SessionEligibilityPort {
   record(): Promise<void>;
   clear(): Promise<void>;
+  /** Explicit logout; falls back to `clear` when absent. */
+  recordLogout?(): Promise<void>;
 }
 
 export interface AuthOrchestratorPorts {
@@ -386,7 +388,8 @@ export function createAuthOrchestrator(ports: AuthOrchestratorPorts): AuthOrches
         try {
           // Eligibility goes first: a logout interrupted at any later point must
           // still leave nothing a silent attempt could re-establish.
-          await ports.eligibility?.clear().catch(() => undefined);
+          const eligibility = ports.eligibility;
+          await (eligibility?.recordLogout ? eligibility.recordLogout() : eligibility?.clear())?.catch(() => undefined);
           // The authority is invalidated inside the producer BEFORE any
           // filesystem work; a failed or partial clear can never restore it.
           persistence = (await ports.producer.logout()).persistence;
