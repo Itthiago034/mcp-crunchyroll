@@ -36,3 +36,4 @@ notes:
   - "This server uses the Crunchyroll web API, so its endpoints may change over time."
   - "Requires Node.js >= 18. The bootstrap installs dependencies and builds dist/index.js, which the transport runs with node (no npx or tsx at runtime)."
   - "Hermes starts stdio servers with a filtered environment that drops DISPLAY, WAYLAND_DISPLAY and DBUS_SESSION_BUS_ADDRESS. On Linux the server recovers the user's own desktop session from user-owned sockets so crunchyroll_login can open its window; no env entries are needed."
+  - "Player control is native: crunchyroll_player_control {action: play|pause|fullscreen|exit_fullscreen|status} acts on the playback tab opened by crunchyroll_play and reports executed/verified/outcome. Never control the browser through a terminal, a raw CDP WebSocket or the debugging port."

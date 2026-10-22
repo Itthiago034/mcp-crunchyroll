@@ -18,14 +18,14 @@ An unofficial [Model Context Protocol](https://modelcontextprotocol.io/) server 
 
 ## Release status
 
-v0.1.0 exposes 22 public tools. Twenty are operational: three local authentication/status tools, sixteen production API operations and one playback tool. Two published tools remain deliberately deferred and fail closed.
+This branch exposes 23 public tools. Twenty-one are operational: three local authentication/status tools, sixteen production API operations and two playback tools. Two published tools remain deliberately deferred and fail closed.
 
 | Surface | Count | Status |
 |---|---:|---|
-| Public MCP tools | 22 | Published |
+| Public MCP tools | 23 | Published |
 | Authentication and status tools | 3 | Operational |
 | Production API operations | 16 | Operational |
-| Playback | 1 | Operational |
+| Playback and player control | 2 | Operational |
 | Deferred tools | 2 | `OPERATION_NOT_MIGRATED` |
 
 The production operations cover catalog reads, account reads, adding and removing watchlist items, and updating playheads. CI validates the project on Node.js 18, 20, and 22 with sandboxed Chrome for Testing.
@@ -186,9 +186,12 @@ A provider response such as bad request, conflict, or operation-specific not fou
 
 | Tool | Purpose |
 |---|---|
-| `crunchyroll_play` | Open an episode's watch page (`https://www.crunchyroll.com/watch/<episode_id>`) in a focused tab of the signed-in managed browser, reusing the playback tab if one is open |
+| `crunchyroll_play` | Open an episode's watch page (`https://www.crunchyroll.com/watch/<episode_id>`) in a focused tab of the signed-in managed browser, reusing the playback tab if one is open. Optional `autoplay` / `fullscreen` booleans run the native player controls once the player loads |
+| `crunchyroll_player_control` | `{"action": "play" \| "pause" \| "fullscreen" \| "exit_fullscreen" \| "status"}` on the playback tab; reports `executed`, `verified`, `outcome` and the observed `state` |
 
 `episode_id` must be a plain uppercase Crunchyroll id from `crunchyroll_get_episodes`; nothing else reaches the URL. Playback uses the browser's own signed-in session and makes no provider API request from the server.
+
+Player control runs one frozen page function with a closed command set, only in the playback tab's page and player-frame contexts on `www.crunchyroll.com` / `static.crunchyroll.com`. It exposes no script, CDP or port to the caller, never reads cookies or tokens, and reports success only when a later observation confirms the requested state. Autoplay and fullscreen remain subject to the browser's own policies; a refusal is reported as `REFUSED_BY_BROWSER`, never bypassed. See [ARQUITETURA.md](ARQUITETURA.md) and [SEGURANCA.md](SEGURANCA.md).
 
 ### Deferred tools
 
@@ -238,7 +241,8 @@ requires interactive sign-in in a visible managed browser.
 - `crunchyroll_continue_watching` is deferred and fails closed.
 - `crunchyroll_get_subscription` is deferred and fails closed.
 - Crunchyroll's internal web interfaces are not a stable public API and may change.
-- The project does not provide playback, media downloading, or DRM bypass.
+- The project opens and controls the official web player only; it does not download media or bypass DRM, autoplay or fullscreen policies.
+- Fullscreen and autoplay can still be refused by the browser or by the player frame (see `REFUSED_BY_BROWSER` in the skill).
 - Authentication can require user interaction in the managed browser.
 
 ## Credits and license
