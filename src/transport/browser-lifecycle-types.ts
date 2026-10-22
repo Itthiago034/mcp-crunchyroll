@@ -169,6 +169,84 @@ export interface ApiExecutionChannel {
   close(): Promise<void>;
 }
 
+// ── Player control — closed playback channel ───────────────────────────────
+
+/**
+ * The closed command set the playback channel can run in a player frame. It is
+ * an enum, not a script: the page function is a constant of this build and the
+ * command travels as a structured argument it switches on.
+ */
+export type PlayerCommand = "probe" | "play" | "pause" | "enter_fullscreen" | "exit_fullscreen";
+
+export const PLAYER_COMMANDS: readonly PlayerCommand[] = Object.freeze([
+  "probe",
+  "play",
+  "pause",
+  "enter_fullscreen",
+  "exit_fullscreen",
+]);
+
+/**
+ * What one frame reports about its player. Primitives only: no source URL (a
+ * stream URL carries signed policy), no DOM handle, no text from the page.
+ */
+export interface PlayerFrameState {
+  readonly hasVideo: boolean;
+  readonly hasSource: boolean;
+  readonly paused: boolean;
+  readonly ended: boolean;
+  readonly readyState: number;
+  readonly currentTime: number;
+  readonly duration: number;
+  readonly muted: boolean;
+  readonly fullscreen: boolean;
+  readonly fullscreenEnabled: boolean;
+  readonly topLevel: boolean;
+}
+
+/** Closed page-side failure names. Anything else is reported as UNKNOWN. */
+export type PlayerPageError =
+  | "NO_VIDEO"
+  | "NOT_ALLOWED"
+  | "ABORTED"
+  | "NOT_SUPPORTED"
+  | "TYPE_ERROR"
+  | "PENDING"
+  | "FULLSCREEN_DISABLED"
+  | "UNSUPPORTED_COMMAND"
+  | "UNKNOWN";
+
+export interface PlayerCommandResult {
+  readonly state: PlayerFrameState;
+  readonly error?: PlayerPageError;
+}
+
+/** Why a playback channel can no longer be used. */
+export type PlaybackChannelLoss = "TAB_CLOSED" | "DISCONNECTED" | "NAVIGATED_AWAY" | "CLOSED";
+
+/**
+ * A closed control channel on the managed browser's playback tab.
+ *
+ * Like the API channel it exposes NO generic CDP send and NO evaluate: one
+ * frozen page function, a closed command enum, and read-only location and
+ * loss information. It is bound to one tab and one connection generation.
+ */
+export interface PlaybackControlChannel {
+  readonly connectionGeneration: number;
+  readonly targetId: string;
+  /** The content id in the tab's validated watch URL, or undefined if it left the watch path. */
+  currentContentId(): Promise<string | undefined>;
+  /**
+   * Run one command in the frame that holds the player. `probe` aggregates the
+   * fullscreen flag across every allowed frame. Undefined means no allowed
+   * frame has a video element right now.
+   */
+  run(command: PlayerCommand, deadlineMs: number): Promise<PlayerCommandResult | undefined>;
+  /** Undefined while usable; the first loss reason afterwards. */
+  loss(): PlaybackChannelLoss | undefined;
+  close(): Promise<void>;
+}
+
 export interface CdpConnector {
   connect(webSocketDebuggerUrl: string): Promise<CdpConnection>;
 }
@@ -208,6 +286,13 @@ export interface BrowserSessionConfig {
    * set by the composition root; without it playback is unavailable.
    */
   readonly watchPageBaseUrl?: string;
+  /**
+   * Origins whose page contexts the playback control channel may talk to: the
+   * watch page itself and the player frame it embeds. A build constant set by
+   * the composition root; without it player control is unavailable. Compared
+   * as parsed origins, never as prefixes.
+   */
+  readonly playerFrameOrigins?: readonly string[];
   readonly profileDir: string;
   readonly executablePath: string;
 }

@@ -174,6 +174,7 @@ describe("BT2 session manager — start and stop", () => {
       "onLifecycleEvent",
       "onStateChange",
       "openApiExecutionChannel",
+      "openPlaybackControlChannel",
       "openResponseInterception",
       "openWatchPage",
       "reloadManagedPage",

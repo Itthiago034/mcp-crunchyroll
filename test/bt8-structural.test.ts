@@ -762,7 +762,21 @@ describe("BT8.1 — the page primitive grew two arguments and no authority", () 
     const runtimeCalls = [...MANAGER_SOURCE.matchAll(/"Runtime\.[A-Za-z]+"/g)].map((m) => m[0]);
     assert.deepEqual(
       [...new Set(runtimeCalls)].sort(),
-      ['"Runtime.callFunctionOn"', '"Runtime.enable"', '"Runtime.executionContextCreated"']
+      // Player control added two READ-ONLY context lifecycle events, so a
+      // destroyed frame is never targeted. No new command was added.
+      [
+        '"Runtime.callFunctionOn"',
+        '"Runtime.enable"',
+        '"Runtime.executionContextCreated"',
+        '"Runtime.executionContextDestroyed"',
+        '"Runtime.executionContextsCleared"',
+      ]
+    );
+    // Every page function is one of the two frozen constants; none is assembled.
+    const declarations = [...MANAGER_SOURCE.matchAll(/functionDeclaration:\s*([^,\n]+)/g)].map((m) => m[1].trim());
+    assert.deepEqual(
+      [...new Set(declarations)].sort(),
+      ["CRUNCHYROLL_FETCH_FUNCTION", "CRUNCHYROLL_PLAYER_FUNCTION"]
     );
   });
 
