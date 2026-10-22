@@ -445,6 +445,32 @@ describe("playback channel — identity, loss and teardown", () => {
     await channel.close();
   });
 
+  test("audit: the channel sends only its closed set of CDP methods (no Network, Storage, cookies, evaluate)", async () => {
+    const model = defaultModel({
+      children: [{ sessionId: "child-frame", type: "iframe", contexts: [{ id: 10, origin: STATIC }] }],
+      frames: new Map<number, Frame>([[1, null], [4, {}], [10, {}]]),
+    });
+    const { manager, current } = await wire(model);
+    const before = current().calls.length;
+    const channel = await manager.openPlaybackControlChannel();
+    for (const command of ["probe", "play", "pause", "enter_fullscreen", "exit_fullscreen"] as const) {
+      await channel.run(command, 1_000);
+    }
+    await channel.currentContentId();
+    await channel.close();
+    const methods = new Set(current().calls.slice(before).map((c) => c.method));
+    assert.deepEqual([...methods].sort(), [
+      "Runtime.callFunctionOn",
+      "Runtime.enable",
+      "Target.activateTarget",
+      "Target.attachToTarget",
+      "Target.detachFromTarget",
+      "Target.getTargetInfo",
+      "Target.getTargets",
+      "Target.setAutoAttach",
+    ]);
+  });
+
   test("adoptOnly start never spawns a browser", async () => {
     const base = mkdtempSync(join(tmpdir(), "player-adopt-"));
     cleanups.push(() => rmSync(base, { recursive: true, force: true }));
