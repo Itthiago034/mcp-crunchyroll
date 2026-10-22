@@ -835,11 +835,11 @@ describe("BT7 — transport ownership moved out of the legacy client", () => {
 // ── Public surface ──────────────────────────────────────────────────────────
 
 describe("BT7 — the public contract is frozen", () => {
-  test("22 tools, and none of the six gained an argument", () => {
+  test("23 tools, and none of the six gained an argument", () => {
     const baseline = JSON.parse(
       readFileSync(join(REPO_ROOT, "test/fixtures/baseline-tools.json"), "utf-8")
     ) as Array<{ name: string; inputSchema: { properties?: Record<string, unknown> } }>;
-    assert.equal(baseline.length, 22);
+    assert.equal(baseline.length, 23);
 
     const expected: Record<string, string[]> = {
       crunchyroll_get_similar: ["series_id", "n"],

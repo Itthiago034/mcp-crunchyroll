@@ -155,8 +155,9 @@ describe("BT5 cutover — migrated vs unmigrated, decided in one place", () => {
       "crunchyroll_logout",
       "crunchyroll_status",
     ]);
-    // Playback opens a browser tab; it makes no provider API request.
-    const browserTools = new Set(["crunchyroll_play"]);
+    // Playback opens a browser tab and player control drives it; neither makes
+    // a provider API request.
+    const browserTools = new Set(["crunchyroll_play", "crunchyroll_player_control"]);
     const contentTools = baseline
       .map((t) => t.name)
       .filter((n) => !authTools.has(n) && !browserTools.has(n));

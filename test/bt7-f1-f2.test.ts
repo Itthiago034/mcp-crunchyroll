@@ -421,10 +421,10 @@ describe("F-1/F-2 — the rest of BT7 is untouched", () => {
     );
   });
 
-  test("the public surface is twenty-two tools", () => {
+  test("the public surface is twenty-three tools", () => {
     const index = readFileSync(join(SRC, "index.ts"), "utf-8");
     const names = [...index.matchAll(/name: "(crunchyroll_[a-z_]+)"/g)].map((m) => m[1]);
-    assert.equal(new Set(names).size, 22);
+    assert.equal(new Set(names).size, 23);
     assert.ok(names.includes("crunchyroll_continue_watching"), "the deferred tool stays published");
     assert.ok(names.includes("crunchyroll_get_playheads"));
   });

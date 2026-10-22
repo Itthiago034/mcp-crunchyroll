@@ -1619,11 +1619,11 @@ describe("BT3 closure — preserved scope proofs", () => {
     assert.equal(Object.isFrozen(PRODUCTION_OPERATIONS), true);
   });
 
-  test("the public tool contract is exactly 22 names (21 unchanged + crunchyroll_play)", () => {
+  test("the public tool contract is exactly 23 names (21 unchanged + crunchyroll_play + crunchyroll_player_control)", () => {
     const baseline = JSON.parse(
       readFileSync(join(REPO_ROOT, "test/fixtures/baseline-tools.json"), "utf-8")
     ) as Array<{ name: string; inputSchema: { properties?: Record<string, unknown> } }>;
-    assert.equal(baseline.length, 22);
+    assert.equal(baseline.length, 23);
 
     const forbiddenCallerKeys = [
       "authorization",
