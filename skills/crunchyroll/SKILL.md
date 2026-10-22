@@ -1,7 +1,7 @@
 ---
 name: crunchyroll
-description: "Assistir anime na Crunchyroll do usuário pelo MCP crunchyroll: colocar/abrir/tocar um episódio (\"coloca X ep 12\", \"temporada 2\", dublado ou legendado), continuar de onde parou, próximo episódio, buscar títulos, temporadas e episódios, recomendações, lançamentos da temporada, histórico e lista (watchlist). Use SEMPRE que o pedido envolver anime, Crunchyroll ou assistir algo."
-version: 1.0.0
+description: "Assistir anime na Crunchyroll do usuário pelo MCP crunchyroll: colocar/abrir/tocar um episódio (\"coloca X ep 12\", \"temporada 2\", dublado ou legendado), continuar de onde parou, próximo episódio, dar play, pausar, tela cheia, buscar títulos, temporadas e episódios, recomendações, lançamentos da temporada, histórico e lista (watchlist). Use SEMPRE que o pedido envolver anime, Crunchyroll, o player ou assistir algo."
+version: 2.0.0
 author: Thiago
 license: MIT
 platforms: [linux]
@@ -26,15 +26,20 @@ As ferramentas aparecem com o prefixo `mcp__crunchyroll__`, por exemplo
 1. **Nunca abra a Crunchyroll com outro navegador** (`browser_exec`, `browser_navigate`, curl, web
    fetch). Ele não tem a sessão do usuário e cai na verificação da Cloudflare ("Um momento…",
    "Verify you are human"). Para tocar, use **somente** `crunchyroll_play`.
-2. **Nunca peça e-mail, senha ou código** ao usuário. O login é feito pelo próprio usuário na janela
+2. **O player só é controlado por `crunchyroll_player_control`** (play, pause, tela cheia, sair da
+   tela cheia, status). É **proibido** improvisar: nada de terminal, `ps`/`find` atrás do navegador,
+   scripts JavaScript, WebSocket direto, porta de depuração (`9222`, `DevToolsActivePort`), CDP
+   avulso, `xdotool` ou cliques simulados. Se a ferramenta oficial falhar, **diga ao usuário o que
+   ela respondeu** (veja "Respostas do player") em vez de contornar a camada de segurança.
+3. **Nunca peça e-mail, senha ou código** ao usuário. O login é feito pelo próprio usuário na janela
    do navegador dedicado.
-3. **Não invente IDs.** Todo ID (série, temporada, episódio) sai de uma resposta de ferramenta.
+4. **Não invente IDs.** Todo ID (série, temporada, episódio) sai de uma resposta de ferramenta.
    IDs são letras maiúsculas e números: `G8DHV78ZM`, `GS00377802ENUS`, `GE00377814ENUS`.
-4. **Não repita a mesma chamada com os mesmos argumentos** depois de um erro. Leia o erro e siga a
+5. **Não repita a mesma chamada com os mesmos argumentos** depois de um erro. Leia o erro e siga a
    tabela de erros abaixo.
-5. `crunchyroll_continue_watching` e `crunchyroll_get_subscription` **não funcionam** (sempre
+6. `crunchyroll_continue_watching` e `crunchyroll_get_subscription` **não funcionam** (sempre
    respondem `OPERATION_NOT_MIGRATED`). Não chame. Para "continuar", use o histórico (receita C).
-6. Responda ao usuário em português, curto: o que você abriu (anime, temporada, episódio, título e
+7. Responda ao usuário em português, curto: o que você abriu (anime, temporada, episódio, título e
    idioma). Não despeje JSON.
 
 ## Os tipos de ID (não confunda)
@@ -49,20 +54,30 @@ As ferramentas aparecem com o prefixo `mcp__crunchyroll__`, por exemplo
 
 ## Antes de tudo: sessão
 
-Você **não** precisa checar o login antes de cada pedido. Dentro de uma mesma conversa, as
-ferramentas de conteúdo renovam a sessão sozinhas quando ela expira (o token dura poucos minutos).
-Mas **em toda conversa nova o servidor começa sem sessão**: é normal a primeira consulta responder
-`Not authenticated: log in before requesting content`. Isso não é problema nem motivo para mudar de
-estratégia. Faça assim:
+Você **não** precisa checar o login nem chamar `crunchyroll_login` antes de consultar. As ferramentas
+de conteúdo restabelecem a sessão sozinhas, **uma única vez para todas as chamadas simultâneas**,
+quando isso é só reaproveitar uma sessão que o próprio usuário já autorizou no navegador dedicado
+(inclusive na primeira consulta de uma conversa nova). Por isso:
 
-1. Chame `crunchyroll_login` (sem argumentos) **uma vez**. Se a sessão do navegador ainda vale, ele
-   responde em segundos com `"auth_state": "PROFILE_READY"`. Depois, refaça a chamada que falhou.
-2. Se o login demorar e voltar `LOGIN_REQUIRED`, ou der timeout: a sessão do navegador acabou. Diga ao
-   usuário, sem tentar de novo por conta própria:
-   "A sessão da Crunchyroll expirou. Abra o login manual com `npm run onboard:browser` na pasta
-   `~/mcp-crunchyroll-validacao`, entre na conta, feche a janela pelo X e me peça de novo."
-   (Se aparecer a verificação da Cloudflare dentro da janela aberta pelo MCP, é o mesmo caso: só o
-   login manual resolve.)
+- **Não** faça consultas "de teste" nem repita a primeira consulta por precaução.
+- **Não** dispare histórico e recomendações em paralelo "para ganhar tempo": decida antes qual das
+  duas o pedido precisa (Receita F).
+
+Quando não dá para restabelecer sozinho, a resposta traz `code` e `hint`. Siga o `code`:
+
+| `code` | O que fazer |
+|---|---|
+| `LOGIN_REQUIRED`, `SILENT_REAUTH_FAILED`, `SILENT_REAUTH_COOLDOWN`, `REAUTH_REQUIRED` | Chame `crunchyroll_login` (sem argumentos) **uma vez**; depois refaça **uma vez** a chamada que falhou. |
+| `LOGGED_OUT` | O usuário saiu da conta. Pergunte se ele quer entrar de novo antes de chamar `crunchyroll_login`. |
+| `LOGGING_OUT` | Um logout está em andamento. Não tente de novo sozinho. |
+| `TIMEOUT` / `CANCELLED` | Avise o usuário; tente de novo só se ele pedir. |
+
+Se `crunchyroll_login` demorar e voltar `LOGIN_REQUIRED`, ou der timeout, a sessão do navegador
+acabou. Diga ao usuário, sem tentar de novo por conta própria:
+"A sessão da Crunchyroll expirou. Abra o login manual com `npm run onboard:browser` na pasta
+`~/mcp-crunchyroll-validacao`, entre na conta, feche a janela pelo X e me peça de novo."
+(Se aparecer a verificação da Cloudflare dentro da janela aberta pelo MCP, é o mesmo caso: só o
+login manual resolve.)
 
 `crunchyroll_status` só informa o estado. Ele nunca conserta nada.
 
@@ -106,6 +121,10 @@ Exemplo: "coloca Clevatess temporada 2 episódio 12".
    `{"episode_id": "<id do episódio escolhido>"}`.
    - Sucesso: `{"opened": true, "episode_id", "url"}`. O player abre numa aba do navegador dedicado;
      se já houver um episódio tocando, a mesma aba troca para o novo.
+   - Se o usuário pediu para já começar a tocar e/ou em tela cheia ("coloca e dá play", "em tela
+     cheia"), passe as opções na **mesma** chamada: `{"episode_id": "...", "autoplay": true}` e/ou
+     `"fullscreen": true`. A resposta traz `autoplay`/`fullscreen` com o resultado de cada passo e
+     `partial: true` se algum não foi confirmado. Sem as opções, nada muda.
 5. Responda: "Abri **Clevatess II – ep. 12: The Millennium of a Dark Beast Lord** (dublado em PT-BR)
    no navegador da Crunchyroll."
 
@@ -132,12 +151,56 @@ Exemplo: "coloca Clevatess temporada 2 episódio 12".
    - Pode haver vários itens do mesmo episódio ou da mesma série; o primeiro é o mais recente.
 2. Pegue o primeiro item (ou o primeiro da série que o usuário citou, comparando `parent_id`).
    - `fully_watched: false` → abra **esse mesmo** `id` com `crunchyroll_play`; o player retoma do
-     `playhead`.
+     `playhead`. "Continua o anime" quer o vídeo tocando: use
+     `{"episode_id": "<id>", "autoplay": true}` na mesma chamada (não chame o player depois).
    - `fully_watched: true` → abra o próximo (Receita B, a partir do passo 2).
    - "Continuar" = retomar o mesmo episódio se não terminou. "Próximo" = sempre o seguinte (Receita B),
      mesmo que o atual não tenha terminado.
 3. O sufixo do `id` no histórico mostra o idioma que o usuário costuma assistir (`...PTBR` = dublado
    em português; `...JAJP` = original japonês). Use isso como preferência padrão.
+
+## Receita F — "Coloca um anime para mim" (sem dizer qual)
+
+Uma consulta só, escolhida pelo contexto — **não** chame histórico e recomendações juntos:
+
+1. Se a conversa já mostrou o que o usuário está acompanhando, ou ele disse "de novo", "aquele",
+   "o que eu tava vendo": `crunchyroll_get_history {"n": 5}` e siga a Receita C.
+2. Se ele pediu algo novo ("me surpreende", "algo diferente", um gênero): Receita D, **uma** ferramenta.
+3. Sem pista nenhuma: `crunchyroll_get_history {"n": 5}`. Se o primeiro item não terminou
+   (`fully_watched: false`), ofereça continuar ("Quer continuar **X**, ep. N?"); se a lista vier vazia,
+   aí sim use `crunchyroll_get_recommendations {"n": 5}`.
+4. Só abra (`crunchyroll_play`) depois que o usuário escolher, a não ser que ele tenha mandado
+   "pode escolher" — aí abra o primeiro candidato e diga qual foi.
+
+## Receita G — Controlar o player ("dá play", "pausa", "tela cheia")
+
+O episódio já precisa estar aberto pelo `crunchyroll_play`. Uma chamada por pedido:
+
+| Pedido | Chamada |
+|---|---|
+| "dá play", "continua", "volta a tocar" | `crunchyroll_player_control {"action": "play"}` |
+| "pausa", "para um pouco" | `crunchyroll_player_control {"action": "pause"}` |
+| "tela cheia", "maximiza o vídeo" | `crunchyroll_player_control {"action": "fullscreen"}` |
+| "sai da tela cheia" | `crunchyroll_player_control {"action": "exit_fullscreen"}` |
+| "tá tocando?", "em que minuto está?" | `crunchyroll_player_control {"action": "status"}` |
+| "tela cheia e dá play" | `fullscreen`, depois `play` (duas chamadas, nessa ordem) |
+
+**Só diga que deu certo quando `success: true` e `verified: true`.** O campo `state` mostra o que foi
+observado (`playing`, `paused`, `fullscreen`, `current_time`, `duration`).
+
+### Respostas do player
+
+| `outcome` | O que dizer / fazer |
+|---|---|
+| `CONFIRMED` | Confirme ("Pronto, tocando em tela cheia."). `reason: "ALREADY_IN_STATE"` = já estava assim. |
+| `REFUSED_BY_BROWSER` | O navegador recusou (`reason` diz o motivo, ex.: `AUTOPLAY_BLOCKED_USER_ACTIVATION_REQUIRED`, `FULLSCREEN_NOT_ALLOWED_IN_FRAME`). Diga ao usuário e sugira clicar no player / apertar `F` na janela. **Não** tente outro jeito. |
+| `NOT_CONFIRMED` | O comando foi enviado mas o estado não mudou. Diga isso; repita **uma** vez só se o usuário pedir. |
+| `PLAYER_LOADING` | O vídeo ainda está carregando. Espere alguns segundos e tente **uma** vez. |
+| `PLAYER_UNAVAILABLE` | Não há player controlável na aba (ex.: página de aviso, anúncio, outra página). Diga isso. |
+| `TAB_NOT_FOUND` | Nenhum episódio aberto: abra com `crunchyroll_play` primeiro (ou pergunte qual). |
+| `TAB_CLOSED`, `SESSION_DISCONNECTED` | A aba/navegador fechou. Abra de novo com `crunchyroll_play` se o usuário quiser. |
+| `NOT_PERMITTED` | Durante/depois de um logout o player não é controlado. Diga isso. |
+| `TIMEOUT`, `BUSY` | Avise e não insista em loop. |
 
 ## Idioma e versões (dublado × legendado)
 
@@ -195,9 +258,10 @@ Recomendações podem trazer itens que não são anime (ex.: "The Crunchyroll An
 
 | Resposta | O que fazer |
 |---|---|
-| `Not authenticated: log in before requesting content` | `crunchyroll_login` uma vez, depois refaça a chamada. Se o login falhar, oriente o login manual (seção "Sessão"). |
+| `Not authenticated: log in before requesting content` (com `code`) | Siga a tabela de `code` da seção "Sessão". Sem `code`: `crunchyroll_login` uma vez e refaça a chamada uma vez. |
 | `OPERATION_NOT_MIGRATED` | Ferramenta desativada. Use a alternativa (histórico em vez de continue_watching). Não repita. |
-| `crunchyroll_play takes exactly one argument, episode_id...` | Você passou ID errado (série/temporada, minúsculas, URL). Pegue o `id` de `crunchyroll_get_episodes`. |
+| `crunchyroll_play takes episode_id ...` | Você passou ID errado (série/temporada, minúsculas, URL) ou uma opção que não é booleana. Pegue o `id` de `crunchyroll_get_episodes`. |
+| `crunchyroll_player_control takes exactly one argument, action...` | Use só `{"action": "play" \| "pause" \| "fullscreen" \| "exit_fullscreen" \| "status"}`. |
 | `Upstream has no such resource` | ID não existe. Volte um passo (busca/temporadas) e pegue o ID da resposta. |
 | `Upstream is rate limiting this client` | Espere um pouco antes de tentar; avise o usuário. |
 | `The managed browser is unavailable` / `BROWSER_UNAVAILABLE` | O navegador dedicado fechou ou está ocupado. Chame `crunchyroll_login` uma vez (ele reabre); se continuar, diga ao usuário para fechar janelas do perfil da Crunchyroll e tentar de novo. |
@@ -218,3 +282,11 @@ Pedido: "Coloca Clevatess 2ª temporada ep 12 dublado"
    no navegador da Crunchyroll."
 
 Quatro chamadas, sem login, sem navegador próprio.
+
+Pedido seguinte: "Pode colocar em tela cheia e dar play?"
+
+1. `crunchyroll_player_control {"action":"fullscreen"}` → `{"success": true, "verified": true, "state": {"fullscreen": true, ...}}`.
+2. `crunchyroll_player_control {"action":"play"}` → `{"success": true, "verified": true, "state": {"playing": true, ...}}`.
+3. Resposta: "Pronto: tela cheia e tocando."
+
+Duas chamadas, nenhum terminal, nenhum script.
