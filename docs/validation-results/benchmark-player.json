@@ -1,0 +1,191 @@
+{
+  "generated_at": "2026-10-22T23:46:24.069Z",
+  "node": "v22.22.0",
+  "part_a_real_browser": {
+    "kind": "REAL",
+    "browser": "Google Chrome for Testing 131.0.6778.85",
+    "launch_mode": "headless",
+    "iterations": 15,
+    "browser_start_ms": 213,
+    "open_and_autoplay_ms": 219,
+    "open_and_autoplay_outcome": "CONFIRMED",
+    "native": {
+      "play": {
+        "n": 15,
+        "p50_ms": 4.9,
+        "p95_ms": 11.5,
+        "max_ms": 11.5,
+        "verified_rate": 1
+      },
+      "pause": {
+        "n": 15,
+        "p50_ms": 4.3,
+        "p95_ms": 7.1,
+        "max_ms": 7.1,
+        "verified_rate": 1
+      },
+      "fullscreen": {
+        "n": 15,
+        "p50_ms": 7.4,
+        "p95_ms": 13.9,
+        "max_ms": 13.9,
+        "verified_rate": 1
+      },
+      "exit_fullscreen": {
+        "n": 15,
+        "p50_ms": 13.7,
+        "p95_ms": 20,
+        "max_ms": 20,
+        "verified_rate": 1
+      },
+      "status": {
+        "n": 15,
+        "p50_ms": 3.1,
+        "p95_ms": 4.6,
+        "max_ms": 4.6,
+        "verified_rate": 1
+      }
+    },
+    "native_node_cpu_ms_per_action": 2.38,
+    "browser_rss_mib": {
+      "before_native_round": 1128,
+      "after_native_round": 1156,
+      "after_5s_idle": 1157,
+      "after_second_native_round": 1166
+    },
+    "browser_rss_mib_after_ad_hoc": 1163,
+    "ad_hoc_approximation": {
+      "play": {
+        "n": 15,
+        "p50_ms": 60.2,
+        "p95_ms": 70.8,
+        "max_ms": 70.8,
+        "self_reported_ok_rate": 1
+      },
+      "pause": {
+        "n": 15,
+        "p50_ms": 60.4,
+        "p95_ms": 78.3,
+        "max_ms": 78.3,
+        "self_reported_ok_rate": 1
+      },
+      "fullscreen": {
+        "n": 15,
+        "p50_ms": 65.6,
+        "p95_ms": 82.3,
+        "max_ms": 82.3,
+        "self_reported_ok_rate": 1
+      },
+      "exit_fullscreen": {
+        "n": 15,
+        "p50_ms": 67.6,
+        "p95_ms": 90.8,
+        "max_ms": 90.8,
+        "self_reported_ok_rate": 1
+      }
+    }
+  },
+  "part_b_synthetic_auth": {
+    "kind": "SYNTHETIC",
+    "simulated_login_ms": 120,
+    "simulated_request_ms": 20,
+    "rows": [
+      {
+        "scenario": "cold start, one content call",
+        "implementation": "previous",
+        "concurrency": 1,
+        "mcp_tool_calls": 3,
+        "failed_tool_results": 1,
+        "auth_attempts": 1,
+        "gateway_attempts": 2,
+        "provider_dispatches": 1,
+        "final_failures": 0,
+        "wall_ms": 141
+      },
+      {
+        "scenario": "cold start, two concurrent content calls",
+        "implementation": "previous",
+        "concurrency": 2,
+        "mcp_tool_calls": 5,
+        "failed_tool_results": 2,
+        "auth_attempts": 1,
+        "gateway_attempts": 4,
+        "provider_dispatches": 2,
+        "final_failures": 0,
+        "wall_ms": 141
+      },
+      {
+        "scenario": "expired session, one content call",
+        "implementation": "previous",
+        "concurrency": 1,
+        "mcp_tool_calls": 1,
+        "failed_tool_results": 0,
+        "auth_attempts": 1,
+        "gateway_attempts": 2,
+        "provider_dispatches": 1,
+        "final_failures": 0,
+        "wall_ms": 141
+      },
+      {
+        "scenario": "expired session, ten concurrent content calls",
+        "implementation": "previous",
+        "concurrency": 10,
+        "mcp_tool_calls": 10,
+        "failed_tool_results": 0,
+        "auth_attempts": 1,
+        "gateway_attempts": 20,
+        "provider_dispatches": 10,
+        "final_failures": 0,
+        "wall_ms": 141
+      },
+      {
+        "scenario": "cold start, one content call",
+        "implementation": "new",
+        "concurrency": 1,
+        "mcp_tool_calls": 1,
+        "failed_tool_results": 0,
+        "auth_attempts": 1,
+        "gateway_attempts": 1,
+        "provider_dispatches": 1,
+        "final_failures": 0,
+        "wall_ms": 141
+      },
+      {
+        "scenario": "cold start, two concurrent content calls",
+        "implementation": "new",
+        "concurrency": 2,
+        "mcp_tool_calls": 2,
+        "failed_tool_results": 0,
+        "auth_attempts": 1,
+        "gateway_attempts": 2,
+        "provider_dispatches": 2,
+        "final_failures": 0,
+        "wall_ms": 141
+      },
+      {
+        "scenario": "expired session, one content call",
+        "implementation": "new",
+        "concurrency": 1,
+        "mcp_tool_calls": 1,
+        "failed_tool_results": 0,
+        "auth_attempts": 1,
+        "gateway_attempts": 1,
+        "provider_dispatches": 1,
+        "final_failures": 0,
+        "wall_ms": 140
+      },
+      {
+        "scenario": "expired session, ten concurrent content calls",
+        "implementation": "new",
+        "concurrency": 10,
+        "mcp_tool_calls": 10,
+        "failed_tool_results": 0,
+        "auth_attempts": 1,
+        "gateway_attempts": 10,
+        "provider_dispatches": 10,
+        "final_failures": 0,
+        "wall_ms": 140
+      }
+    ]
+  }
+}
