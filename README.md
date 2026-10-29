@@ -8,6 +8,8 @@
 
 # MCP Crunchyroll
 
+[Leia em português](docs/README-pt-BR.md)
+
 An unofficial [Model Context Protocol](https://modelcontextprotocol.io/) server for Crunchyroll, written in TypeScript. It gives MCP clients a closed tool surface for catalog discovery, account reads, and account mutations through browser-mediated authentication and provider access.
 
 [![CI](https://github.com/Itthiago034/mcp-crunchyroll/actions/workflows/ci.yml/badge.svg)](https://github.com/Itthiago034/mcp-crunchyroll/actions/workflows/ci.yml)
