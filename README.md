@@ -16,6 +16,27 @@ An unofficial [Model Context Protocol](https://modelcontextprotocol.io/) server 
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Unofficial](https://img.shields.io/badge/unofficial-community%20project-f47521)
 
+## What you can ask
+
+After connecting the server and completing interactive sign-in, try asking your MCP client:
+
+- “Search Crunchyroll for Frieren.”
+- “Show the seasons and episodes for this series.”
+- “What anime have I watched recently?”
+- “Show my watchlist and recommend something similar.”
+
+Available results depend on the authenticated account, region, client, and Crunchyroll's services. These examples describe catalog and account operations; the server does not play videos.
+
+## Quick start
+
+1. Install Node.js 18 or newer and a supported Chromium-family browser.
+2. Clone and build the repository using the commands below.
+3. Add the built server to your MCP client using the configuration below.
+4. Invoke `crunchyroll_login({})` and sign in yourself in the managed browser.
+5. Check `crunchyroll_status({})`, then try a prompt above.
+
+Hermes users can also refer to the included `manifest.yaml`. The actual setup depends on your Hermes version.
+
 ## Release status
 
 v0.1.0 exposes 21 public tools. Nineteen are operational: three local authentication/status tools and sixteen production API operations. Two published tools remain deliberately deferred and fail closed.
