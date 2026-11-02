@@ -35,6 +35,7 @@ import { installNodeCrunchyrollGuard } from "./transport/node-egress-guard.js";
 // Player control and session recovery (Crunchyroll MCP 2.0).
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createPlayerController, PLAYER_ACTIONS, type PlayerAction } from "./transport/player-controller.js";
+import { observeOpenedPlayback } from "./transport/playback-workflow.js";
 import {
   callWithSession,
   createSessionRecovery,
@@ -744,30 +745,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
         await session.start();
         await session.openWatchPage(episodeId);
         const opened = { opened: true, episode_id: episodeId, url: `${CRUNCHYROLL_WATCH_URL_PREFIX}${episodeId}` };
-        // Without options the result is exactly the original contract.
-        const steps: Array<["autoplay" | "fullscreen", PlayerAction]> = [];
-        if (input.autoplay === true) steps.push(["autoplay", "play"]);
-        if (input.fullscreen === true) steps.push(["fullscreen", "fullscreen"]);
-        if (steps.length === 0) {
-          return { content: [{ type: "text", text: JSON.stringify(opened, null, 2) }] };
-        }
-        const reports: Record<string, unknown> = {};
-        let allConfirmed = true;
-        for (const [key, action] of steps) {
-          const outcome = await playerController.perform(action, {
-            expectContentId: episodeId,
-            waitForReadyMs: PLAY_READY_WAIT_MS,
-            signal: extra?.signal,
-          });
-          reports[key] = outcome;
-          allConfirmed &&= outcome.success;
-        }
+        const playback = await observeOpenedPlayback(playerController, episodeId, {
+          autoplay: input.autoplay === true,
+          fullscreen: input.fullscreen === true,
+          waitForReadyMs: PLAY_READY_WAIT_MS,
+          signal: extra?.signal,
+        });
         return {
           content: [
             {
               type: "text",
               text: JSON.stringify(
-                { ...opened, success: allConfirmed, partial: !allConfirmed, ...reports },
+                { ...opened, ...playback },
                 null,
                 2
               ),

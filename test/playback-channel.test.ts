@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { runInNewContext } from "node:vm";
 import { afterEach, describe, test } from "node:test";
 import { BrowserLifecycleError } from "../src/transport/browser-lifecycle-error.js";
 import type { BrowserSessionConfig, CdpConnection, PlayerFrameState } from "../src/transport/browser-lifecycle-types.js";
@@ -262,6 +263,44 @@ describe("playback channel — which tab", () => {
 });
 
 describe("playback channel — which frames and what runs there", () => {
+  test("the frozen probe returns only a fixed media error code and a known enabled audio locale", async () => {
+    const video = {
+      currentSrc: "https://private.invalid/?token=secret", paused: false, ended: false,
+      readyState: 4, currentTime: 12, duration: 100, muted: false,
+      getBoundingClientRect: () => ({ width: 640, height: 360 }),
+      error: { code: 3, message: "secret signed URL and account identity" },
+      audioTracks: [{ enabled: false, language: "en-US" }, { enabled: true, language: "ja-JP" }],
+    };
+    const probe = runInNewContext(`(${CRUNCHYROLL_PLAYER_FUNCTION})`, {
+      document: { querySelectorAll: () => [video], fullscreenElement: null, fullscreenEnabled: true },
+      window: {},
+    });
+    const result = await probe("probe", 100);
+    assert.equal(result.state.playerError, "MEDIA_DECODE");
+    assert.equal(result.state.audioLocale, "ja-JP");
+    assert.equal(JSON.stringify(result).includes("secret"), false);
+    video.error.code = 99;
+    video.audioTracks[1].language = "https://private.invalid/token";
+    const malformed = await probe("probe", 100);
+    assert.equal(malformed.state.playerError, "MEDIA_UNKNOWN");
+    assert.equal(malformed.state.audioLocale, null);
+  });
+
+  test("the channel preserves safe playback metadata but rejects page text in error and locale fields", async () => {
+    const model = defaultModel({ frames: new Map([[4, { playerError: "MEDIA_DECODE", audioLocale: "pt-BR" } as Frame]]) });
+    const { manager } = await wire(model);
+    const channel = await manager.openPlaybackControlChannel();
+    const safe = await channel.run("probe", 1_000);
+    assert.equal(safe?.state.playerError, "MEDIA_DECODE");
+    assert.equal(safe?.state.audioLocale, "pt-BR");
+    model.frames.set(4, { playerError: "secret signed URL", audioLocale: "https://private.invalid/secret" } as never);
+    const unsafe = await channel.run("probe", 1_000);
+    assert.equal(unsafe?.state.playerError, "MEDIA_UNKNOWN");
+    assert.equal(unsafe?.state.audioLocale, undefined);
+    assert.equal(JSON.stringify(unsafe).includes("secret"), false);
+    await channel.close();
+  });
+
   test("only default worlds on allowed origins are probed; the player frame is chosen", async () => {
     const { manager, current } = await wire(defaultModel());
     const channel = await manager.openPlaybackControlChannel();

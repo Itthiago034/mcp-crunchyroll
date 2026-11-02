@@ -36,6 +36,12 @@ interface PlayerScript {
   disconnectOn?: PlayerCommand;
   contentIds?: Array<string | undefined>;
   openError?: BrowserLifecycleError;
+  /** Simulate a video whose paused flag is false but its clock never advances. */
+  stalled?: boolean;
+  /** A probe response arrives after the whole action budget. */
+  lateProbe?: boolean;
+  probeDelayMs?: number;
+  duringObservation?: Partial<PlayerFrameState>;
 }
 
 function frame(overrides: Partial<PlayerFrameState> = {}): PlayerFrameState {
@@ -89,6 +95,8 @@ function scriptedHarness(script: PlayerScript = {}, initial: Partial<PlayerFrame
       sent.push(command);
       if (script.noVideo) return undefined;
       if (command === "probe") {
+        if (script.lateProbe && sent.length > 1) time += 10_000;
+        if (script.probeDelayMs && sent.length > 1) time += script.probeDelayMs;
         if (loading > 0) {
           loading -= 1;
           return { state: { ...state, hasSource: false, readyState: 0 } };
@@ -139,6 +147,10 @@ function scriptedHarness(script: PlayerScript = {}, initial: Partial<PlayerFrame
     now: () => time,
     sleep: async (ms) => {
       time += ms;
+      if (!script.stalled && !state.paused && !state.ended) {
+        state = { ...state, currentTime: state.currentTime + ms / 1_000 };
+      }
+      state = { ...state, ...script.duringObservation };
       await Promise.resolve();
     },
     timing: { verifyTimeoutMs: 1_000, pollIntervalMs: 100, actionDeadlineMs: 5_000, commandDeadlineMs: 2_000 },
@@ -165,7 +177,10 @@ function assertHonest(report: PlayerControlReport) {
   if (report.outcome !== "CONFIRMED") assert.equal(report.success, false);
   if (report.verified && report.state) {
     const s = report.state;
-    if (report.action === "play") assert.equal(s.playing, true);
+    if (report.action === "play") {
+      assert.equal(s.playing, true);
+      assert.equal(report.playback.playing_verified, true, "play success requires observed clock progress");
+    }
     if (report.action === "pause") assert.equal(s.paused, true);
     if (report.action === "fullscreen") assert.equal(s.fullscreen, true);
     if (report.action === "exit_fullscreen") assert.equal(s.fullscreen, false);
@@ -173,6 +188,86 @@ function assertHonest(report: PlayerControlReport) {
 }
 
 // ── Basic actions ────────────────────────────────────────────────────────────
+
+describe("player controller — reusable playback evidence", () => {
+  test("a known media error ends the ready wait immediately without issuing play", async () => {
+    const h = scriptedHarness({}, { readyState: 0, playerError: "MEDIA_NETWORK" });
+    const report = await h.controller.perform("play", { waitForReadyMs: 2_000 });
+    assert.equal(report.playback.state, "error");
+    assert.equal(report.playback.playing_verified, false);
+    assert.deepEqual(h.sent, ["probe"]);
+  });
+
+  test("a loading player cannot verify playback from a clock jump during source replacement", async () => {
+    const h = scriptedHarness({ duringObservation: { hasSource: false, readyState: 0 } }, { paused: false });
+    const report = await h.controller.perform("status");
+    assert.equal(report.playback.state, "loading");
+    assert.equal(report.playback.playing_verified, false);
+  });
+
+  test("navigation during observation cannot verify the previous episode's advancing clock", async () => {
+    const h = scriptedHarness({ contentIds: ["GNEW", "GNEW", "GOTHER"] }, { paused: false });
+    const report = await h.controller.perform("status", { expectContentId: "GNEW" });
+    assert.equal(report.outcome, "PLAYER_LOADING");
+    assert.equal(report.reason, "NAVIGATION_PENDING");
+    assert.equal(report.playback.playing_verified, false);
+    assert.equal(report.playback.current_time, null, "no stale clock attributed to the requested episode");
+    assert.equal(report.playback.state, "loading");
+  });
+
+  test("clock progress arriving outside the verification window is not evidence", async () => {
+    const h = scriptedHarness({ probeDelayMs: 1_100 }, { paused: false });
+    const report = await h.controller.perform("status");
+    assert.equal(report.outcome, "TIMEOUT");
+    assert.equal(report.playback.playing_verified, false);
+  });
+
+  test("a late advancing probe cannot verify playing after the action deadline", async () => {
+    const h = scriptedHarness({ lateProbe: true }, { paused: false });
+    const report = await h.controller.perform("status");
+    assert.equal(report.outcome, "TIMEOUT");
+    assert.equal(report.playback.playing_verified, false);
+    assert.equal(h.closed, 1);
+  });
+
+  test("media error takes precedence over loading and never verifies playback or exposes page text", async () => {
+    for (const action of ["status", "play"] as const) {
+      const h = scriptedHarness({}, { paused: false, readyState: 0, playerError: "MEDIA_DECODE", audioLocale: "ja-JP" });
+      const report = await h.controller.perform(action);
+      assert.deepEqual(report.playback, {
+        state: "error", current_time: 12, fullscreen: false, audio_locale: "ja-JP",
+        player_error: "MEDIA_DECODE", playing_verified: false,
+      });
+      assert.deepEqual(h.sent, ["probe"]);
+      if (action === "play") assert.equal(report.success, false);
+    }
+  });
+
+  test("play is not confirmed by paused=false without clock progress, including an already unpaused player", async () => {
+    for (const paused of [true, false]) {
+      const h = scriptedHarness({ stalled: true }, { paused });
+      const report = await h.controller.perform("play");
+      assert.equal(report.outcome, "NOT_CONFIRMED");
+      assert.equal(report.verified, false);
+      assert.equal(report.playback.playing_verified, false);
+      assert.equal(report.playback.state, "unknown");
+      assert.equal(report.executed, paused);
+    }
+  });
+
+  test("status does not claim playing from paused=false with a stopped clock", async () => {
+    const h = scriptedHarness({ stalled: true }, { paused: false });
+    const report = await h.controller.perform("status");
+    assert.deepEqual(report.playback, {
+      state: "unknown", current_time: 12, fullscreen: false,
+      player_error: null, playing_verified: false,
+    });
+    assert.equal(report.state?.playing, true, "legacy flags remain a snapshot, not proof of progress");
+    assert.ok(h.sent.length > 1 && h.sent.length <= 11, "bounded observation window");
+    assert.ok(h.sent.every((command) => command === "probe"), "status stays read-only");
+    assert.equal(h.closed, 1);
+  });
+});
 
 describe("player controller — play, pause, fullscreen", () => {
   test("play is sent once and confirmed by the state it produced", async () => {
@@ -212,7 +307,7 @@ describe("player controller — play, pause, fullscreen", () => {
     assertHonest(report);
     assert.equal(report.executed, false);
     assert.equal(report.reason, "ALREADY_IN_STATE");
-    assert.deepEqual(h.sent, ["probe"]);
+    assert.deepEqual(h.sent, ["probe", "probe"], "an unpaused flag still needs later clock evidence");
   });
 
   test("status only probes and never sends a command", async () => {

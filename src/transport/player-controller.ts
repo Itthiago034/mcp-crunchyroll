@@ -16,6 +16,7 @@ import type {
   PlayerCommand,
   PlayerCommandResult,
   PlayerFrameState,
+  PlayerMediaError,
 } from "./browser-lifecycle-types.js";
 
 /** The closed public action set of `crunchyroll_player_control`. */
@@ -58,6 +59,7 @@ export type PlayerOutcome =
   | "BUSY";
 
 export interface PublicPlayerState {
+  /** Legacy instantaneous flag only; use report.playback for verified progress. */
   readonly playing: boolean;
   readonly paused: boolean;
   readonly ended: boolean;
@@ -70,6 +72,16 @@ export interface PublicPlayerState {
   readonly current_time: number;
   readonly duration: number;
   readonly ready_state: number;
+}
+
+/** Playback evidence, distinct from the legacy instantaneous `state` flags. */
+export interface PlaybackEvidence {
+  readonly state: "playing" | "paused" | "loading" | "error" | "unknown";
+  readonly current_time: number | null;
+  readonly fullscreen: boolean | null;
+  readonly audio_locale?: string;
+  readonly player_error: PlayerMediaError | null;
+  readonly playing_verified: boolean;
 }
 
 export interface PlayerControlReport {
@@ -85,6 +97,8 @@ export interface PlayerControlReport {
   readonly reason?: string;
   /** The last observed player state, or null when none could be observed. */
   readonly state: PublicPlayerState | null;
+  /** Reusable evidence; `verified` alone means the requested action, not playback. */
+  readonly playback: PlaybackEvidence;
   readonly message: string;
 }
 
@@ -181,6 +195,21 @@ export function toPublicState(state: PlayerFrameState): PublicPlayerState {
   });
 }
 
+function playbackEvidence(state: PlayerFrameState | undefined, playingVerified: boolean, outcome: PlayerOutcome): PlaybackEvidence {
+  return Object.freeze({
+    state: !state ? (outcome === "PLAYER_LOADING" ? "loading" : "unknown")
+      : state.playerError ? "error"
+      : isLoading(state) || state.readyState < 3 ? "loading"
+      : state.paused || state.ended ? "paused"
+      : playingVerified ? "playing" : "unknown",
+    current_time: state?.currentTime ?? null,
+    fullscreen: state?.fullscreen ?? null,
+    ...(state?.audioLocale ? { audio_locale: state.audioLocale } : {}),
+    player_error: state?.playerError ?? null,
+    playing_verified: playingVerified,
+  });
+}
+
 /** Thrown internally to unwind an action into one report; never escapes. */
 class Stop extends Error {
   constructor(readonly outcome: PlayerOutcome, readonly reason?: string) {
@@ -197,7 +226,7 @@ export function createPlayerController(ports: PlayerControllerPorts): PlayerCont
   const report = (
     action: PlayerAction,
     outcome: PlayerOutcome,
-    fields: { executed: boolean; verified: boolean; state: PlayerFrameState | undefined; reason?: string },
+    fields: { executed: boolean; verified: boolean; state: PlayerFrameState | undefined; reason?: string; playingVerified?: boolean },
   ): PlayerControlReport => {
     const success = outcome === "CONFIRMED";
     return Object.freeze({
@@ -208,6 +237,7 @@ export function createPlayerController(ports: PlayerControllerPorts): PlayerCont
       outcome,
       ...(fields.reason ? { reason: fields.reason } : {}),
       state: fields.state ? toPublicState(fields.state) : null,
+      playback: playbackEvidence(fields.state, fields.playingVerified === true, outcome),
       message: MESSAGES[outcome],
     });
   };
@@ -244,11 +274,44 @@ export function createPlayerController(ports: PlayerControllerPorts): PlayerCont
       return report(action, "SESSION_DISCONNECTED", { executed, verified: false, state: undefined });
     }
 
-    const command = async (name: PlayerCommand): Promise<PlayerCommandResult | undefined> => {
+    const checkContent = async () => {
+      if (options.expectContentId !== undefined && (await channel.currentContentId()) !== options.expectContentId) {
+        lastState = undefined;
+        throw new Stop("PLAYER_LOADING", "NAVIGATION_PENDING");
+      }
       checkpoint();
-      const result = await channel.run(name, Math.max(1, Math.min(timing.commandDeadlineMs, remaining())));
+    };
+
+    const command = async (name: PlayerCommand, budgetMs = remaining()): Promise<PlayerCommandResult | undefined> => {
+      checkpoint();
+      await checkContent();
+      const result = await channel.run(name, Math.max(1, Math.min(timing.commandDeadlineMs, remaining(), budgetMs)));
+      await checkContent();
       if (result) lastState = result.state;
       return result;
+    };
+
+    /** Read-only evidence shared by status and play; never trust paused=false alone. */
+    const observeProgress = async (initial: PlayerFrameState, status: boolean) => {
+      const verifyUntil = ports.now() + timing.verifyTimeoutMs;
+      let observed = initial;
+      let previousTime = initial.currentTime;
+      for (;;) {
+        if (observed.playerError) break;
+        if (status && (observed.paused || observed.ended || isLoading(observed))) break;
+        if (ports.now() >= verifyUntil) break;
+        await ports.sleep(Math.min(timing.pollIntervalMs, verifyUntil - ports.now()));
+        const after = await command("probe", verifyUntil - ports.now());
+        if (ports.now() > verifyUntil) throw new Stop("TIMEOUT");
+        if (!after) throw new Stop("PLAYER_UNAVAILABLE", "CONTEXT_LOST");
+        observed = after.state;
+        if (!observed.playerError && !isLoading(observed) && observed.readyState >= 3 &&
+            !observed.paused && !observed.ended && observed.currentTime > previousTime) {
+          return { observed, playingVerified: true };
+        }
+        previousTime = observed.currentTime;
+      }
+      return { observed, playingVerified: false };
     };
 
     try {
@@ -264,34 +327,47 @@ export function createPlayerController(ports: PlayerControllerPorts): PlayerCont
         }
       }
 
-      // 2. Find a player. `status` never waits; an action waits only when asked.
+      // 2. Find a player. Status does not wait for readiness (it separately
+      //    samples clock progress); an action waits for readiness only when asked.
       const readyUntil = ports.now() + Math.max(0, options.waitForReadyMs ?? 0);
       let probe: PlayerCommandResult | undefined;
       for (;;) {
         probe = await command("probe");
-        const controllable = probe !== undefined && (action === "status" || !isLoading(probe.state));
+        const controllable = probe !== undefined && (action === "status" || probe.state.playerError !== undefined || !isLoading(probe.state));
         if (controllable || ports.now() >= readyUntil) break;
         await ports.sleep(timing.pollIntervalMs);
       }
       if (!probe) throw new Stop("PLAYER_UNAVAILABLE", "NO_VIDEO");
       if (action === "status") {
-        return report(action, "CONFIRMED", { executed: false, verified: true, state: probe.state });
+        const { observed, playingVerified } = await observeProgress(probe.state, true);
+        return report(action, "CONFIRMED", { executed: false, verified: true, state: observed, playingVerified });
       }
+      if (action === "play" && probe.state.playerError) throw new Stop("NOT_CONFIRMED", "MEDIA_ERROR");
       if (isLoading(probe.state)) throw new Stop("PLAYER_LOADING", "VIDEO_NOT_READY");
 
       // 3. Already there: nothing is sent, and the observation is the evidence.
       const reached = REACHED[action];
-      if (reached(probe.state)) {
+      const alreadyReached = reached(probe.state);
+      if (action !== "play" && alreadyReached) {
         return report(action, "CONFIRMED", { executed: false, verified: true, state: probe.state, reason: "ALREADY_IN_STATE" });
       }
 
       // 4. The action itself.
-      executed = true;
-      const result = await command(COMMAND_FOR[action]);
+      executed = !alreadyReached;
+      const result = alreadyReached ? probe : await command(COMMAND_FOR[action]);
       if (!result) throw new Stop("PLAYER_UNAVAILABLE", "CONTEXT_LOST");
       const refusal = refusalReason(action, result);
       if (refusal) throw new Stop("REFUSED_BY_BROWSER", refusal);
       if (result.error === "NO_VIDEO") throw new Stop("PLAYER_UNAVAILABLE", "NO_VIDEO");
+
+      if (action === "play") {
+        const { observed, playingVerified } = await observeProgress(result.state, false);
+        return report(action, playingVerified ? "CONFIRMED" : "NOT_CONFIRMED", {
+          executed, verified: playingVerified, state: observed, playingVerified,
+          reason: playingVerified ? (alreadyReached ? "ALREADY_IN_STATE" : undefined)
+            : result.error ? `PAGE_${result.error}` : "STATE_NOT_OBSERVED",
+        });
+      }
 
       // 5. Verification: only a later observation of the requested state counts.
       const verifyUntil = ports.now() + timing.verifyTimeoutMs;

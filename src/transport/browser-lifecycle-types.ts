@@ -190,7 +190,17 @@ export const PLAYER_COMMANDS: readonly PlayerCommand[] = Object.freeze([
  * What one frame reports about its player. Primitives only: no source URL (a
  * stream URL carries signed policy), no DOM handle, no text from the page.
  */
+export type PlayerMediaError = "MEDIA_ABORTED" | "MEDIA_NETWORK" | "MEDIA_DECODE" | "MEDIA_SOURCE_NOT_SUPPORTED" | "MEDIA_UNKNOWN";
+
+export const PLAYER_MEDIA_ERRORS: readonly PlayerMediaError[] = Object.freeze([
+  "MEDIA_ABORTED", "MEDIA_NETWORK", "MEDIA_DECODE", "MEDIA_SOURCE_NOT_SUPPORTED", "MEDIA_UNKNOWN",
+]);
+
 export interface PlayerFrameState {
+  /** Closed MediaError code only; never MediaError.message or page text. */
+  readonly playerError?: PlayerMediaError;
+  /** Known enabled audio track language only, validated at the channel boundary. */
+  readonly audioLocale?: string;
   readonly hasVideo: boolean;
   readonly hasSource: boolean;
   readonly paused: boolean;

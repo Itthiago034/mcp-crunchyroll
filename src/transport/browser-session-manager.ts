@@ -25,9 +25,10 @@ import type {
   PlayerCommand,
   PlayerCommandResult,
   PlayerFrameState,
+  PlayerMediaError,
   PlayerPageError,
 } from "./browser-lifecycle-types.js";
-import { MAX_API_RESPONSE_BYTES, PLAYER_COMMANDS } from "./browser-lifecycle-types.js";
+import { MAX_API_RESPONSE_BYTES, PLAYER_COMMANDS, PLAYER_MEDIA_ERRORS } from "./browser-lifecycle-types.js";
 import { BrowserLifecycleError } from "./browser-lifecycle-error.js";
 import { createCdpConnector } from "./cdp-client.js";
 import { desktopSessionEnvironment } from "./desktop-session.js";
@@ -241,7 +242,26 @@ export const CRUNCHYROLL_PLAYER_FUNCTION = `
       return best;
     };
     const finite = (value) => (typeof value === "number" && isFinite(value) ? value : 0);
+    const mediaError = (video) => {
+      if (!video || !video.error) return null;
+      switch (video.error.code) {
+        case 1: return "MEDIA_ABORTED";
+        case 2: return "MEDIA_NETWORK";
+        case 3: return "MEDIA_DECODE";
+        case 4: return "MEDIA_SOURCE_NOT_SUPPORTED";
+        default: return "MEDIA_UNKNOWN";
+      }
+    };
+    const audioLocale = (video) => {
+      const track = video && video.audioTracks
+        ? Array.from(video.audioTracks).find((track) => track.enabled === true) : null;
+      const language = track && track.language;
+      return typeof language === "string" && /^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8}){0,2}$/.test(language)
+        ? language : null;
+    };
     const snapshot = (video) => ({
+      playerError: mediaError(video),
+      audioLocale: audioLocale(video),
       hasVideo: video !== null,
       hasSource: video !== null && Boolean(video.currentSrc || video.srcObject),
       paused: video === null ? true : video.paused,
@@ -331,6 +351,12 @@ function parsePlayerResult(raw: unknown): PlayerCommandResult | undefined {
   if (!booleans.every((key) => typeof state[key] === "boolean")) return undefined;
   if (!numbers.every((key) => typeof state[key] === "number" && Number.isFinite(state[key]))) return undefined;
   const parsed: PlayerFrameState = Object.freeze({
+    ...(state.playerError == null ? {} : {
+      playerError: PLAYER_MEDIA_ERRORS.includes(state.playerError as PlayerMediaError)
+        ? state.playerError as PlayerMediaError : "MEDIA_UNKNOWN",
+    }),
+    ...(typeof state.audioLocale === "string" && /^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8}){0,2}$/.test(state.audioLocale)
+      ? { audioLocale: state.audioLocale } : {}),
     hasVideo: state.hasVideo as boolean,
     hasSource: state.hasSource as boolean,
     paused: state.paused as boolean,
