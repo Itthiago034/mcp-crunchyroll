@@ -1,77 +1,144 @@
 <p align="center">
-  <img
-    src="docs/assets/mcp-crunchyroll-banner.png"
-    alt="MCP Crunchyroll"
-    width="100%"
-  >
+  <img src="docs/assets/mcp-crunchyroll-banner.png" alt="MCP Crunchyroll" width="100%">
 </p>
 
-# MCP Crunchyroll
+<h1 align="center">🍥 MCP Crunchyroll</h1>
 
-[Leia em português](docs/README-pt-BR.md)
+<p align="center">
+  <strong>Let your AI agent find anime, manage your watchlist and press play,<br/>without ever handing it your password.</strong>
+</p>
 
-An unofficial [Model Context Protocol](https://modelcontextprotocol.io/) server for Crunchyroll, written in TypeScript. It gives MCP clients a closed tool surface for catalog discovery, account reads, and account mutations through browser-mediated authentication and provider access.
+<p align="center">
+  <a href="https://github.com/Itthiago034/mcp-crunchyroll/actions/workflows/ci.yml"><img src="https://github.com/Itthiago034/mcp-crunchyroll/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <img src="https://img.shields.io/badge/Node.js-18%20%7C%2020%20%7C%2022-339933?logo=nodedotjs&logoColor=white" alt="Node.js" />
+  <img src="https://img.shields.io/badge/TypeScript-5.3-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
+  <img src="https://img.shields.io/badge/MCP-server-8b5cf6" alt="MCP server" />
+  <img src="https://img.shields.io/badge/license-MIT-blue" alt="License" />
+  <img src="https://img.shields.io/badge/unofficial-community%20project-f47521" alt="Unofficial" />
+</p>
 
-[![CI](https://github.com/Itthiago034/mcp-crunchyroll/actions/workflows/ci.yml/badge.svg)](https://github.com/Itthiago034/mcp-crunchyroll/actions/workflows/ci.yml)
-![Node.js](https://img.shields.io/badge/Node.js-18%20%7C%2020%20%7C%2022-339933)
-![TypeScript](https://img.shields.io/badge/TypeScript-5.3-3178C6)
-![License](https://img.shields.io/badge/license-MIT-blue)
-![Unofficial](https://img.shields.io/badge/unofficial-community%20project-f47521)
+<p align="center">
+  <a href="#-quick-start">Quick start</a> •
+  <a href="#-stays-signed-in">Stays signed in</a> •
+  <a href="#tool-surface">Tools</a> •
+  <a href="#security-boundaries">Security</a> •
+  <a href="docs/README-pt-BR.md">Leia em português</a>
+</p>
 
-## What you can ask
+---
 
-After connecting the server and completing interactive sign-in, try asking your MCP client:
+An unofficial [Model Context Protocol](https://modelcontextprotocol.io/) server for Crunchyroll, written in TypeScript. Your MCP client (Claude, Hermes, or any other) gets a closed set of tools for the catalog, your account and the player. You sign in yourself in a dedicated browser window, and the server keeps that session warm.
 
-- “Search Crunchyroll for Frieren.”
-- “Show the seasons and episodes for this series.”
-- “What anime have I watched recently?”
+<p align="center">
+  <img src="docs/assets/demo.svg" alt="Animated demo: an agent asks for this season's most popular simulcast, MCP Crunchyroll calls get_simulcast_seasons, browse and add_to_watchlist, and the title lands on the watchlist" width="100%" />
+</p>
+
+## ✨ Highlights
+
+<table>
+  <tr>
+    <td width="25%" valign="top">
+
+### 🔎 Discover
+Search, browse by genre or simulcast season, drill into series, seasons and episodes (with every audio version), and get **recommendations**.
+
+</td>
+    <td width="25%" valign="top">
+
+### 📚 Your account
+Read your **watchlist**, **history** and **progress**. Add or remove titles, set **favorites** and update progress from chat.
+
+</td>
+    <td width="25%" valign="top">
+
+### ▶️ Watch
+Open an episode, **play, pause and go fullscreen**. The server confirms the video is really playing, not just that the page opened.
+
+</td>
+    <td width="25%" valign="top">
+
+### 🔒 Safe by design
+Sign-in happens only in the **managed browser**. No passwords, cookies or tokens in tool arguments, and uncertain writes **fail closed**.
+
+</td>
+  </tr>
+</table>
+
+## 💬 What you can ask
+
+- “Search Crunchyroll for Frieren and play episode 1 dubbed in Portuguese, fullscreen.”
+- “What did I watch recently? Continue where I stopped.”
 - “Show my watchlist and recommend something similar.”
+- “Favorite this series.”
 
-Available results depend on the authenticated account, region, client, and Crunchyroll's services. These examples describe catalog and account operations; the server does not play videos.
+Results depend on your account, region and Crunchyroll's own services.
 
-## Quick start
+## 🚀 Quick start
 
-1. Install Node.js 18 or newer and a supported Chromium-family browser.
-2. Clone and build the repository using the commands below.
-3. Add the built server to your MCP client using the configuration below.
-4. Invoke `crunchyroll_login({})` and sign in yourself in the managed browser.
-5. Check `crunchyroll_status({})`, then try a prompt above.
+1. Install Node.js 18 or newer and a Chromium-family browser (Chrome, Chromium, Brave or Edge).
+2. Build the server:
 
-Hermes users can also refer to the included `manifest.yaml`. The actual setup depends on your Hermes version.
+   ```bash
+   git clone https://github.com/Itthiago034/mcp-crunchyroll.git
+   cd mcp-crunchyroll
+   npm ci && npm run build
+   ```
+
+3. Add it to your MCP client:
+
+   ```json
+   {
+     "mcpServers": {
+       "crunchyroll": {
+         "command": "node",
+         "args": ["/absolute/path/to/mcp-crunchyroll/dist/index.js"]
+       }
+     }
+   }
+   ```
+
+4. Ask your agent to log in. It calls `crunchyroll_login`, a browser window opens on Crunchyroll's own page, and you sign in there **once**.
+5. That's it. Ask for anything in the list above.
+
+## 🔥 Stays signed in
+
+<p align="center">
+  <img src="docs/assets/session-keep-warm.svg" alt="Sign in once in the managed browser. The short-lived token is renewed in the background every time it expires, so tool calls never wait for a sign-in." width="100%" />
+</p>
+
+Crunchyroll's web token lasts only a few minutes and comes with no refresh token. Instead of making a tool call wait for a renewal (or ask you to log in again), a **session keeper** renews it in the background the moment it expires, in a hidden tab, never in the tab you are watching.
+
+- **You sign in once.** The dedicated browser profile keeps Crunchyroll's own long-lived sign-in, so a restarted server re-establishes the session by itself.
+- **Calls stay fast.** While tools are in use, the token is always fresh. After an hour without use the keeper rests, and the next call wakes it.
+- **The agent always knows what to do.** `crunchyroll_status` returns one closed `next_action`: `NONE`, `CALL_CRUNCHYROLL_LOGIN`, `WAIT_FOR_LOGOUT` or `RETRY_LATER`, plus `session.keep_warm`, `expires_in_s` and `next_renewal_in_s`.
+- **It never signs in for you.** If Crunchyroll ends the session (logout, password change, revocation), the keeper stops and asks for `crunchyroll_login`. It does not retry in a loop.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `CRUNCHYROLL_KEEP_WARM_MINUTES` | `60` | How long the keeper stays active after the last tool call. `0` turns it off |
+| `CRUNCHYROLL_WARM_START` | off | `1` re-establishes a saved session as soon as the server starts, so even the first call is fast. It opens the browser at startup |
 
 ## Release status
 
-This branch exposes 23 public tools. Twenty-one are operational: three local authentication/status tools, sixteen production API operations and two playback tools. Two published tools remain deliberately deferred and fail closed.
+This branch exposes 24 public tools. Twenty-two are operational: three authentication/status tools, seventeen production API operations and two playback tools. Two published tools remain deliberately deferred and fail closed.
 
 | Surface | Count | Status |
 |---|---:|---|
-| Public MCP tools | 23 | Published |
+| Public MCP tools | 24 | Published |
 | Authentication and status tools | 3 | Operational |
-| Production API operations | 16 | Operational |
+| Production API operations | 17 | Operational |
 | Playback and player control | 2 | Operational |
 | Deferred tools | 2 | `OPERATION_NOT_MIGRATED` |
 
-The production operations cover catalog reads, account reads, adding and removing watchlist items, and updating playheads. CI validates the project on Node.js 18, 20, and 22 with sandboxed Chrome for Testing.
+CI validates the project on Node.js 18, 20, and 22 with sandboxed Chrome for Testing.
 
 ## How it works
 
-```text
-MCP client
-    |
-    | stdio tool call
-    v
-MCP Crunchyroll
-    |
-    | closed operation descriptor + auth-derived account identity
-    v
-Managed browser / CDP
-    |
-    | provider request in the authenticated browser context
-    v
-Crunchyroll web services
-```
+<p align="center">
+  <img src="docs/assets/architecture.svg" alt="MCP client → stdio tool call → MCP Crunchyroll → closed operation descriptor with auth-derived identity → managed browser over CDP → provider request in the authenticated browser context → Crunchyroll web services" width="100%" />
+</p>
 
-Interactive credentials are entered only in the managed browser. Usernames, passwords, cookies, and bearer tokens are not tool arguments. Migrated provider operations use the browser-mediated transport; callers cannot choose an account ID or override the HTTP method, path, headers, query, or raw request body.
+Interactive credentials are entered only in the managed browser. Usernames, passwords, cookies, and bearer tokens are not tool arguments. Provider operations run inside the authenticated browser page; callers cannot choose an account ID or override the HTTP method, path, headers, query, or raw request body.
 
 This project is not affiliated with or endorsed by Crunchyroll, LLC.
 
@@ -143,6 +210,12 @@ crunchyroll_login({})
 
 The login tool takes no arguments. It opens Crunchyroll in a dedicated managed browser, where the user completes sign-in and any human verification directly. The MCP server grants readiness only after observing and validating authentication material from that browser flow.
 
+Making sign-in painless:
+
+- **It is a one-time step.** The dedicated profile remembers the sign-in, so you are asked again only if Crunchyroll ends the session.
+- **Use whatever Crunchyroll's own page offers.** If your account uses Google or Apple sign-in, those buttons work in the managed window like in any browser.
+- **Let the agent decide when.** Agents should call `crunchyroll_status` and follow `next_action` instead of calling `crunchyroll_login` on every error; a content call already renews a saved session by itself.
+
 Useful local tools:
 
 | Tool | Purpose | Status |
@@ -166,7 +239,9 @@ guarantee that the provider will accept the session. See the
 
 ### Session expiry
 
-The bearer observed from the browser carries no refresh token and expires within minutes. `crunchyroll_status` reports an expired bearer as not authenticated, and `crunchyroll_login` then re-establishes it by reloading the signed-in managed page, which makes Crunchyroll mint a fresh bearer under observation. A content call that finds the session expired does this once on its own (waiting up to 45 s) and retries; the failure happens before anything is dispatched, so nothing is sent twice. A fresh server process still starts unauthenticated: call `crunchyroll_login` once, which takes seconds while the browser profile is signed in. Season and episode lists are compacted to the fields needed to choose and play (ids, numbers, titles, locales, availability and `versions` as `{audio_locale, guid, original}`); `crunchyroll_get_series` and `crunchyroll_get_episode` return the full record without image sets. `crunchyroll_get_episodes` accepts an optional `episode_number` to return a single episode, `crunchyroll_get_history` keeps resume data instead of the full panel, and `crunchyroll_get_watchlist` honours `n` and adds each item's `title` and `type` with one extra batched read. Login waits at most 240 s, below the 300 s tool timeout of clients such as Hermes.
+The bearer observed from the browser carries no refresh token and expires within minutes. The session keeper (see [Stays signed in](#-stays-signed-in)) renews it right after it expires by reloading the hidden, signed-in managed tab, which makes Crunchyroll mint a fresh bearer under observation. A content call that still finds the session expired joins the same renewal instead of starting another one (waiting up to 40 s); the failure happens before anything is dispatched, so nothing is sent twice. A new server process re-establishes a session the user already authorized on its first content call, or at startup with `CRUNCHYROLL_WARM_START=1`. Login waits at most 240 s, below the 300 s tool timeout of clients such as Hermes.
+
+Season and episode lists are compacted to the fields needed to choose and play (ids, numbers, titles, locales, availability and `versions` as `{audio_locale, guid, original}`); `crunchyroll_get_series` and `crunchyroll_get_episode` return the full record without image sets. `crunchyroll_get_episodes` accepts an optional `episode_number` to return a single episode, `crunchyroll_get_history` keeps resume data instead of the full panel, and `crunchyroll_get_watchlist` honours `n` and adds each item's `title` and `type` with one extra batched read.
 
 ## Tool surface
 
@@ -271,7 +346,8 @@ requires interactive sign-in in a visible managed browser.
 - Crunchyroll's internal web interfaces are not a stable public API and may change.
 - The project opens and controls the official web player only; it does not download media or bypass DRM, autoplay or fullscreen policies.
 - Fullscreen and autoplay can still be refused by the browser or by the player frame (see `REFUSED_BY_BROWSER` in the skill).
-- Authentication can require user interaction in the managed browser.
+- The first sign-in, and any sign-in after Crunchyroll ends the session, needs the user in the managed browser.
+- `crunchyroll_set_favorite` follows the web client's request shape but has not yet been confirmed against the live API.
 
 ## Credits and license
 

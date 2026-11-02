@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="300" viewBox="0 0 900 300" role="img" aria-label="Sign in once in the managed browser. The short-lived token is renewed in the background every time it expires, so tool calls never wait for a sign-in. After an hour without use the keeper rests, and the next call wakes it.">
+  <title>MCP Crunchyroll: sign in once, stay signed in</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d1117"/>
+      <stop offset="1" stop-color="#161b22"/>
+    </linearGradient>
+    <linearGradient id="bar" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#f47521"/>
+      <stop offset="1" stop-color="#ff9a3c"/>
+    </linearGradient>
+  </defs>
+  <style>
+    text { font-family: 'Inter','Segoe UI',Helvetica,Arial,sans-serif; }
+    .h { fill: #e6edf3; font-size: 20px; font-weight: 700; }
+    .s { fill: #8b949e; font-size: 13px; }
+    .lbl { fill: #e6edf3; font-size: 13px; font-weight: 600; }
+    .mono { font-family: 'Fira Code','JetBrains Mono',Consolas,monospace; font-size: 12px; fill: #ffb27a; }
+    .pulse { transform-box: fill-box; transform-origin: center; animation: pulse 2.4s ease-in-out infinite; }
+    @keyframes pulse { 0%,100% { opacity: .35; transform: scale(.85); } 50% { opacity: 1; transform: scale(1.15); } }
+    .spin { transform-box: fill-box; transform-origin: center; animation: spin 2.4s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .call { opacity: 0; animation: call 7.2s ease-out infinite; }
+    .c2 { animation-delay: 2.4s; }
+    .c3 { animation-delay: 4.8s; }
+    @keyframes call { 0% { opacity: 0; transform: translateY(6px); } 6%, 26% { opacity: 1; transform: none; } 33%, 100% { opacity: 0; } }
+  </style>
+
+  <rect width="900" height="300" rx="18" fill="url(#bg)"/>
+  <text x="40" y="52" class="h">Sign in once. Stay signed in.</text>
+  <text x="40" y="76" class="s">The browser token lasts minutes. The session keeper renews it in the background, so tool calls never wait for a login.</text>
+
+  <!-- step 1: login -->
+  <g transform="translate(40,118)">
+    <rect width="172" height="70" rx="12" fill="#21262d" stroke="#30363d"/>
+    <text x="16" y="30" class="lbl">1 · crunchyroll_login</text>
+    <text x="16" y="52" class="s">you sign in, once</text>
+  </g>
+
+  <!-- timeline -->
+  <g transform="translate(240,150)">
+    <rect width="600" height="10" rx="5" fill="#30363d"/>
+    <rect width="0" height="10" rx="5" fill="url(#bar)"><animate attributeName="width" from="0" to="600" dur="7.2s" repeatCount="indefinite"/></rect>
+    <!-- renewals -->
+    <g transform="translate(200,5)">
+      <circle r="13" fill="#161b22" stroke="#f47521" stroke-width="2"/>
+      <path class="spin" d="M-6,-1 A6,6 0 1,1 -1,6" fill="none" stroke="#ff9a3c" stroke-width="2.2" stroke-linecap="round"/>
+    </g>
+    <g transform="translate(400,5)">
+      <circle r="13" fill="#161b22" stroke="#f47521" stroke-width="2"/>
+      <path class="spin" d="M-6,-1 A6,6 0 1,1 -1,6" fill="none" stroke="#ff9a3c" stroke-width="2.2" stroke-linecap="round"/>
+    </g>
+    <g transform="translate(600,5)">
+      <circle class="pulse" r="9" fill="#3fb950"/>
+    </g>
+    <text x="200" y="-22" text-anchor="middle" class="s">renewed</text>
+    <text x="400" y="-22" text-anchor="middle" class="s">renewed</text>
+    <text x="600" y="-22" text-anchor="middle" class="s">always ready</text>
+
+    <!-- tool calls flowing -->
+    <g transform="translate(70,26)"><g class="call">
+      <rect width="180" height="30" rx="8" fill="#21262d" stroke="#30363d"/>
+      <text x="12" y="20" class="mono">search("Frieren") ✓</text>
+    </g></g>
+    <g transform="translate(270,26)"><g class="call c2">
+      <rect width="180" height="30" rx="8" fill="#21262d" stroke="#30363d"/>
+      <text x="12" y="20" class="mono">get_watchlist() ✓</text>
+    </g></g>
+    <g transform="translate(420,26)"><g class="call c3">
+      <rect width="180" height="30" rx="8" fill="#21262d" stroke="#30363d"/>
+      <text x="12" y="20" class="mono">play(autoplay) ▶ ✓</text>
+    </g></g>
+  </g>
+
+  <!-- status card -->
+  <g transform="translate(40,246)">
+    <text x="0" y="0" class="mono">crunchyroll_status → { "next_action": "NONE", "session": { "keep_warm": "ACTIVE", "expires_in_s": 212 } }</text>
+    <text x="0" y="24" class="s">Idle for an hour? The keeper rests and the next call wakes it. Logged out or revoked? next_action tells the agent to call crunchyroll_login.</text>
+  </g>
+</svg>
