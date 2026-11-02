@@ -5,7 +5,9 @@
 
 # MCP Crunchyroll
 
-**An unofficial anime connector for your AI agent.** Discover titles, organize your account and open Crunchyroll's official player through a closed MCP tool surface.
+**An unofficial anime connector for your AI agent.** Discover titles, organize your account and open Crunchyroll's official player through a closed [Model Context Protocol](https://modelcontextprotocol.io/) tool surface.
+
+[Leia em português](docs/README-pt-BR.md)
 
 [![CI](https://github.com/Itthiago034/mcp-crunchyroll/actions/workflows/ci.yml/badge.svg)](https://github.com/Itthiago034/mcp-crunchyroll/actions/workflows/ci.yml)
 ![Node.js](https://img.shields.io/badge/Node.js-18%20%7C%2020%20%7C%2022-333333?logo=nodedotjs)
@@ -14,6 +16,17 @@
 ![Unofficial](https://img.shields.io/badge/unofficial-community%20project-f47521)
 
 [Quick start](#quick-start) · [Tools](#tool-surface) · [Architecture](#how-it-works) · [Security](#security-boundaries) · [Validation](#development-and-tests)
+
+## What you can ask
+
+After connecting the server and completing interactive sign-in, try asking your MCP client:
+
+- “Search Crunchyroll for Frieren.”
+- “Show the seasons and episodes for this series.”
+- “What anime have I watched recently?”
+- “Show my watchlist and recommend something similar.”
+
+Available results depend on the authenticated account, region, client, and Crunchyroll's services.
 
 ## Release status
 
@@ -83,6 +96,12 @@ This project is not affiliated with or endorsed by Crunchyroll, LLC.
 <a id="install-and-build"></a>
 
 ## Quick start
+
+1. Install Node.js 18 or newer and a supported Chromium-family browser.
+2. Clone and build the repository with the commands below.
+3. Point your MCP client at the built bundle (configuration further down).
+4. Call `crunchyroll_login({})` and sign in yourself in the managed browser.
+5. Check `crunchyroll_status({})`, then try one of the prompts above.
 
 ```bash
 git clone https://github.com/Itthiago034/mcp-crunchyroll.git
