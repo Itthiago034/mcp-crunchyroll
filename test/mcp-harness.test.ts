@@ -96,6 +96,10 @@ describe("MCP server harness", () => {
           const content = (result.result as { content: { text: string }[] }).content[0].text;
           assert.match(content, /logged_in/);
           assert.match(content, /false/);
+          // Compact text plus the same object as structuredContent.
+          assert.equal(content.includes("\n"), false, "text is compact JSON");
+          const structured = (result.result as { structuredContent?: unknown }).structuredContent;
+          assert.deepEqual(structured, JSON.parse(content), "structuredContent mirrors the text");
         });
       });
 

@@ -14,7 +14,7 @@ import { setLegacyAuthTransitionSink } from "./api.js";
 import { createAuthContextAuthority } from "./transport/auth-context.js";
 import { createAuthProducer, createDefaultAuthProducerPorts } from "./transport/auth-producer.js";
 import { createAuthOrchestrator } from "./transport/auth-orchestrator.js";
-import { TransportError } from "./transport/transport-error.js";
+import { TransportError, type TransportErrorKind } from "./transport/transport-error.js";
 import { createBrowserAuthObserver, CRUNCHYROLL_LOGIN_URL } from "./transport/browser-auth.js";
 import {
   createBrowserSessionManager,
@@ -317,6 +317,86 @@ const playerController = createPlayerController({
 
 /** How long crunchyroll_play waits for a freshly opened player before acting. */
 const PLAY_READY_WAIT_MS = 20_000;
+
+// ── Result shaping ────────────────────────────────────────────────────────────
+
+/**
+ * One result shape for every tool. The text is COMPACT JSON (no indentation:
+ * fewer tokens for the model to read on every call) and the same value travels
+ * as `structuredContent`, so a client can use the object without parsing a
+ * JSON string out of the text.
+ */
+function jsonResult(value: unknown, isError = false) {
+  const structured =
+    value !== null && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : { result: value };
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(value) }],
+    structuredContent: structured,
+    ...(isError ? { isError: true } : {}),
+  };
+}
+
+const LOGIN_HINT =
+  "Call crunchyroll_login once (no arguments; it takes seconds while the browser is signed in), then retry this call. Do not ask the user for credentials.";
+
+/** Structural details that are safe and useful to show. Everything else is dropped. */
+const PUBLIC_ERROR_DETAILS: ReadonlySet<string> = new Set([
+  "empty-response",
+  "html-response",
+  "json-response",
+  "other-response",
+  "watchlist-item-absent",
+  "over-cap",
+  "deadline",
+]);
+
+const TRANSPORT_ERROR_GUIDANCE: Partial<Record<TransportErrorKind, { retryable: boolean; hint: string }>> = {
+  AUTH_NOT_READY: { retryable: true, hint: LOGIN_HINT },
+  AUTH_GENERATION_CHANGED: {
+    retryable: true,
+    hint: "The session changed while this call was running. Retry the same call once.",
+  },
+  API_UNAUTHORIZED: { retryable: true, hint: LOGIN_HINT },
+  API_FORBIDDEN: {
+    retryable: false,
+    hint: "Crunchyroll refused THIS operation (detail html-response usually means a temporary edge or bot challenge; json-response means the profile, region or subscription does not allow it). If other tools still work, the session is fine: do not log in again or loop. Try once more later, or continue without this data.",
+  },
+  API_NOT_FOUND: {
+    retryable: false,
+    hint: "No such item. Check the id: series, season, episode and movie ids are different; get them from crunchyroll_search, crunchyroll_get_seasons or crunchyroll_get_episodes.",
+  },
+  API_RATE_LIMITED: {
+    retryable: true,
+    hint: "Crunchyroll is rate limiting. Wait a few seconds before the next call and avoid parallel calls.",
+  },
+  API_SERVER_ERROR: { retryable: true, hint: "Crunchyroll had a server error. Retry once after a short wait." },
+  API_BAD_REQUEST: { retryable: false, hint: "Crunchyroll rejected the arguments. Check ids and values; do not retry unchanged." },
+  API_CONFLICT: {
+    retryable: false,
+    hint: "The account is already in the requested state, or conflicts with it. Read it back before retrying.",
+  },
+  MUTATION_OUTCOME_UNKNOWN: {
+    retryable: false,
+    hint: "The change may or may not have been applied. Read the state back (see the tool's verify_with) before retrying, so the change is not applied twice.",
+  },
+  BROWSER_UNAVAILABLE: {
+    retryable: true,
+    hint: "The managed browser is not ready. Call crunchyroll_status, then retry once.",
+  },
+  TRANSPORT_FAILURE: { retryable: true, hint: "The request failed before an answer arrived. Retry once." },
+  INVALID_RESPONSE: { retryable: true, hint: "Crunchyroll answered with something unexpected. Retry once; if it repeats, skip this data." },
+  SCHEMA_MISMATCH: {
+    retryable: false,
+    hint: "Crunchyroll answered with a shape this server does not understand. Retrying will not help; report it.",
+  },
+  INVALID_ARGUMENTS: { retryable: false, hint: "Fix the arguments as described by the tool's input schema." },
+  OPERATION_NOT_MIGRATED: {
+    retryable: false,
+    hint: "This tool is not available in this version. Use another tool for the same data.",
+  },
+};
 
 // ── Tool Definitions ──────────────────────────────────────────────────────────
 
@@ -684,9 +764,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
         // it has no legacy branch.
         if (contentGateway.isContentTool(name)) {
           const payload = await callContentTool(name, args as Record<string, unknown>, extra?.signal);
-          return {
-            content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
-          };
+          return jsonResult(payload);
         }
 
         switch (name) {
@@ -703,14 +781,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
             );
           }
           const outcome = await authOrchestrator.login();
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify({ accepted: outcome.accepted, ...outcome.readiness }, null, 2),
-              },
-            ],
-          };
+          return jsonResult({ accepted: outcome.accepted, ...outcome.readiness });
       }
 
       case "crunchyroll_logout": {
@@ -720,9 +791,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
         // output contract is unchanged (the four-axis result is BT8's).
         const logoutResult = (await authOrchestrator.logout()).persistence as LogoutResult;
         const presentation = formatLogoutResult(logoutResult);
-        return {
-          content: [{ type: "text", text: JSON.stringify(presentation) }],
-        };
+        return jsonResult(presentation);
       }
 
       case "crunchyroll_play": {
@@ -749,7 +818,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
         if (input.autoplay === true) steps.push(["autoplay", "play"]);
         if (input.fullscreen === true) steps.push(["fullscreen", "fullscreen"]);
         if (steps.length === 0) {
-          return { content: [{ type: "text", text: JSON.stringify(opened, null, 2) }] };
+          return jsonResult(opened);
         }
         const reports: Record<string, unknown> = {};
         let allConfirmed = true;
@@ -762,18 +831,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
           reports[key] = outcome;
           allConfirmed &&= outcome.success;
         }
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(
-                { ...opened, success: allConfirmed, partial: !allConfirmed, ...reports },
-                null,
-                2
-              ),
-            },
-          ],
-        };
+        return jsonResult({ ...opened, success: allConfirmed, partial: !allConfirmed, ...reports });
       }
 
       case "crunchyroll_player_control": {
@@ -792,10 +850,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
           );
         }
         const outcome = await playerController.perform(action as PlayerAction, { signal: extra?.signal });
-        return {
-          content: [{ type: "text", text: JSON.stringify(outcome, null, 2) }],
-          ...(outcome.success ? {} : { isError: true }),
-        };
+        return jsonResult(outcome, !outcome.success);
       }
 
       case "crunchyroll_status": {
@@ -803,9 +858,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
         // commits, invalidates, mutates storage, navigates or reopens a
         // browser. It reports current known readiness and nothing else.
         const status = authOrchestrator.readiness();
-        return {
-          content: [{ type: "text", text: JSON.stringify(status, null, 2) }],
-        };
+        return jsonResult(status);
       }
 
         // ── Content ─────────────────────────────────────────────────────────
@@ -837,44 +890,42 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       if (err instanceof SessionRequiredError) {
         // Structured, fixed and secret-free: the code says WHY, the hint says
         // what to do, and neither is a reason to loop.
-        return sanitizeToolResult({
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(
-                { error: err.message, code: err.code, session_state: err.sessionState, hint: SESSION_HINTS[err.code] },
-                null,
-                2
-              ),
-            },
-          ],
-          isError: true,
-        });
+        return sanitizeToolResult(
+          jsonResult(
+            { error: err.message, code: err.code, session_state: err.sessionState, hint: SESSION_HINTS[err.code] },
+            true
+          )
+        );
       }
       const safe = safeErrorWithCleanStack(err);
       const message = safe.message;
-      const isAuthError =
-        message.includes("Not logged in") || message.includes("401") || message.includes("Not authenticated");
-      const errResult = {
-        content: [
+      let errResult;
+      if (err instanceof TransportError) {
+        // Closed vocabulary only: the kind, a whitelisted structural detail and
+        // fixed guidance. No URL, header, body or identity can reach this.
+        const guidance = TRANSPORT_ERROR_GUIDANCE[err.kind];
+        const detail = err.detail !== undefined && PUBLIC_ERROR_DETAILS.has(err.detail) ? err.detail : undefined;
+        errResult = jsonResult(
           {
-            type: "text",
-            text: JSON.stringify(
-              {
-                error: message,
-                ...(isAuthError
-                  ? {
-                      hint: "Call crunchyroll_login once (no arguments; it takes seconds while the browser is signed in), then retry this call. Do not ask the user for credentials.",
-                    }
-                  : {}),
-              },
-              null,
-              2
-            ),
+            error: message,
+            code: err.kind,
+            ...(detail ? { detail } : {}),
+            retryable: guidance?.retryable ?? false,
+            ...(guidance ? { hint: guidance.hint } : {}),
           },
-        ],
-        isError: true,
-      };
+          true
+        );
+      } else {
+        const isAuthError =
+          message.includes("Not logged in") || message.includes("401") || message.includes("Not authenticated");
+        errResult = jsonResult(
+          {
+            error: message,
+            ...(isAuthError ? { hint: LOGIN_HINT } : {}),
+          },
+          true
+        );
+      }
       // B6-FIX-1: even error results cross the central boundary (the error
       // message is already redacted, but static patterns in surrounding text
       // and any remaining registered literal must also be covered here).

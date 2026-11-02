@@ -171,6 +171,19 @@ function addProviderDetail(status: number, body: string): string | undefined {
   return undefined;
 }
 
+/** A closed name for the shape of a refusal body. Never any of its content. */
+export function refusalShape(body: string): "empty-response" | "html-response" | "json-response" | "other-response" {
+  const trimmed = body.trimStart();
+  if (trimmed.length === 0) return "empty-response";
+  if (trimmed.startsWith("<")) return "html-response";
+  try {
+    JSON.parse(trimmed);
+    return "json-response";
+  } catch {
+    return "other-response";
+  }
+}
+
 /** Upstream status → closed error kind, with mutation-only 400/409 mapping. */
 function upstreamError(
   status: number,
@@ -194,7 +207,9 @@ function upstreamError(
     return new TransportError("MUTATION_OUTCOME_UNKNOWN", "server-error");
   }
   if (status === 401) return new TransportError("API_UNAUTHORIZED");
-  if (status === 403) return new TransportError("API_FORBIDDEN");
+  // The SHAPE of a refusal (never its content) separates an edge or bot
+  // challenge page from a provider permission answer.
+  if (status === 403) return new TransportError("API_FORBIDDEN", refusalShape(body));
   if (status === 404) return new TransportError("API_NOT_FOUND");
   if (status === 429) return new TransportError("API_RATE_LIMITED");
   if (status >= 500) return new TransportError("API_SERVER_ERROR");

@@ -449,6 +449,23 @@ describe("B6-FIX-1: sanitizeToolResult central boundary", () => {
     assert.equal(out.isError, undefined, "isError untouched");
   });
 
+  test("registered literal is removed from structuredContent at any depth", async () => {
+    const out = await withRedactionScope(async (scope) => {
+      scope.registerSecret(SENTINEL_SUCCESS);
+      return sanitizeToolResult({
+        content: [{ type: "text", text: `{"x":"${SENTINEL_SUCCESS}"}` }],
+        structuredContent: {
+          top: `a ${SENTINEL_SUCCESS}`,
+          items: [{ nested: { deep: SENTINEL_SUCCESS } }, 42, null, true],
+        },
+      });
+    });
+    const raw = JSON.stringify(out);
+    assert.equal(raw.includes(SENTINEL_SUCCESS), false, "sentinel must not reach structuredContent");
+    const structured = (out as { structuredContent: { items: unknown[] } }).structuredContent;
+    assert.deepEqual(structured.items.slice(1), [42, null, true], "non-string values kept");
+  });
+
   test("multiple text items sanitized; non-text content and isError preserved", async () => {
     const out = await withRedactionScope(async (scope) => {
       scope.registerSecret(SENTINEL_SUCCESS);
