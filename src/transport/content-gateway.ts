@@ -28,7 +28,7 @@ import {
   parseSimilar,
   parseWatchlist,
 } from "../account-domain.js";
-import type { OperationRegistry } from "./operation-registry.js";
+import { resolveCall, type OperationRegistry } from "./operation-registry.js";
 import { TransportError } from "./transport-error.js";
 import type { CrunchyrollTransport, OperationId, CallerParams } from "./types.js";
 
@@ -73,6 +73,7 @@ export const CONTENT_TOOL_OPERATIONS: ReadonlyMap<string, OperationId> = new Map
       ["crunchyroll_browse", "BROWSE"],
       ["crunchyroll_get_watchlist", "GET_WATCHLIST"],
       ["crunchyroll_add_to_watchlist", "ADD_TO_WATCHLIST"],
+      ["crunchyroll_set_favorite", "SET_FAVORITE"],
       ["crunchyroll_remove_from_watchlist", "REMOVE_FROM_WATCHLIST"],
       ["crunchyroll_get_history", "GET_HISTORY"],
       ["crunchyroll_continue_watching", "GET_CONTINUE_WATCHING"],
@@ -280,6 +281,42 @@ export function createContentGateway(
           return parsePlayheads(
             (await transport.execute(operation, withDefined({ content_ids: args.content_ids }))).json
           );
+
+        case "SET_FAVORITE": {
+          // Validate the complete input BEFORE the initial read. Never drop
+          // unknown arguments or coerce a string into a boolean.
+          resolveCall(registry, operation, args);
+          const target = "GET_WATCHLIST_ENTRY" as OperationId;
+          const result = await transport.execute(target, { content_id: args.content_id });
+          const items = parseWatchlist(result.json).items;
+          // A filtered response must identify the exact target. Refuse an
+          // ignored filter or malformed response, rather than infer absence
+          // from a truncated general watchlist page.
+          if (items.length > 1 || items.some(item =>
+            typeof item !== "object" || item === null ||
+            (item as { id?: unknown }).id !== args.content_id
+          )) throw new AccountShapeError("watchlist.target");
+          const present = items.length === 1;
+          const noop = !present && args.favorite === false;
+          if (!noop) {
+            if (!present) await transport.execute("ADD_TO_WATCHLIST" as OperationId, { content_id: args.content_id });
+            // Set the requested boolean even if it matches the current value:
+            // this is idempotent state assignment, never a toggle or a replay.
+            await transport.execute(operation, args);
+          }
+          return {
+            tool: "crunchyroll_set_favorite",
+            operation: "SET_FAVORITE",
+            mutation: true,
+            mutation_class: "ACCOUNT",
+            content_id: args.content_id,
+            favorite: args.favorite,
+            outcome: noop ? "NOOP" : "APPLIED",
+            outcome_certainty: "CERTAIN",
+            retry_performed: false,
+            verify_with: "crunchyroll_get_watchlist",
+          };
+        }
 
         case "ADD_TO_WATCHLIST": {
           await transport.execute(operation, args);

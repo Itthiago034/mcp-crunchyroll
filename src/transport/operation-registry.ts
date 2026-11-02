@@ -170,13 +170,12 @@ export function createOperationRegistry(
         `operation ${String(d.id)} mutates without being an authenticated account operation`
       );
     }
-    // INV-M5. A body belongs to a POST and to nothing else. The legacy DELETE
-    // sent none, a GET body is meaningless here, and allowing one anyway would
-    // widen the wire for no operation that exists.
-    if (d.body !== undefined && (d.method !== "POST" || d.mutation === false)) {
+    // INV-M5. Only explicit POST/PATCH mutations may carry a body.
+    // GET and DELETE remain bodyless.
+    if (d.body !== undefined && ((d.method !== "POST" && d.method !== "PATCH") || d.mutation === false)) {
       throw new TransportError(
         "INVALID_ARGUMENTS",
-        `operation ${String(d.id)} declares a body on a non-mutating or non-POST method`
+        `operation ${String(d.id)} declares a body on a non-mutating or non-POST/PATCH method`
       );
     }
     // INV-M8. A mutation may not INHERIT the read path's implicit "any 2xx,
@@ -548,7 +547,7 @@ function accountRead(spec: {
  */
 export function accountMutation(spec: {
   id: string;
-  method: "POST" | "DELETE";
+  method: "POST" | "DELETE" | "PATCH";
   pathTemplate: string;
   mutation: "ACCOUNT" | "PROGRESS";
   callerParams: Record<string, ParamSpec>;
@@ -708,6 +707,12 @@ export const PRODUCTION_OPERATIONS: readonly OperationDescriptor[] = Object.free
     queryParams: { n: "n", order: "order" },
   }),
   accountRead({
+    id: "GET_WATCHLIST_ENTRY",
+    pathTemplate: "/content/v2/{accountId}/watchlist",
+    callerParams: { content_id: contentId },
+    queryParams: { content_ids: "content_id" },
+  }),
+  accountRead({
     id: "GET_HISTORY",
     pathTemplate: "/content/v2/{accountId}/watch-history",
     callerParams: { n: requiredIntegerInRange(1, 100) },
@@ -741,6 +746,19 @@ export const PRODUCTION_OPERATIONS: readonly OperationDescriptor[] = Object.free
     body: {
       contentType: "application/json",
       fields: { content_id: "content_id" },
+      fixedFields: {},
+    },
+    response: { successStatuses: [204], body: "EMPTY" },
+  }),
+  accountMutation({
+    id: "SET_FAVORITE",
+    method: "PATCH",
+    pathTemplate: "/content/v2/{accountId}/watchlist/{content_id}",
+    mutation: "ACCOUNT",
+    callerParams: { content_id: contentId, favorite: { required: true, validate: optionalBoolean.validate } },
+    body: {
+      contentType: "application/json",
+      fields: { is_favorite: "favorite" },
       fixedFields: {},
     },
     response: { successStatuses: [204], body: "EMPTY" },

@@ -448,6 +448,25 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: "crunchyroll_set_favorite",
+      description: "Set favorite state explicitly (never toggle). Adds to the watchlist only when favorite=true and absent; favorite=false on an absent item is a no-op.",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+      inputSchema: {
+        type: "object",
+        properties: {
+          content_id: { type: "string", description: "Series or movie ID" },
+          favorite: { type: "boolean", description: "Desired favorite state" },
+        },
+        required: ["content_id", "favorite"],
+        additionalProperties: false,
+      },
+    },
+    {
       name: "crunchyroll_remove_from_watchlist",
       description: "Remove an anime series or movie from the watchlist.",
       annotations: {

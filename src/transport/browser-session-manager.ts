@@ -153,6 +153,8 @@ const CRUNCHYROLL_PAGE_ORIGIN = "https://www.crunchyroll.com";
  */
 export const CRUNCHYROLL_FETCH_FUNCTION = `
   async function (url, method, authorization, maxBytes, bodyText, bodyContentType) {
+    if (!["GET", "POST", "DELETE", "PATCH"].includes(method)) throw new Error("method");
+    if (bodyText !== undefined && method !== "POST" && method !== "PATCH") throw new Error("body-method");
     const headers = { Authorization: authorization };
     const init = { method, headers, credentials: "omit", redirect: "manual" };
     if (typeof bodyText === "string") {
@@ -1406,8 +1408,11 @@ export function createBrowserSessionManager(
           // BT8.1. Re-checked here for the same reason the origin is: a body is
           // ASSEMBLED, and anything assembled is worth checking twice, on both
           // sides of the boundary that carries it. The registry already refuses
-          // a body on anything but a POST; this is the page's own refusal.
-          if (input.body !== undefined && input.method !== "POST") {
+          // a body on anything but POST/PATCH; this is the page's own refusal.
+          if (!["GET", "POST", "DELETE", "PATCH"].includes(input.method)) {
+            throw new BrowserLifecycleError("BROWSER_UNAVAILABLE", "method");
+          }
+          if (input.body !== undefined && input.method !== "POST" && input.method !== "PATCH") {
             throw new BrowserLifecycleError("BROWSER_UNAVAILABLE", "body-method");
           }
           if (

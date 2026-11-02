@@ -278,7 +278,7 @@ export function createBrowserApiBackend(ports: BrowserApiBackendPorts): Transpor
         descriptor.scope === "ACCOUNT" &&
         descriptor.auth === "BEARER" &&
         descriptor.response !== undefined &&
-        (descriptor.body === undefined || descriptor.method === "POST");
+        (descriptor.body === undefined || descriptor.method === "POST" || descriptor.method === "PATCH");
       if (!isRead && !isMutation) {
         throw new TransportError("OPERATION_NOT_MIGRATED", "method");
       }

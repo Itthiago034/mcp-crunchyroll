@@ -139,7 +139,7 @@ export interface ApiExecutionBody {
  */
 export interface ApiExecutionRequest {
   readonly url: string;
-  readonly method: "GET" | "POST" | "DELETE";
+  readonly method: "GET" | "POST" | "DELETE" | "PATCH";
   /** The complete Authorization header value, from the auth snapshot. */
   readonly authorization: string;
   readonly deadlineMs: number;
