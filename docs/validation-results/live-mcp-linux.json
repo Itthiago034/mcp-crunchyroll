@@ -1,0 +1,93 @@
+{
+  "target": "Crunchyroll real via MCP stdio",
+  "plannedRequests": 12,
+  "concurrency": 2,
+  "completedRequests": 12,
+  "status": "passed",
+  "blockers": [],
+  "complete": true,
+  "loginFlow": "manual_browser_then_managed_mcp",
+  "phase": "authenticated_reads",
+  "manualBrowserClosedNormally": true,
+  "readiness": {
+    "authenticated": true,
+    "browserConnected": true,
+    "authState": "PROFILE_READY"
+  },
+  "passedRequests": 12,
+  "failedRequests": 0,
+  "outcomes": [
+    {
+      "index": 0,
+      "tool": "crunchyroll_get_categories",
+      "passed": true,
+      "durationMs": 476.75
+    },
+    {
+      "index": 1,
+      "tool": "crunchyroll_search",
+      "passed": true,
+      "durationMs": 1740.07
+    },
+    {
+      "index": 2,
+      "tool": "crunchyroll_browse",
+      "passed": true,
+      "durationMs": 1806.96
+    },
+    {
+      "index": 3,
+      "tool": "crunchyroll_get_categories",
+      "passed": true,
+      "durationMs": 606.39
+    },
+    {
+      "index": 4,
+      "tool": "crunchyroll_search",
+      "passed": true,
+      "durationMs": 315.23
+    },
+    {
+      "index": 5,
+      "tool": "crunchyroll_browse",
+      "passed": true,
+      "durationMs": 7.41
+    },
+    {
+      "index": 6,
+      "tool": "crunchyroll_get_categories",
+      "passed": true,
+      "durationMs": 265.4
+    },
+    {
+      "index": 7,
+      "tool": "crunchyroll_search",
+      "passed": true,
+      "durationMs": 318.96
+    },
+    {
+      "index": 8,
+      "tool": "crunchyroll_browse",
+      "passed": true,
+      "durationMs": 65.29
+    },
+    {
+      "index": 9,
+      "tool": "crunchyroll_get_categories",
+      "passed": true,
+      "durationMs": 384.39
+    },
+    {
+      "index": 10,
+      "tool": "crunchyroll_search",
+      "passed": true,
+      "durationMs": 332.56
+    },
+    {
+      "index": 11,
+      "tool": "crunchyroll_browse",
+      "passed": true,
+      "durationMs": 33.34
+    }
+  ]
+}

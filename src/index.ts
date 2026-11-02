@@ -14,6 +14,7 @@ import { setLegacyAuthTransitionSink } from "./api.js";
 import { createAuthContextAuthority } from "./transport/auth-context.js";
 import { createAuthProducer, createDefaultAuthProducerPorts } from "./transport/auth-producer.js";
 import { createAuthOrchestrator } from "./transport/auth-orchestrator.js";
+import { TransportError, type TransportErrorKind } from "./transport/transport-error.js";
 import { createBrowserAuthObserver, CRUNCHYROLL_LOGIN_URL } from "./transport/browser-auth.js";
 import {
   createBrowserSessionManager,
@@ -30,6 +31,19 @@ import { createTransportDispatcher } from "./transport/dispatcher.js";
 import { createBrowserApiBackend } from "./transport/browser-api-backend.js";
 import { createContentGateway } from "./transport/content-gateway.js";
 import { installNodeCrunchyrollGuard } from "./transport/node-egress-guard.js";
+
+// Player control and session recovery (Crunchyroll MCP 2.0).
+import { AsyncLocalStorage } from "node:async_hooks";
+import { createPlayerController, PLAYER_ACTIONS, type PlayerAction } from "./transport/player-controller.js";
+import {
+  callWithSession,
+  createSessionRecovery,
+  SESSION_HINTS,
+  SessionRequiredError,
+  type DispatchProbe,
+} from "./transport/session-recovery.js";
+import { createSessionEligibilityStore } from "./transport/session-eligibility.js";
+import { createSessionKeeper, type SessionKeeperStatus } from "./transport/session-keeper.js";
 
 // B6-core: operation-scoped secret redaction (internal, not an MCP surface).
 import { withRedactionScope, safeErrorWithCleanStack, redactSecrets, sanitizeToolResult } from "./redact.js";
@@ -103,6 +117,17 @@ const authProducer = createAuthProducer(createDefaultAuthProducerPorts(authAutho
  */
 let browserSession: BrowserSessionManager | undefined;
 
+const CRUNCHYROLL_WATCH_URL_PREFIX = "https://www.crunchyroll.com/watch/";
+const CONTENT_ID_PATTERN = /^[A-Z0-9]{1,32}$/;
+/**
+ * The only origins whose page contexts the player channel may talk to: the
+ * watch page and the player frame it embeds. Build constants, never arguments.
+ */
+const CRUNCHYROLL_PLAYER_FRAME_ORIGINS = Object.freeze([
+  "https://www.crunchyroll.com",
+  "https://static.crunchyroll.com",
+]);
+
 function managedBrowser(): BrowserSessionManager {
   if (!browserSession) {
     browserSession = createBrowserSessionManager(
@@ -112,6 +137,10 @@ function managedBrowser(): BrowserSessionManager {
         // constant of this build: never a tool argument, never an environment
         // variable, never assembled from a caller-supplied fragment.
         initialPageUrl: CRUNCHYROLL_LOGIN_URL,
+        // Playback opens `<this><episode id>`; the id is validated, the prefix
+        // is a constant of this build.
+        watchPageBaseUrl: CRUNCHYROLL_WATCH_URL_PREFIX,
+        playerFrameOrigins: CRUNCHYROLL_PLAYER_FRAME_ORIGINS,
         profileDir: browserProfileDir(),
         executablePath: resolveBrowserExecutable(),
       },
@@ -129,9 +158,16 @@ function managedBrowser(): BrowserSessionManager {
  * a closure over the two SAFE diagnostics (availability and whether the record
  * carries a profile id) and can neither read material nor commit one.
  */
+/** Secret-free record that the human authorized the dedicated profile. */
+const sessionEligibility = createSessionEligibilityStore();
+
 const authOrchestrator = createAuthOrchestrator({
+  eligibility: sessionEligibility,
   diagnostics: {
-    availability: () => authAuthority.diagnostics().availability,
+    // An expired browser bearer is not a usable session: report it as
+    // unavailable so status is honest and login re-establishes instead of
+    // answering "already authenticated".
+    availability: () => (authAuthority.hasUsableRecord() ? "READY" : "UNAVAILABLE"),
     hasProfileId: () => authAuthority.diagnostics().hasProfileId,
   },
   browser: {
@@ -157,8 +193,107 @@ const authOrchestrator = createAuthOrchestrator({
       timer.unref?.();
       return { cancel: () => clearTimeout(timer) };
     },
+    // A signed-in page that is already open mints only on its own schedule;
+    // navigating it again makes the provider mint now, under observation.
+    afterArmed: () => managedBrowser().reloadManagedPage(),
   }),
 });
+
+/**
+ * Session recovery for content calls (single-flight).
+ *
+ * The observed bearer expires within minutes and carries no refresh token, and
+ * a cold process has none at all. Recovery classifies the session first and
+ * re-establishes it silently ONLY when that is a reuse of a session the human
+ * already authorized: expired in this process, or recorded as eligible by an
+ * earlier process. Never-authorized, logged-out and revoked sessions get a
+ * structured error instead — opening a login page for them stays an explicit
+ * crunchyroll_login decision.
+ */
+const sessionRecovery = createSessionRecovery({
+  usable: () => authAuthority.hasUsableRecord(),
+  diagnostics: () => {
+    const { availability, reason, cause } = authAuthority.diagnostics();
+    return { availability, reason, cause };
+  },
+  authState: () => authOrchestrator.readiness().auth_state,
+  eligibleForColdStart: () => sessionEligibility.isEligible(),
+  loggedOutPersisted: () => sessionEligibility.loggedOutPersisted(),
+  establishSilently: async (observationDeadlineMs) =>
+    (await authOrchestrator.establishSilently({ observationDeadlineMs })).accepted,
+  now: () => Date.now(),
+  schedule: (callback, ms) => {
+    const timer = setTimeout(callback, ms);
+    timer.unref?.();
+    return { cancel: () => clearTimeout(timer) };
+  },
+});
+
+/**
+ * Keeps the session warm: renews the bearer in the background as soon as it
+ * runs out, through the same single-flight recovery, while tools are in use.
+ * CRUNCHYROLL_KEEP_WARM_MINUTES sets the idle window (default 60; 0 disables).
+ */
+const sessionKeeper = createSessionKeeper(
+  {
+    classify: () => sessionRecovery.classify(),
+    usableUntil: () => authAuthority.usableUntil(),
+    ensureSession: () => sessionRecovery.ensureSession(),
+    now: () => Date.now(),
+    schedule: (callback, ms) => {
+      const timer = setTimeout(callback, ms);
+      // The keeper must never hold the process open by itself.
+      timer.unref?.();
+      return { cancel: () => clearTimeout(timer) };
+    },
+  },
+  { idleAfterMs: keepWarmIdleMs(process.env.CRUNCHYROLL_KEEP_WARM_MINUTES) },
+);
+
+function keepWarmIdleMs(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === "") return 60 * 60_000;
+  const minutes = Number(raw);
+  return Number.isFinite(minutes) && minutes >= 0 ? Math.min(minutes, 24 * 60) * 60_000 : 60 * 60_000;
+}
+
+type NextAction = "NONE" | "CALL_CRUNCHYROLL_LOGIN" | "WAIT_FOR_LOGOUT" | "RETRY_LATER";
+
+/**
+ * One closed instruction for the agent, derived from the session and the
+ * keeper. It answers "can I just call a content tool now?" without guessing.
+ */
+async function nextAction(keeper: SessionKeeperStatus): Promise<NextAction> {
+  const session = sessionRecovery.classify();
+  if (session === "LOGGING_OUT") return "WAIT_FOR_LOGOUT";
+  if (session === "USABLE") return "NONE";
+  if (session === "LOGGED_OUT" || session === "REVOKED" || keeper.keep_warm === "NEEDS_LOGIN") {
+    return "CALL_CRUNCHYROLL_LOGIN";
+  }
+  if (session === "NEVER_ESTABLISHED" && !(await sessionEligibility.isEligible())) return "CALL_CRUNCHYROLL_LOGIN";
+  // EXPIRED, or a saved session a content call renews by itself.
+  return keeper.keep_warm === "RETRYING" ? "RETRY_LATER" : "NONE";
+}
+
+/**
+ * Carries the per-call dispatch probe to the transport's channel opener. A
+ * provider channel is opened inside the authorized execution, immediately
+ * before the request, so "no channel opened" proves "nothing dispatched".
+ */
+const dispatchScope = new AsyncLocalStorage<DispatchProbe>();
+
+async function callContentTool(
+  name: string,
+  args: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  sessionKeeper.touch();
+  return callWithSession(
+    sessionRecovery,
+    (probe) => dispatchScope.run(probe, () => contentGateway.callTool(name, args)),
+    (error) => error instanceof TransportError && error.kind === "AUTH_NOT_READY",
+    { signal },
+  );
+}
 
 // ── BT5 cutover ──────────────────────────────────────────────────────────────
 //
@@ -180,7 +315,11 @@ installNodeCrunchyrollGuard();
 const contentGateway = (() => {
   const registry = createOperationRegistry(PRODUCTION_OPERATIONS);
   const backend = createBrowserApiBackend({
-    openChannel: () => managedBrowser().openApiExecutionChannel(),
+    openChannel: () => {
+      const probe = dispatchScope.getStore();
+      if (probe) probe.dispatched = true;
+      return managedBrowser().openApiExecutionChannel();
+    },
     reader: authAuthority.asReader(),
   });
   return createContentGateway(createTransportDispatcher(registry, backend), registry);
@@ -198,6 +337,115 @@ setLegacyAuthTransitionSink({
     authOrchestrator.signalReauthRequired();
   },
 });
+
+/**
+ * Native player control. Every browser action goes through the session
+ * manager's closed playback channel; there is no evaluate, no CDP pass-through
+ * and no terminal fallback anywhere on this path.
+ */
+const playerController = createPlayerController({
+  openChannel: async () => {
+    const session = managedBrowser();
+    // Reattach to the owned browser a previous process left running, but never
+    // spawn one: pausing must not open a window. Only from STOPPED: a starting
+    // or reconnecting manager is left to finish on its own, and the channel
+    // below refuses until it is ready.
+    if (session.state() === "STOPPED") await session.start({ adoptOnly: true });
+    return session.openPlaybackControlChannel();
+  },
+  permission: () => {
+    if (authOrchestrator.readiness().auth_state === "LOGGING_OUT") return "LOGGING_OUT";
+    if (sessionRecovery.classify() === "LOGGED_OUT") return "LOGGED_OUT";
+    return "OK";
+  },
+  now: () => Date.now(),
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+});
+
+/** How long crunchyroll_play waits for a freshly opened player before acting. */
+const PLAY_READY_WAIT_MS = 20_000;
+/** After a confirmed play, how long to watch current_time advance. Returns early once it moves. */
+const PLAY_PROGRESS_WAIT_MS = 2_500;
+
+// ── Result shaping ────────────────────────────────────────────────────────────
+
+/**
+ * One result shape for every tool. The text is COMPACT JSON (no indentation:
+ * fewer tokens for the model to read on every call) and the same value travels
+ * as `structuredContent`, so a client can use the object without parsing a
+ * JSON string out of the text.
+ */
+function jsonResult(value: unknown, isError = false) {
+  const structured =
+    value !== null && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : { result: value };
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(value) }],
+    structuredContent: structured,
+    ...(isError ? { isError: true } : {}),
+  };
+}
+
+const LOGIN_HINT =
+  "Call crunchyroll_login once (no arguments; it takes seconds while the browser is signed in), then retry this call. Do not ask the user for credentials.";
+
+/** Structural details that are safe and useful to show. Everything else is dropped. */
+const PUBLIC_ERROR_DETAILS: ReadonlySet<string> = new Set([
+  "empty-response",
+  "html-response",
+  "json-response",
+  "other-response",
+  "watchlist-item-absent",
+  "over-cap",
+  "deadline",
+]);
+
+const TRANSPORT_ERROR_GUIDANCE: Partial<Record<TransportErrorKind, { retryable: boolean; hint: string }>> = {
+  AUTH_NOT_READY: { retryable: true, hint: LOGIN_HINT },
+  AUTH_GENERATION_CHANGED: {
+    retryable: true,
+    hint: "The session changed while this call was running. Retry the same call once.",
+  },
+  API_UNAUTHORIZED: { retryable: true, hint: LOGIN_HINT },
+  API_FORBIDDEN: {
+    retryable: false,
+    hint: "Crunchyroll refused THIS operation (detail html-response usually means a temporary edge or bot challenge; json-response means the profile, region or subscription does not allow it). If other tools still work, the session is fine: do not log in again or loop. Try once more later, or continue without this data.",
+  },
+  API_NOT_FOUND: {
+    retryable: false,
+    hint: "No such item. Check the id: series, season, episode and movie ids are different; get them from crunchyroll_search, crunchyroll_get_seasons or crunchyroll_get_episodes.",
+  },
+  API_RATE_LIMITED: {
+    retryable: true,
+    hint: "Crunchyroll is rate limiting. Wait a few seconds before the next call and avoid parallel calls.",
+  },
+  API_SERVER_ERROR: { retryable: true, hint: "Crunchyroll had a server error. Retry once after a short wait." },
+  API_BAD_REQUEST: { retryable: false, hint: "Crunchyroll rejected the arguments. Check ids and values; do not retry unchanged." },
+  API_CONFLICT: {
+    retryable: false,
+    hint: "The account is already in the requested state, or conflicts with it. Read it back before retrying.",
+  },
+  MUTATION_OUTCOME_UNKNOWN: {
+    retryable: false,
+    hint: "The change may or may not have been applied. Read the state back (see the tool's verify_with) before retrying, so the change is not applied twice.",
+  },
+  BROWSER_UNAVAILABLE: {
+    retryable: true,
+    hint: "The managed browser is not ready. Call crunchyroll_status, then retry once.",
+  },
+  TRANSPORT_FAILURE: { retryable: true, hint: "The request failed before an answer arrived. Retry once." },
+  INVALID_RESPONSE: { retryable: true, hint: "Crunchyroll answered with something unexpected. Retry once; if it repeats, skip this data." },
+  SCHEMA_MISMATCH: {
+    retryable: false,
+    hint: "Crunchyroll answered with a shape this server does not understand. Retrying will not help; report it.",
+  },
+  INVALID_ARGUMENTS: { retryable: false, hint: "Fix the arguments as described by the tool's input schema." },
+  OPERATION_NOT_MIGRATED: {
+    retryable: false,
+    hint: "This tool is not available in this version. Use another tool for the same data.",
+  },
+};
 
 // ── Tool Definitions ──────────────────────────────────────────────────────────
 
@@ -258,7 +506,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "crunchyroll_get_seasons",
-      description: "Get all seasons of an anime series.",
+      description:
+        "Get all seasons of an anime series: id, title, season_number, number_of_episodes, original_audio and audio_versions (audio locale -> season id).",
       inputSchema: {
         type: "object",
         properties: {
@@ -269,11 +518,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "crunchyroll_get_episodes",
-      description: "Get all episodes in a specific season.",
+      description:
+        "Get all episodes in a specific season. Pass episode_number to get just that episode (recommended for long seasons).",
       inputSchema: {
         type: "object",
         properties: {
           season_id: { type: "string", description: "Crunchyroll season ID" },
+          episode_number: {
+            type: "number",
+            description: "Optional: return only the episode with this episode_number",
+          },
         },
         required: ["season_id"],
       },
@@ -293,7 +547,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     // Watchlist
     {
       name: "crunchyroll_get_watchlist",
-      description: "Get the user's anime watchlist (series saved to watch later).",
+      description:
+        "Get the user's watchlist (series saved to watch later): id, title, type, is_favorite, date_added. Honours n (default 20).",
       inputSchema: {
         type: "object",
         properties: {
@@ -339,10 +594,32 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
 
+    {
+      name: "crunchyroll_set_favorite",
+      description:
+        "Set whether a series or movie is a favorite (the heart). Idempotent: pass the state you want, favorite true or false; repeating the call never undoes it. Favoriting an item that is not on the watchlist adds it first (added_to_watchlist: true). Unfavoriting an item not on the watchlist is a NOOP.",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+      inputSchema: {
+        type: "object",
+        properties: {
+          content_id: { type: "string", description: "Series or movie ID" },
+          favorite: { type: "boolean", description: "true to favorite, false to unfavorite" },
+        },
+        required: ["content_id", "favorite"],
+        additionalProperties: false,
+      },
+    },
+
     // History & Progress
     {
       name: "crunchyroll_get_history",
-      description: "Get recently watched episodes and their progress.",
+      description:
+        "Get recently watched episodes, newest first: episode id, title, series/season/episode numbers, playhead (seconds), fully_watched and audio_versions (audio locale -> episode id to play).",
       inputSchema: {
         type: "object",
         properties: {
@@ -466,6 +743,46 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       description: "Get current Crunchyroll subscription details and renewal info.",
       inputSchema: { type: "object", properties: {} },
     },
+
+    // Playback
+    {
+      name: "crunchyroll_play",
+      description:
+        "Play an episode or movie: opens its Crunchyroll watch page in the signed-in managed browser (reusing the playback tab if one is open). Use the episode id from crunchyroll_get_episodes (not a series or season id). Optional autoplay/fullscreen run the native player controls once the player loads and report each step as verified or not.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          episode_id: { type: "string", description: "Crunchyroll episode or movie id, e.g. GRVN8MNQY" },
+          autoplay: { type: "boolean", description: "Optional: start playback once the player loads (default false)" },
+          fullscreen: { type: "boolean", description: "Optional: enter fullscreen once the player loads (default false)" },
+        },
+        required: ["episode_id"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "crunchyroll_player_control",
+      description:
+        "Control the video already open in the managed browser's playback tab: play, pause, fullscreen, exit_fullscreen, or status. Reports whether the command ran and whether the resulting state was verified. Use this instead of any script, terminal or browser automation.",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      inputSchema: {
+        type: "object",
+        properties: {
+          action: {
+            type: "string",
+            enum: [...PLAYER_ACTIONS],
+            description: "play | pause | fullscreen | exit_fullscreen | status",
+          },
+        },
+        required: ["action"],
+        additionalProperties: false,
+      },
+    },
   ],
 }));
 
@@ -476,7 +793,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 // error, rejected promise, early return), so registered sensitive material
 // can never leak across operations — including concurrent ones, since the
 // scope is carried by AsyncLocalStorage per async chain.
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
   return withRedactionScope(async (scope) => {
     const { name, arguments: args = {} } = request.params;
 
@@ -516,10 +833,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // legacy Node client, because this boundary is the only route left and
         // it has no legacy branch.
         if (contentGateway.isContentTool(name)) {
-          const payload = await contentGateway.callTool(name, args as Record<string, unknown>);
-          return {
-            content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
-          };
+          const payload = await callContentTool(name, args as Record<string, unknown>, extra?.signal);
+          return jsonResult(payload);
         }
 
         switch (name) {
@@ -536,14 +851,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             );
           }
           const outcome = await authOrchestrator.login();
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify({ accepted: outcome.accepted, ...outcome.readiness }, null, 2),
-              },
-            ],
-          };
+          // A fresh login starts the keep-warm cycle.
+          if (outcome.accepted) sessionKeeper.touch();
+          return jsonResult({ accepted: outcome.accepted, ...outcome.readiness });
       }
 
       case "crunchyroll_logout": {
@@ -553,19 +863,97 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // output contract is unchanged (the four-axis result is BT8's).
         const logoutResult = (await authOrchestrator.logout()).persistence as LogoutResult;
         const presentation = formatLogoutResult(logoutResult);
-        return {
-          content: [{ type: "text", text: JSON.stringify(presentation) }],
-        };
+        return jsonResult(presentation);
+      }
+
+      case "crunchyroll_play": {
+        const input = args as Record<string, unknown>;
+        const episodeId = input.episode_id;
+        const optionKeys = ["autoplay", "fullscreen"];
+        if (
+          Object.keys(input).some((key) => key !== "episode_id" && !optionKeys.includes(key)) ||
+          optionKeys.some((key) => input[key] !== undefined && typeof input[key] !== "boolean") ||
+          typeof episodeId !== "string" ||
+          !CONTENT_ID_PATTERN.test(episodeId)
+        ) {
+          throw new McpError(
+            ErrorCode.InvalidParams,
+            "crunchyroll_play takes episode_id (an uppercase Crunchyroll id such as GRVN8MNQY) and optional booleans autoplay and fullscreen."
+          );
+        }
+        const session = managedBrowser();
+        await session.start();
+        await session.openWatchPage(episodeId);
+        // Watching counts as activity: content calls after the episode stay fast.
+        sessionKeeper.touch();
+        const opened = { opened: true, episode_id: episodeId, url: `${CRUNCHYROLL_WATCH_URL_PREFIX}${episodeId}` };
+        // Without options the result is exactly the original contract.
+        const steps: Array<["autoplay" | "fullscreen", PlayerAction]> = [];
+        if (input.autoplay === true) steps.push(["autoplay", "play"]);
+        if (input.fullscreen === true) steps.push(["fullscreen", "fullscreen"]);
+        if (steps.length === 0) {
+          return jsonResult(opened);
+        }
+        const reports: Record<string, unknown> = {};
+        let allConfirmed = true;
+        for (const [key, action] of steps) {
+          const outcome = await playerController.perform(action, {
+            expectContentId: episodeId,
+            waitForReadyMs: PLAY_READY_WAIT_MS,
+            ...(action === "play" ? { confirmProgressMs: PLAY_PROGRESS_WAIT_MS } : {}),
+            signal: extra?.signal,
+          });
+          reports[key] = outcome;
+          allConfirmed &&= outcome.success;
+        }
+        // "Opened" and "playing" are different facts: playing_verified is true
+        // only when current_time was seen advancing after play.
+        const playReport = reports.autoplay as { progress?: string } | undefined;
+        const playingVerified = playReport ? playReport.progress === "ADVANCING" : undefined;
+        return jsonResult({
+          ...opened,
+          success: allConfirmed,
+          partial: !allConfirmed,
+          ...(playingVerified === undefined ? {} : { playing_verified: playingVerified }),
+          ...reports,
+        });
+      }
+
+      case "crunchyroll_player_control": {
+        const input = args as Record<string, unknown>;
+        const action = input.action;
+        // Discriminated by `action`: every action takes no other field, so any
+        // extra key is refused instead of silently ignored.
+        if (
+          Object.keys(input).some((key) => key !== "action") ||
+          typeof action !== "string" ||
+          !PLAYER_ACTIONS.includes(action as PlayerAction)
+        ) {
+          throw new McpError(
+            ErrorCode.InvalidParams,
+            "crunchyroll_player_control takes exactly one argument, action: play, pause, fullscreen, exit_fullscreen or status."
+          );
+        }
+        const outcome = await playerController.perform(action as PlayerAction, {
+          ...(action === "play" ? { confirmProgressMs: PLAY_PROGRESS_WAIT_MS } : {}),
+          signal: extra?.signal,
+        });
+        return jsonResult(outcome, !outcome.success);
       }
 
       case "crunchyroll_status": {
         // Strictly read-only (§10): it never logs in, refreshes, mints,
         // commits, invalidates, mutates storage, navigates or reopens a
         // browser. It reports current known readiness and nothing else.
-        const status = authOrchestrator.readiness();
-        return {
-          content: [{ type: "text", text: JSON.stringify(status, null, 2) }],
+        // The keeper's view is a read of timers already planned; reporting it
+        // starts nothing.
+        const keeper = sessionKeeper.status();
+        const status = {
+          ...authOrchestrator.readiness(),
+          session: { state: sessionRecovery.classify(), ...keeper },
+          next_action: await nextAction(keeper),
         };
+        return jsonResult(status);
       }
 
         // ── Content ─────────────────────────────────────────────────────────
@@ -594,25 +982,45 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // echo err.message into the wire payload.
         throw new McpError(err.code, redactSecrets(err.message));
       }
+      if (err instanceof SessionRequiredError) {
+        // Structured, fixed and secret-free: the code says WHY, the hint says
+        // what to do, and neither is a reason to loop.
+        return sanitizeToolResult(
+          jsonResult(
+            { error: err.message, code: err.code, session_state: err.sessionState, hint: SESSION_HINTS[err.code] },
+            true
+          )
+        );
+      }
       const safe = safeErrorWithCleanStack(err);
       const message = safe.message;
-      const isAuthError = message.includes("Not logged in") || message.includes("401");
-      const errResult = {
-        content: [
+      let errResult;
+      if (err instanceof TransportError) {
+        // Closed vocabulary only: the kind, a whitelisted structural detail and
+        // fixed guidance. No URL, header, body or identity can reach this.
+        const guidance = TRANSPORT_ERROR_GUIDANCE[err.kind];
+        const detail = err.detail !== undefined && PUBLIC_ERROR_DETAILS.has(err.detail) ? err.detail : undefined;
+        errResult = jsonResult(
           {
-            type: "text",
-            text: JSON.stringify(
-              {
-                error: message,
-                ...(isAuthError ? { hint: "Use crunchyroll_login to authenticate first." } : {}),
-              },
-              null,
-              2
-            ),
+            error: message,
+            code: err.kind,
+            ...(detail ? { detail } : {}),
+            retryable: guidance?.retryable ?? false,
+            ...(guidance ? { hint: guidance.hint } : {}),
           },
-        ],
-        isError: true,
-      };
+          true
+        );
+      } else {
+        const isAuthError =
+          message.includes("Not logged in") || message.includes("401") || message.includes("Not authenticated");
+        errResult = jsonResult(
+          {
+            error: message,
+            ...(isAuthError ? { hint: LOGIN_HINT } : {}),
+          },
+          true
+        );
+      }
       // B6-FIX-1: even error results cross the central boundary (the error
       // message is already redacted, but static patterns in surrounding text
       // and any remaining registered literal must also be covered here).
@@ -674,6 +1082,10 @@ async function main() {
     }
   };
   await server.connect(transport);
+  // Optional warm start: re-establish a saved session right away instead of on
+  // the first tool call. Off by default, because it opens the browser at
+  // server start even if no Crunchyroll tool is ever used.
+  if (process.env.CRUNCHYROLL_WARM_START === "1") sessionKeeper.start();
   console.error("Crunchyroll MCP server running on stdio");
 }
 

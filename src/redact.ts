@@ -226,9 +226,31 @@ export function redactSecrets(text: string): string {
  * `withRedactionScope` callback returns — after `finally` runs the registry
  * is empty and runtime literals can no longer be matched.
  */
+/** Every string inside a JSON-like value, redacted; keys and shape are kept. */
+function redactDeep(value: unknown, depth = 0): unknown {
+  if (typeof value === "string") return redactSecrets(value);
+  if (value === null || typeof value !== "object") return value;
+  // Tool payloads are shallow; anything this deep is replaced, never passed raw.
+  if (depth > 32) return "[REDACTED]";
+  if (Array.isArray(value)) return value.map((entry) => redactDeep(entry, depth + 1));
+  const out: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    out[key] = redactDeep(entry, depth + 1);
+  }
+  return out;
+}
+
 export function sanitizeToolResult<T extends { content?: unknown; isError?: boolean }>(
   result: T
 ): T {
+  // structuredContent carries the same data as the text, so it crosses the
+  // same redaction boundary.
+  if ((result as { structuredContent?: unknown }).structuredContent !== undefined) {
+    result = {
+      ...result,
+      structuredContent: redactDeep((result as { structuredContent?: unknown }).structuredContent),
+    };
+  }
   const content = result.content;
   if (!Array.isArray(content) || content.length === 0) {
     return result; // nothing textual to sanitize; shape untouched

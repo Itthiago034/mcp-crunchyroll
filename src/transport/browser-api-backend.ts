@@ -171,6 +171,19 @@ function addProviderDetail(status: number, body: string): string | undefined {
   return undefined;
 }
 
+/** A closed name for the shape of a refusal body. Never any of its content. */
+export function refusalShape(body: string): "empty-response" | "html-response" | "json-response" | "other-response" {
+  const trimmed = body.trimStart();
+  if (trimmed.length === 0) return "empty-response";
+  if (trimmed.startsWith("<")) return "html-response";
+  try {
+    JSON.parse(trimmed);
+    return "json-response";
+  } catch {
+    return "other-response";
+  }
+}
+
 /** Upstream status → closed error kind, with mutation-only 400/409 mapping. */
 function upstreamError(
   status: number,
@@ -194,7 +207,9 @@ function upstreamError(
     return new TransportError("MUTATION_OUTCOME_UNKNOWN", "server-error");
   }
   if (status === 401) return new TransportError("API_UNAUTHORIZED");
-  if (status === 403) return new TransportError("API_FORBIDDEN");
+  // The SHAPE of a refusal (never its content) separates an edge or bot
+  // challenge page from a provider permission answer.
+  if (status === 403) return new TransportError("API_FORBIDDEN", refusalShape(body));
   if (status === 404) return new TransportError("API_NOT_FOUND");
   if (status === 429) return new TransportError("API_RATE_LIMITED");
   if (status >= 500) return new TransportError("API_SERVER_ERROR");
@@ -315,6 +330,7 @@ export function createBrowserApiBackend(ports: BrowserApiBackendPorts): Transpor
       // Serialized BEFORE the channel is opened, so a body this transport
       // cannot build fails while the request is still provably unsent.
       const body = buildRequestBody(call);
+      const responseCap = descriptor.maxResponseBytes ?? MAX_API_RESPONSE_BYTES;
 
       try {
         // runCurrent snapshots the record ONCE, and re-checks it after the
@@ -329,7 +345,7 @@ export function createBrowserApiBackend(ports: BrowserApiBackendPorts): Transpor
               method: descriptor.method,
               authorization: `${view.tokenType} ${view.accessToken}`,
               deadlineMs,
-              maxBytes: MAX_API_RESPONSE_BYTES,
+              maxBytes: responseCap,
               // Omitted entirely when there is none, so a read's request record
               // keeps exactly the fields it has always carried.
               ...(body === undefined ? {} : { body }),
@@ -343,7 +359,7 @@ export function createBrowserApiBackend(ports: BrowserApiBackendPorts): Transpor
           // Bound and normalize BEFORE anything is interpreted.
           if (
             response.truncated ||
-            Buffer.byteLength(response.body, "utf-8") > MAX_API_RESPONSE_BYTES
+            Buffer.byteLength(response.body, "utf-8") > responseCap
           ) {
             throw responseValidationError(isMutation, "over-cap");
           }
@@ -368,7 +384,10 @@ export function createBrowserApiBackend(ports: BrowserApiBackendPorts): Transpor
           }
 
           let json: unknown;
-          if (contract?.body === "EMPTY") {
+          if (contract?.body === "IGNORED") {
+            // Decided by status alone; nothing of the body is read.
+            json = undefined;
+          } else if (contract?.body === "EMPTY") {
             // A write may legitimately answer with no document and no content
             // type. Demanding JSON here would report a successful change as an
             // unreadable response — so what is checked instead is that nothing

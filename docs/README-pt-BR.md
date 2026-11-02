@@ -1,38 +1,95 @@
-# MCP Crunchyroll — apresentação em português
+<p align="center">
+  <img src="assets/mcp-crunchyroll-banner.png" alt="MCP Crunchyroll" width="100%">
+</p>
 
-Servidor não oficial de Model Context Protocol (MCP) para pesquisar o catálogo da Crunchyroll e consultar informações da sua conta usando um cliente MCP.
+<h1 align="center">🍥 MCP Crunchyroll</h1>
 
-## O que é possível fazer
+<p align="center">
+  <strong>Seu agente de IA encontra animes, cuida da sua lista e dá o play,<br/>sem nunca receber a sua senha.</strong>
+</p>
 
-- Pesquisar animes e consultar séries, temporadas e episódios.
-- Consultar histórico, lista de acompanhamento e recomendações.
-- Adicionar ou remover títulos da lista e atualizar o progresso.
+<p align="center">
+  <a href="../README.md">Read in English</a>
+</p>
 
-A versão 0.1.0 publica 21 ferramentas; 19 estão operacionais. As ferramentas de continuar assistindo e consultar assinatura ainda estão desativadas. O servidor **não reproduz vídeos**, não baixa mídia e não contorna DRM.
+---
 
-## Instalação
+Servidor não oficial de [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) para a Crunchyroll, escrito em TypeScript. Seu cliente MCP (Claude, Hermes ou outro) ganha um conjunto fechado de ferramentas para o catálogo, a sua conta e o player. Você entra na conta numa janela de navegador dedicada, uma vez, e o servidor mantém essa sessão ativa.
 
-Você precisa do Node.js 18 ou mais recente, npm e um navegador da família Chromium compatível.
+<p align="center">
+  <img src="assets/demo.svg" alt="Demonstração animada: o agente busca o simulcast mais popular da temporada e adiciona à lista" width="100%" />
+</p>
 
-```bash
-git clone https://github.com/Itthiago034/mcp-crunchyroll.git
-cd mcp-crunchyroll
-npm ci
-npm run typecheck
-npm run build
-```
+## ✨ O que dá para fazer
 
-Configure seu cliente MCP para executar `node` com o caminho absoluto para `dist/index.js`. O [README principal](../README.md) traz um exemplo de configuração e a lista de ferramentas. Há também um `manifest.yaml` para instalações compatíveis do Hermes; a configuração pode variar conforme a versão.
+| | |
+|---|---|
+| 🔎 **Descobrir** | Pesquisar, navegar por gênero ou temporada de simulcast, ver séries, temporadas e episódios (com todas as versões de áudio) e receber recomendações. |
+| 📚 **Sua conta** | Ver lista, histórico e progresso; adicionar ou remover títulos, **favoritar** e atualizar o progresso. |
+| ▶️ **Assistir** | Abrir um episódio, **dar play, pausar e pôr em tela cheia**. O servidor confirma que o vídeo está mesmo tocando, não só que a página abriu. |
+| 🔒 **Seguro** | O login acontece só no navegador gerenciado. Senha, cookies e tokens nunca passam pelas ferramentas. |
 
-Chame `crunchyroll_login({})` e entre na sua conta na janela do navegador gerenciado. Depois, consulte `crunchyroll_status({})`. O login é interativo: não passe senha, cookies ou tokens como argumentos ao MCP.
+## 💬 Exemplos de pedidos
 
-## Exemplos de pedidos ao cliente
+- “Procure Frieren e toque o episódio 1 dublado em português, em tela cheia.”
+- “O que eu assisti por último? Continue de onde parei.”
+- “Mostre minha lista e recomende algo parecido.”
+- “Favorite esta série.”
 
-- “Procure Frieren na Crunchyroll.”
-- “Mostre as temporadas e os episódios desta série.”
-- “Quais animes assisti recentemente?”
-- “Mostre minha lista de acompanhamento.”
+## 🚀 Começo rápido
 
-Os resultados dependem da conta, da região, do cliente e da disponibilidade do serviço. As interfaces web internas da Crunchyroll podem mudar.
+1. Instale o Node.js 18 ou mais recente e um navegador da família Chromium (Chrome, Chromium, Brave ou Edge).
+2. Compile o servidor:
+
+   ```bash
+   git clone https://github.com/Itthiago034/mcp-crunchyroll.git
+   cd mcp-crunchyroll
+   npm ci && npm run build
+   ```
+
+3. Adicione ao seu cliente MCP:
+
+   ```json
+   {
+     "mcpServers": {
+       "crunchyroll": {
+         "command": "node",
+         "args": ["/caminho/absoluto/para/mcp-crunchyroll/dist/index.js"]
+       }
+     }
+   }
+   ```
+
+4. Peça ao agente para entrar na conta. Ele chama `crunchyroll_login`, uma janela abre na página da própria Crunchyroll e você entra **uma vez**.
+5. Pronto. Peça qualquer coisa da lista acima.
+
+Para o Hermes, há também um `manifest.yaml` no repositório.
+
+## 🔥 Entra uma vez, continua conectado
+
+<p align="center">
+  <img src="assets/session-keep-warm.svg" alt="Você entra uma vez; o token curto é renovado em segundo plano sempre que expira" width="100%" />
+</p>
+
+O token da versão web da Crunchyroll dura poucos minutos e não vem com refresh token. Em vez de fazer uma chamada esperar a renovação (ou pedir login de novo), um **mantenedor de sessão** renova o token em segundo plano assim que ele expira, numa aba escondida, nunca na aba em que você está assistindo.
+
+- **Você entra uma vez.** O perfil dedicado do navegador guarda o login da Crunchyroll, então mesmo depois de reiniciar o servidor a sessão volta sozinha.
+- **As chamadas continuam rápidas.** Enquanto as ferramentas estão em uso, o token está sempre válido. Depois de uma hora sem uso o mantenedor descansa, e a próxima chamada o acorda.
+- **O agente sempre sabe o que fazer.** `crunchyroll_status` devolve um `next_action` fechado: `NONE`, `CALL_CRUNCHYROLL_LOGIN`, `WAIT_FOR_LOGOUT` ou `RETRY_LATER`.
+- **Nunca entra na conta por você.** Se a Crunchyroll encerrar a sessão (logout, troca de senha, revogação), o mantenedor para e pede `crunchyroll_login`, sem ficar tentando em loop.
+
+| Variável | Padrão | Efeito |
+|---|---|---|
+| `CRUNCHYROLL_KEEP_WARM_MINUTES` | `60` | Quanto tempo o mantenedor fica ativo depois da última chamada. `0` desliga |
+| `CRUNCHYROLL_WARM_START` | desligado | `1` restabelece a sessão salva assim que o servidor inicia (abre o navegador na inicialização) |
+
+**Dica de login:** se a sua conta usa “Entrar com Google” ou “Entrar com Apple”, esses botões funcionam normalmente na janela gerenciada.
+
+## Limitações
+
+- `crunchyroll_continue_watching` e `crunchyroll_get_subscription` ainda estão desativadas.
+- As interfaces web internas da Crunchyroll não são uma API pública estável e podem mudar.
+- O servidor controla apenas o player oficial na web: não baixa mídia e não contorna DRM, nem as políticas de autoplay e tela cheia do navegador.
+- `crunchyroll_set_favorite` segue o formato de requisição do cliente web, mas ainda não foi confirmado contra a API real.
 
 Projeto da comunidade, sem afiliação ou endosso da Crunchyroll. Baseado no projeto de código aberto `@striderlabs/mcp-crunchyroll`; licença MIT.

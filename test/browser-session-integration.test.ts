@@ -7,7 +7,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   createBrowserSessionManager, createRealBrowserSessionSeams,
+  CRUNCHYROLL_FETCH_FUNCTION,
 } from "../src/transport/browser-session-manager.js";
+import { createCdpConnector } from "../src/transport/cdp-client.js";
 import {
   resolveBrowserExecutable, readDevToolsEndpoint,
 } from "../src/transport/browser-profile.js";
@@ -69,6 +71,36 @@ async function harness(): Promise<Harness> {
 describe("BT2 integration — real browser against a loopback server", {
   skip: BROWSER ? false : "no supported browser executable",
 }, () => {
+  test("the frozen fetch primitive enforces UTF-8 limits inside real Chromium", async () => {
+    const h = await harness();
+    let connection: Awaited<ReturnType<ReturnType<typeof createCdpConnector>["connect"]>> | undefined;
+    try {
+      await h.manager.start();
+      const targetId = await h.manager.ensureManagedPage();
+      const endpoint = await readDevToolsEndpoint(h.profileDir);
+      connection = await createCdpConnector(5_000).connect(endpoint.webSocketDebuggerUrl);
+      const { sessionId } = await connection.send("Target.attachToTarget", {
+        targetId, flatten: true,
+      }) as { sessionId: string };
+      // Lexical fixture fetch keeps this check offline while exercising the
+      // browser's actual Response, ReadableStream and TextDecoder implementations.
+      const frame = await connection.send("Runtime.evaluate", {
+        expression: `(() => {
+          const fetch = async () => new Response("😀😀");
+          return (${CRUNCHYROLL_FETCH_FUNCTION})("fixture", "GET", "synthetic", 4);
+        })()`,
+        awaitPromise: true,
+        returnByValue: true,
+      }, sessionId) as { exceptionDetails?: unknown; result: { value: { body: string; truncated: boolean } } };
+      assert.equal(frame.exceptionDetails, undefined);
+      assert.equal(frame.result.value.body, "😀");
+      assert.equal(frame.result.value.truncated, true);
+    } finally {
+      connection?.close();
+      await h.cleanup();
+    }
+  });
+
   test("network isolation tier is recorded", () => {
     assert.ok(typeof NET_ISOLATED === "boolean");
   });

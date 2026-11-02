@@ -12,7 +12,11 @@
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test test/*.test.ts"
+    "test": "tsx --test test/*.test.ts",
+    "test:browser": "tsx --test test/browser-load.test.ts",
+    "test:handoff": "tsx --test test/browser-profile-handoff.test.ts",
+    "validate:live": "tsx scripts/validate-live.ts",
+    "onboard:browser": "tsx scripts/onboard-browser.ts"
   },
   "files": [
     "dist/",
@@ -34,9 +38,12 @@
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@types/ws": "^8.18.1",
-    "esbuild": "^0.20.0",
+    "esbuild": "^0.28.2",
     "tsx": "^4.7.0",
     "typescript": "^5.3.3"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
   },
   "engines": {
     "node": ">=18.0.0"

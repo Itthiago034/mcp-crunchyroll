@@ -8,7 +8,7 @@ import type {
   ParamSpec, ResolvedCall, ResponseContract,
 } from "./types.js";
 import {
-  contentId, contentIdList, HTTP_METHODS, MUTATION_CLASSES, optionalBoolean, optionalOneOf,
+  contentId, contentIdList, HTTP_METHODS, MUTATION_CLASSES, optionalBoolean, optionalOneOf, requiredBoolean,
   requiredIntegerInRange, searchText, slugList,
 } from "./types.js";
 import { TransportError } from "./transport-error.js";
@@ -94,7 +94,17 @@ function captureDescriptor(d: OperationDescriptor): OperationDescriptor {
     // keeps exactly the key set it has always had.
     ...(d.body === undefined ? {} : { body: freezeBody(d.body) }),
     ...(d.response === undefined ? {} : { response: freezeResponse(d.response) }),
+    ...(d.maxResponseBytes === undefined ? {} : { maxResponseBytes: captureResponseCap(d) }),
   });
+}
+
+/** A raised cap must be a sane constant: a positive integer of at most 16 MiB. */
+function captureResponseCap(d: OperationDescriptor): number {
+  const cap = d.maxResponseBytes;
+  if (typeof cap !== "number" || !Number.isInteger(cap) || cap <= 0 || cap > 16 * 1024 * 1024) {
+    throw new Error(`Operation ${String(d.id)} declares an invalid maxResponseBytes`);
+  }
+  return cap;
 }
 
 /**
@@ -163,7 +173,9 @@ export function createOperationRegistry(
     // INV-M5. A body belongs to a POST and to nothing else. The legacy DELETE
     // sent none, a GET body is meaningless here, and allowing one anyway would
     // widen the wire for no operation that exists.
-    if (d.body !== undefined && (d.method !== "POST" || d.mutation === false)) {
+    // PATCH carries the partial update it names (SET_FAVORITE), so it may
+    // carry a body too; GET and DELETE still may not.
+    if (d.body !== undefined && ((d.method !== "POST" && d.method !== "PATCH") || d.mutation === false)) {
       throw new TransportError(
         "INVALID_ARGUMENTS",
         `operation ${String(d.id)} declares a body on a non-mutating or non-POST method`
@@ -179,7 +191,7 @@ export function createOperationRegistry(
         contract === undefined ||
         !Array.isArray(contract.successStatuses) ||
         contract.successStatuses.length === 0 ||
-        (contract.body !== "JSON" && contract.body !== "EMPTY")
+        (contract.body !== "JSON" && contract.body !== "EMPTY" && contract.body !== "IGNORED")
       ) {
         throw new TransportError(
           "INVALID_ARGUMENTS",
@@ -464,8 +476,10 @@ function publicRead(spec: {
   pathTemplate: string;
   callerParams?: Record<string, ParamSpec>;
   queryParams?: Record<string, string>;
+  maxResponseBytes?: number;
 }): OperationDescriptor {
   return Object.freeze({
+    ...(spec.maxResponseBytes === undefined ? {} : { maxResponseBytes: spec.maxResponseBytes }),
     id: spec.id as OperationId,
     method: "GET",
     pathTemplate: spec.pathTemplate,
@@ -536,7 +550,7 @@ function accountRead(spec: {
  */
 export function accountMutation(spec: {
   id: string;
-  method: "POST" | "DELETE";
+  method: "POST" | "PATCH" | "DELETE";
   pathTemplate: string;
   mutation: "ACCOUNT" | "PROGRESS";
   callerParams: Record<string, ParamSpec>;
@@ -596,7 +610,15 @@ export const PRODUCTION_OPERATIONS: readonly OperationDescriptor[] = Object.free
   publicRead({
     id: "SEARCH",
     pathTemplate: "/content/v2/discover/search",
-    callerParams: { q: searchText, n: requiredIntegerInRange(1, 100), type: optionalOneOf(["series", "movie_listing"]) },
+    // "series,movie_listing" is the gateway's default when the caller names no
+    // type: without it the provider also returns episode, music and top-result
+    // buckets that the tool never surfaces, and a popular title exceeds the
+    // 512 KiB response cap.
+    callerParams: {
+      q: searchText,
+      n: requiredIntegerInRange(1, 100),
+      type: optionalOneOf(["series", "movie_listing", "series,movie_listing"]),
+    },
     queryParams: { q: "q", n: "n", type: "type" },
   }),
   publicRead({
@@ -616,11 +638,30 @@ export const PRODUCTION_OPERATIONS: readonly OperationDescriptor[] = Object.free
     id: "GET_EPISODES",
     pathTemplate: "/content/v2/cms/seasons/{season_id}/episodes",
     callerParams: { season_id: contentId },
+    // The provider returns a whole season in one page, ~8 KiB per episode: a
+    // long-running season (One Piece's Wano arc, 208 episodes) is ~1.7 MiB.
+    // The tool compacts it before it reaches the client.
+    maxResponseBytes: 4 * 1024 * 1024,
   }),
   publicRead({
     id: "GET_EPISODE",
     pathTemplate: "/content/v2/cms/episodes/{episode_id}",
     callerParams: { episode_id: contentId },
+  }),
+  publicRead({
+    // Internal (no tool of its own): titles for the watchlist, which the
+    // provider returns as bare ids. Up to 50 comma-joined ids in one request.
+    id: "GET_OBJECTS",
+    pathTemplate: "/content/v2/cms/objects/{object_ids}",
+    callerParams: {
+      object_ids: {
+        required: true,
+        validate: (v) =>
+          typeof v === "string" &&
+          v.split(",").length <= 50 &&
+          v.split(",").every((id) => contentId.validate(id)),
+      },
+    },
   }),
   publicRead({
     id: "GET_SIMULCAST_SEASONS",
@@ -718,6 +759,28 @@ export const PRODUCTION_OPERATIONS: readonly OperationDescriptor[] = Object.free
     response: {
       successStatuses: [204],
       body: "EMPTY",
+      determinedNotFound: "watchlist-item-absent",
+    },
+  }),
+  // Favorite state of a watchlist item. The body states the INTENT
+  // (is_favorite true or false), so repeating the call after a failure can
+  // never undo it, unlike the site's heart toggle. The answer's shape is not
+  // needed and is never read: the status alone decides. A 404 means the item is
+  // not on the watchlist; the gateway adds it first when favoriting.
+  accountMutation({
+    id: "SET_FAVORITE",
+    method: "PATCH",
+    pathTemplate: "/content/v2/{accountId}/watchlist/{content_id}",
+    mutation: "ACCOUNT",
+    callerParams: { content_id: contentId, favorite: requiredBoolean },
+    body: {
+      contentType: "application/json",
+      fields: { is_favorite: "favorite" },
+      fixedFields: {},
+    },
+    response: {
+      successStatuses: [200, 204],
+      body: "IGNORED",
       determinedNotFound: "watchlist-item-absent",
     },
   }),

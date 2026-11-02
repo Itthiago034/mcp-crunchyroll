@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { WebSocketServer } from "ws";
+import { createServer } from "node:http";
+import type { Socket } from "node:net";
 import { BrowserLifecycleError } from "../src/transport/browser-lifecycle-error.js";
 import { createCdpConnector } from "../src/transport/cdp-client.js";
 import { startLocalServer } from "./_local-server.js";
@@ -28,6 +30,88 @@ async function withServer(
 }
 
 describe("BT2 minimal CDP client", () => {
+  test("valid JSON primitives and arrays cannot crash the frame parser", async () => {
+    await withServer((message, reply) => {
+      for (const invalid of [null, true, 1, "noise", []]) reply(invalid);
+      reply({ id: message.id, result: { ok: true } });
+    }, async (url) => {
+      const connection = await createCdpConnector(500).connect(url);
+      assert.deepEqual(await connection.send("Browser.getVersion"), { ok: true });
+      connection.close();
+    });
+  });
+
+  test("pending-command capacity rejects before dispatch and recovers after timeout", async () => {
+    let received = 0;
+    await withServer((message, reply) => {
+      received += 1;
+      if (received > 1) reply({ id: message.id, result: {} });
+    }, async (url) => {
+      const connection = await createCdpConnector(100, {
+        maxPendingCommands: 1, maxPayloadBytes: 1024,
+      }).connect(url);
+      const first = assert.rejects(connection.send("First"), BrowserLifecycleError);
+      await assert.rejects(connection.send("Excess"), (error: unknown) =>
+        error instanceof BrowserLifecycleError && error.detail === "cdp-capacity");
+      await first;
+      assert.equal(received, 1);
+      assert.deepEqual(await connection.send("Next"), {});
+      connection.close();
+    });
+  });
+
+  test("oversized CDP frames disconnect and reject pending work", async () => {
+    await withServer((message, reply) => {
+      reply({ id: message.id, result: { body: "x".repeat(512) } });
+    }, async (url) => {
+      const connection = await createCdpConnector(500, {
+        maxPendingCommands: 2, maxPayloadBytes: 128,
+      }).connect(url);
+      await assert.rejects(connection.send("Read"), BrowserLifecycleError);
+      await assert.rejects(connection.send("AfterClose"), BrowserLifecycleError);
+    });
+  });
+
+  test("explicit close settles locally without waiting for the peer", async () => {
+    await withServer(() => undefined, async (url) => {
+      const connection = await createCdpConnector(500).connect(url);
+      let closed = 0;
+      connection.onClose(() => { closed += 1; });
+      const pending = assert.rejects(connection.send("Pending"), BrowserLifecycleError);
+      connection.close();
+      assert.equal(closed, 1);
+      await pending;
+      await assert.rejects(connection.send("AfterClose"), BrowserLifecycleError);
+    });
+  });
+
+  test("a peer that never completes the WebSocket handshake hits the deadline", {
+    timeout: 2000,
+  }, async () => {
+    const sockets = new Set<Socket>();
+    const server = createServer();
+    server.on("connection", (socket) => {
+      sockets.add(socket);
+      socket.on("close", () => sockets.delete(socket));
+    });
+    server.on("upgrade", () => undefined);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const { port } = server.address() as { port: number };
+      await assert.rejects(createCdpConnector(50).connect(`ws://127.0.0.1:${port}`),
+        BrowserLifecycleError);
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  test("invalid limits fail before opening a socket", () => {
+    for (const timeout of [0, -1, Infinity, NaN, 0.5]) {
+      assert.throws(() => createCdpConnector(timeout), RangeError);
+    }
+  });
+
   test("a command response is correlated by id", async () => {
     await withServer(
       (message, reply) => reply({ id: message.id, result: { product: "TestBrowser/1.0" } }),

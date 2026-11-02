@@ -1619,11 +1619,11 @@ describe("BT3 closure — preserved scope proofs", () => {
     assert.equal(Object.isFrozen(PRODUCTION_OPERATIONS), true);
   });
 
-  test("the public tool contract is still exactly 21 unchanged names", () => {
+  test("the public tool contract is exactly 24 names (21 unchanged + crunchyroll_play + crunchyroll_player_control + crunchyroll_set_favorite)", () => {
     const baseline = JSON.parse(
       readFileSync(join(REPO_ROOT, "test/fixtures/baseline-tools.json"), "utf-8")
     ) as Array<{ name: string; inputSchema: { properties?: Record<string, unknown> } }>;
-    assert.equal(baseline.length, 21);
+    assert.equal(baseline.length, 24);
 
     const forbiddenCallerKeys = [
       "authorization",
@@ -2205,5 +2205,27 @@ describe("BT5-FIX1 — PUBLIC + BEARER binds to an authorized call", () => {
       () => authority.asReader().bind(hostile),
       (error: unknown) => (error as { name?: string }).name === "AuthContextError"
     );
+  });
+});
+
+describe("usable-record query for expiring browser bearers", () => {
+  test("READY with unexpired material is usable; the same record stops being usable at expiry", () => {
+    let now = T0;
+    const a = authority({ now: () => now });
+    assert.equal(a.hasUsableRecord(), false, "nothing established yet");
+    establish(a);
+    assert.equal(a.hasUsableRecord(), true);
+    now = T0 + ONE_HOUR;
+    assert.equal(a.hasUsableRecord(), false, "expired material is not usable");
+    assert.equal(a.diagnostics().availability, "READY", "expiry is still not a transition");
+  });
+
+  test("a fresh ESTABLISH over an expired record makes it usable again", () => {
+    let now = T0;
+    const a = authority({ now: () => now });
+    establish(a);
+    now = T0 + ONE_HOUR;
+    establish(a, { expiresAt: now + ONE_HOUR });
+    assert.equal(a.hasUsableRecord(), true);
   });
 });

@@ -98,21 +98,56 @@ describe("BT2 session manager — start and stop", () => {
     );
   });
 
-  test("stop terminates only the owned process, gracefully first", async () => {
-    const { manager, spawner, profileDir } = wireFakes();
+  test("stop closes Chromium through CDP without signals and preserves the profile", async () => {
+    const { manager, spawner, connector, profileDir } = wireFakes();
     await manager.start();
     await manager.stop();
     assert.equal(manager.state(), "STOPPED");
-    assert.equal(spawner.launches[0].terminationRequested, true);
-    assert.equal(spawner.launches[0].forceKilled, false, "graceful first");
+    assert.equal(connector.connections[0].calls.filter((call) => call.method === "Browser.close").length, 1);
+    assert.equal(spawner.launches[0].terminationRequested, false);
+    assert.equal(spawner.launches[0].forceKilled, false);
     assert.equal(statSync(profileDir).mode & 0o777, 0o700, "the profile survives stop");
   });
 
-  test("stop escalates to force kill only when the child ignores SIGTERM", async () => {
-    const { manager, spawner, clock } = wireFakes({ ignoreSigterm: true });
+  test("a close acknowledgement does not stop the manager before the child exits", async () => {
+    const { manager, spawner, clock } = wireFakes({ ignoreBrowserClose: true, cdpCommandTimeoutMs: 100 });
     await manager.start();
     const stopping = manager.stop();
+    await clock.advance(99);
+    assert.equal(manager.state(), "BROWSER_READY");
+    assert.equal(spawner.launches[0].terminationRequested, false);
+    await spawner.launches[0].emitExit(0, null);
+    await stopping;
+    assert.equal(manager.state(), "STOPPED");
+    assert.equal(spawner.launches[0].terminationRequested, false);
     await clock.drain();
+    assert.equal(spawner.launches[0].forceKilled, false);
+  });
+
+  for (const options of [{ ignoreBrowserClose: true }, { failBrowserClose: true }]) {
+    test(`stop falls back to SIGTERM after the CDP deadline (${Object.keys(options)[0]})`, async () => {
+      const { manager, spawner, clock } = wireFakes({ ...options, cdpCommandTimeoutMs: 100 });
+      await manager.start();
+      const stopping = manager.stop();
+      await clock.advance(99);
+      assert.equal(spawner.launches[0].terminationRequested, false);
+      await clock.advance(1);
+      await stopping;
+      assert.equal(spawner.launches[0].terminationRequested, true);
+      assert.equal(spawner.launches[0].forceKilled, false);
+    });
+  }
+
+  test("stop escalates to force kill only after CDP close and SIGTERM deadlines", async () => {
+    const { manager, spawner, clock } = wireFakes({ ignoreBrowserClose: true, ignoreSigterm: true, cdpCommandTimeoutMs: 100 });
+    await manager.start();
+    const stopping = manager.stop();
+    await clock.advance(100);
+    assert.equal(spawner.launches[0].terminationRequested, true);
+    assert.equal(spawner.launches[0].forceKilled, false);
+    await clock.advance(99);
+    assert.equal(spawner.launches[0].forceKilled, false);
+    await clock.advance(1);
     await stopping;
     assert.equal(spawner.launches[0].forceKilled, true);
   });
@@ -129,6 +164,9 @@ describe("BT2 session manager — start and stop", () => {
     // BT5 adds `openApiExecutionChannel`: one more CLOSED channel, not a
     // generic surface. It runs one frozen function with structured arguments
     // on the managed Crunchyroll page and exposes no method string.
+    // `reloadManagedPage` navigates the existing managed page back to the
+    // fixed composition-time URL so an expired bearer can be re-minted; the
+    // caller supplies no URL, method or argument.
     assert.deepEqual(Object.keys(manager).sort(), [
       "connectionGeneration",
       "ensureManagedPage",
@@ -136,7 +174,10 @@ describe("BT2 session manager — start and stop", () => {
       "onLifecycleEvent",
       "onStateChange",
       "openApiExecutionChannel",
+      "openPlaybackControlChannel",
       "openResponseInterception",
+      "openWatchPage",
+      "reloadManagedPage",
       "restart",
       "start",
       "state",
@@ -384,6 +425,80 @@ describe("BT2 session manager — managed page", () => {
     const create = createCalls(connector.connections[0])[0];
     assert.equal(create.params?.url, "http://127.0.0.1:9/ok");
     assert.equal(manager.ensureManagedPage.length, 0, "no caller-supplied URL parameter exists");
+  });
+
+  test("an existing page on the managed origin is reused instead of opening another tab", async () => {
+    const { manager, connector } = wireFakes({
+      initialPageUrl: "http://127.0.0.1:9/login",
+      watchPageBaseUrl: "http://127.0.0.1:9/watch/",
+    });
+    await manager.start();
+    connector.connections[0].targetInfos = [
+      { type: "page", targetId: "playing", url: "http://127.0.0.1:9/watch/GE1", attached: false },
+      { type: "page", targetId: "elsewhere", url: "http://other.invalid/", attached: false },
+      { type: "service_worker", targetId: "sw", url: "http://127.0.0.1:9/sw.js", attached: false },
+      { type: "page", targetId: "left-behind", url: "http://127.0.0.1:9/discover", attached: false },
+    ];
+    assert.equal(await manager.ensureManagedPage(), "left-behind");
+    assert.equal(createCalls(connector.connections[0]).length, 0, "no new tab was opened");
+  });
+
+  test("reloadManagedPage reloads the existing managed page and takes no URL", async () => {
+    const { manager, connector } = wireFakes({ initialPageUrl: "http://127.0.0.1:9/ok" });
+    await manager.start();
+    await manager.reloadManagedPage();
+    const reloadsOf = () => connector.connections[0].calls.filter((call) => call.method === "Page.reload");
+    assert.equal(reloadsOf().length, 0, "no page yet: nothing to reload and none is created");
+    assert.equal(manager.managedPageId(), undefined);
+
+    await manager.ensureManagedPage();
+    await manager.reloadManagedPage();
+    assert.equal(reloadsOf().length, 1);
+    assert.equal(
+      connector.connections[0].calls.filter((call) => call.method === "Page.navigate").length,
+      0,
+      "a reload never navigates to the login URL"
+    );
+    assert.equal(manager.reloadManagedPage.length, 0, "no caller-supplied URL parameter exists");
+  });
+
+  test("openWatchPage opens one focused tab at the fixed prefix and refuses anything but an id", async () => {
+    const { manager, connector } = wireFakes({ watchPageBaseUrl: "http://127.0.0.1:9/watch/" });
+    await manager.start();
+    for (const bad of ["", "g8dhv78zm", "../login", "G8DHV78ZM/x", "https://evil.example/", "A".repeat(33)]) {
+      await assert.rejects(manager.openWatchPage(bad), BrowserLifecycleError, bad);
+    }
+    await manager.openWatchPage("GRVN8MNQY");
+    const calls = connector.connections[0].calls;
+    const creates = calls.filter((call) => call.method === "Target.createTarget");
+    assert.equal(creates.length, 1);
+    assert.equal(creates[0].params?.url, "http://127.0.0.1:9/watch/GRVN8MNQY");
+    assert.equal(calls.filter((call) => call.method === "Target.activateTarget").length, 1);
+    assert.equal(manager.managedPageId(), undefined, "the playback tab is not the managed page");
+  });
+
+  test("openWatchPage reuses an existing playback tab instead of stacking tabs", async () => {
+    const { manager, connector } = wireFakes({ watchPageBaseUrl: "http://127.0.0.1:9/watch/" });
+    await manager.start();
+    connector.connections[0].targetInfos = [
+      { type: "page", targetId: "home", url: "http://127.0.0.1:9/discover", attached: false },
+      { type: "page", targetId: "playing", url: "http://127.0.0.1:9/watch/GOLD/slug", attached: false },
+    ];
+    await manager.openWatchPage("GNEW");
+    const calls = connector.connections[0].calls;
+    assert.equal(calls.filter((call) => call.method === "Target.createTarget").length, 0);
+    const navigation = calls.find((call) => call.method === "Page.navigate");
+    assert.equal(navigation?.params?.url, "http://127.0.0.1:9/watch/GNEW");
+    assert.deepEqual(
+      calls.filter((call) => call.method === "Target.activateTarget").map((call) => call.params?.targetId),
+      ["playing"]
+    );
+  });
+
+  test("openWatchPage is unavailable without a configured prefix", async () => {
+    const { manager } = wireFakes();
+    await manager.start();
+    await assert.rejects(manager.openWatchPage("GRVN8MNQY"), BrowserLifecycleError);
   });
 
   test("a destroyed page is AUTOMATICALLY recreated exactly once", async () => {

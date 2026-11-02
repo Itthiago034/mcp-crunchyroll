@@ -11,17 +11,16 @@ source: https://github.com/Itthiago034/mcp-crunchyroll
 
 install:
   bootstrap:
-    - npm install --production
+    - npm ci
+    - npm run build
   git:
     url: https://github.com/Itthiago034/mcp-crunchyroll
     ref: main
 
 transport:
-  command: npx
+  command: node
   args:
-    - -y
-    - tsx
-    - src/index.ts
+    - dist/index.js
   env: {}
 
 auth: none
@@ -35,4 +34,6 @@ notes:
   - "Human verification (CAPTCHA and similar) is always solved by the user in the browser, never automated or bypassed. If it does not complete in the managed window, the login ends at LOGIN_REQUIRED and the user can establish the session themselves in that same dedicated profile — see Supported Human Onboarding in the README."
   - "Content IDs are available in search/browse results or in Crunchyroll URLs (e.g. https://www.crunchyroll.com/series/G6W4Q7MKY)."
   - "This server uses the Crunchyroll web API, so its endpoints may change over time."
-  - "Requires Node.js >= 18. The bootstrap installs dependencies with npm; tsx runs the TypeScript source directly via npx. For production use, run `npm run build` and point the command at dist/index.js."
+  - "Requires Node.js >= 18. The bootstrap installs dependencies and builds dist/index.js, which the transport runs with node (no npx or tsx at runtime)."
+  - "Hermes starts stdio servers with a filtered environment that drops DISPLAY, WAYLAND_DISPLAY and DBUS_SESSION_BUS_ADDRESS. On Linux the server recovers the user's own desktop session from user-owned sockets so crunchyroll_login can open its window; no env entries are needed."
+  - "Player control is native: crunchyroll_player_control {action: play|pause|fullscreen|exit_fullscreen|status} acts on the playback tab opened by crunchyroll_play and reports executed/verified/outcome. Never control the browser through a terminal, a raw CDP WebSocket or the debugging port."

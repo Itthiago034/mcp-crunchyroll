@@ -136,6 +136,28 @@ describe("BT4 browser auth — the observed endpoint is pinned", () => {
     await pending;
   });
 
+  test("afterArmed runs only once the channel is listening, and its failure is ignored", async () => {
+    const h = harness();
+    const order: string[] = [];
+    const ports: BrowserAuthPorts = {
+      ...h.ports,
+      openInterception: async (pattern: string) => {
+        order.push("armed");
+        return h.ports.openInterception(pattern);
+      },
+      afterArmed: async () => {
+        order.push("afterArmed");
+        throw new Error("reload failed");
+      },
+    };
+    const pending = createBrowserAuthObserver(ports).observeNextAuthMaterial();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(order, ["armed", "afterArmed"]);
+    h.channel.bodies.set("req-1", { body: tokenPayload(), base64Encoded: false });
+    h.channel.emit({});
+    assert.equal((await pending).kind, "OBSERVED");
+  });
+
   const rejectedUrls: Array<[string, string]> = [
     ["a different host", "https://evil.example.com/auth/v1/token"],
     ["a lookalike host", "https://www.crunchyroll.com.evil.example/auth/v1/token"],

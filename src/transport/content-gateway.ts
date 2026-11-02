@@ -41,6 +41,7 @@ const DEFAULT_PAGE_SIZE = 20;
 const DEFAULT_BROWSE_START = 0;
 /** The watchlist has always been newest-first unless the caller says otherwise. */
 const DEFAULT_WATCHLIST_ORDER = "desc";
+const GET_OBJECTS = "GET_OBJECTS" as unknown as OperationId;
 
 /** Only defined values are forwarded: an absent option must stay absent. */
 function withDefined(params: Record<string, unknown>): CallerParams {
@@ -77,6 +78,7 @@ export const CONTENT_TOOL_OPERATIONS: ReadonlyMap<string, OperationId> = new Map
       ["crunchyroll_continue_watching", "GET_CONTINUE_WATCHING"],
       ["crunchyroll_get_playheads", "GET_PLAYHEADS"],
       ["crunchyroll_update_playhead", "UPDATE_PLAYHEAD"],
+      ["crunchyroll_set_favorite", "SET_FAVORITE"],
       ["crunchyroll_get_recommendations", "GET_RECOMMENDATIONS"],
       ["crunchyroll_get_similar", "GET_SIMILAR"],
       ["crunchyroll_get_subscription", "GET_SUBSCRIPTION"],
@@ -97,6 +99,41 @@ export function createContentGateway(
   transport: CrunchyrollTransport,
   registry: OperationRegistry
 ): ContentGateway {
+  /**
+   * Add `title` and `type` to items that carry only an `id`, with ONE extra
+   * read. Best effort: if that read fails the items are returned as they were,
+   * because the watchlist itself was read successfully.
+   */
+  const withTitles = async (items: readonly unknown[]): Promise<unknown[]> => {
+    const ids = items
+      .map((item) => (item as { id?: unknown }).id)
+      .filter((id): id is string => typeof id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(id));
+    if (ids.length === 0 || !registry.has(GET_OBJECTS)) return [...items];
+    let names: Map<string, { title?: unknown; type?: unknown }>;
+    try {
+      const json = (await transport.execute(GET_OBJECTS, { object_ids: ids.join(",") })).json as {
+        data?: unknown;
+      };
+      const objects = Array.isArray(json?.data) ? json.data : [];
+      names = new Map(
+        objects
+          .filter((o): o is Record<string, unknown> => typeof o === "object" && o !== null)
+          .map((o) => [String(o.id), { title: o.title, type: o.type }])
+      );
+    } catch {
+      return [...items];
+    }
+    return items.map((item) => {
+      const named = names.get(String((item as { id?: unknown }).id));
+      if (!named || typeof item !== "object" || item === null) return item;
+      return {
+        ...(item as Record<string, unknown>),
+        ...(typeof named.title === "string" ? { title: named.title } : {}),
+        ...(typeof named.type === "string" ? { type: named.type } : {}),
+      };
+    });
+  };
+
   return {
     isContentTool(name: string): boolean {
       return CONTENT_TOOL_OPERATIONS.has(name);
@@ -137,7 +174,10 @@ export function createContentGateway(
             withDefined({
               q: args.query,
               n: args.n ?? DEFAULT_PAGE_SIZE,
-              type: args.type,
+              // Only series and movies are ever surfaced (parseSearch); asking
+              // for nothing else keeps big franchises under the response cap
+              // and drops the top-results bucket that duplicated them.
+              type: args.type === undefined || args.type === "" ? "series,movie_listing" : args.type,
             })
           );
           return parseSearch(result.json);
@@ -153,10 +193,26 @@ export function createContentGateway(
             (await transport.execute(operation, withDefined({ series_id: args.series_id }))).json
           );
 
-        case "GET_EPISODES":
-          return parseEpisodes(
+        case "GET_EPISODES": {
+          const wanted = args.episode_number;
+          if (
+            wanted !== undefined &&
+            (typeof wanted !== "number" || !Number.isInteger(wanted) || wanted < 0 || wanted > 100_000)
+          ) {
+            throw new TransportError("INVALID_ARGUMENTS", "episode_number");
+          }
+          const list = parseEpisodes(
             (await transport.execute(operation, withDefined({ season_id: args.season_id }))).json
           );
+          if (wanted === undefined) return list;
+          // A local filter over the season the provider returned: long seasons
+          // (One Piece arcs run past 200 episodes) do not fit a client's
+          // context, and an agent playing one episode needs only that one.
+          const episodes = list.episodes.filter(
+            (episode) => (episode as { episode_number?: unknown }).episode_number === wanted
+          );
+          return { count: episodes.length, season_episode_count: list.count, episodes };
+        }
 
         case "GET_EPISODE":
           return parseEpisode(
@@ -199,14 +255,21 @@ export function createContentGateway(
           );
 
         case "GET_WATCHLIST": {
+          const n = args.n ?? DEFAULT_PAGE_SIZE;
           const result = await transport.execute(
             operation,
             withDefined({
-              n: args.n ?? DEFAULT_PAGE_SIZE,
+              n,
               order: args.order ?? DEFAULT_WATCHLIST_ORDER,
             })
           );
-          return parseWatchlist(result.json);
+          const watchlist = parseWatchlist(result.json);
+          // The provider ignores `n` and answers bare ids (126 of them for a
+          // real account). Honour `n` here and name what the ids are, so a
+          // client does not have to look up every series one by one.
+          const limit = typeof n === "number" && n > 0 ? Math.min(n, 50) : DEFAULT_PAGE_SIZE;
+          const items = watchlist.items.slice(0, limit);
+          return { count: items.length, items: await withTitles(items) };
         }
 
         case "GET_HISTORY":
@@ -247,6 +310,52 @@ export function createContentGateway(
             retry_performed: false,
             verify_with: "crunchyroll_get_watchlist",
           };
+        }
+
+        case "SET_FAVORITE": {
+          const favorite = args.favorite;
+          const contentIdArg = args.content_id;
+          if (typeof favorite !== "boolean") throw new TransportError("INVALID_ARGUMENTS", "favorite");
+          const call = { content_id: contentIdArg, favorite };
+          const result = (fields: Record<string, unknown>) => ({
+            tool: "crunchyroll_set_favorite",
+            operation: "SET_FAVORITE",
+            mutation: true,
+            mutation_class: "ACCOUNT",
+            content_id: contentIdArg,
+            favorite,
+            retry_performed: false,
+            verify_with: "crunchyroll_get_watchlist",
+            ...fields,
+          });
+          try {
+            await transport.execute(operation, call);
+            return result({ added_to_watchlist: false, outcome: "APPLIED", outcome_certainty: "CERTAIN" });
+          } catch (error) {
+            const absent =
+              error instanceof TransportError &&
+              error.kind === "API_NOT_FOUND" &&
+              error.detail === "watchlist-item-absent";
+            if (!absent) throw error;
+          }
+          // Not on the watchlist. Unfavoriting it is already true; favoriting
+          // it means adding it first, as the site's heart does.
+          if (!favorite) {
+            return result({
+              added_to_watchlist: false,
+              outcome: "NOOP",
+              outcome_certainty: "CERTAIN",
+              reason: "NOT_ON_WATCHLIST",
+            });
+          }
+          try {
+            await transport.execute("ADD_TO_WATCHLIST" as unknown as OperationId, { content_id: contentIdArg });
+          } catch (error) {
+            // Added concurrently by someone else: the precondition holds anyway.
+            if (!(error instanceof TransportError && error.kind === "API_CONFLICT")) throw error;
+          }
+          await transport.execute(operation, call);
+          return result({ added_to_watchlist: true, outcome: "APPLIED", outcome_certainty: "CERTAIN" });
         }
 
         case "UPDATE_PLAYHEAD": {
