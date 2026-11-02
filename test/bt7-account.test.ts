@@ -172,11 +172,14 @@ describe("BT7 — the production table after the account-read migration", () => 
         "ADD_TO_WATCHLIST",
         "REMOVE_FROM_WATCHLIST",
         "UPDATE_PLAYHEAD",
+        "SET_FAVORITE",
         // Internal read with no tool of its own: names the watchlist's bare ids.
         "GET_OBJECTS",
+        // Internal read behind SET_FAVORITE: one exact watchlist entry.
+        "GET_WATCHLIST_ENTRY",
       ].sort()
     );
-    assert.equal(PRODUCTION_OPERATIONS.length, 17);
+    assert.equal(PRODUCTION_OPERATIONS.length, 19);
   });
 
   test("both deferred operations are absent — D-1c and F-1, neither forgotten", () => {
@@ -839,7 +842,7 @@ describe("BT7 — the public contract is frozen", () => {
     const baseline = JSON.parse(
       readFileSync(join(REPO_ROOT, "test/fixtures/baseline-tools.json"), "utf-8")
     ) as Array<{ name: string; inputSchema: { properties?: Record<string, unknown> } }>;
-    assert.equal(baseline.length, 23);
+    assert.equal(baseline.length, 24);
 
     const expected: Record<string, string[]> = {
       crunchyroll_get_similar: ["series_id", "n"],

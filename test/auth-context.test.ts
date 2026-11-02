@@ -1623,7 +1623,7 @@ describe("BT3 closure — preserved scope proofs", () => {
     const baseline = JSON.parse(
       readFileSync(join(REPO_ROOT, "test/fixtures/baseline-tools.json"), "utf-8")
     ) as Array<{ name: string; inputSchema: { properties?: Record<string, unknown> } }>;
-    assert.equal(baseline.length, 23);
+    assert.equal(baseline.length, 24);
 
     const forbiddenCallerKeys = [
       "authorization",

@@ -164,7 +164,7 @@ describe("BT5 cutover — migrated vs unmigrated, decided in one place", () => {
     for (const tool of browserTools) {
       assert.equal(CONTENT_TOOL_OPERATIONS.has(tool), false, `${tool} must not reach the API transport`);
     }
-    assert.equal(contentTools.length, 18);
+    assert.equal(contentTools.length, 19);
     for (const tool of contentTools) {
       assert.equal(CONTENT_TOOL_OPERATIONS.has(tool), true, `${tool} is unmapped`);
     }
