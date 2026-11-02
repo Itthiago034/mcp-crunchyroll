@@ -197,9 +197,16 @@ describe("MCP server harness", () => {
             "browser_connected",
             "browser_running",
             "logged_in",
+            "next_action",
             "player_ready",
             "profile_ready",
+            "session",
           ]);
+          // Predictable for an agent: one closed instruction plus the keeper's view.
+          assert.equal(status.next_action, "CALL_CRUNCHYROLL_LOGIN");
+          const session = status.session as Record<string, unknown>;
+          assert.equal(session.state, "NEVER_ESTABLISHED");
+          assert.equal(session.expires_in_s, null);
           // Removed by §10: unsourceable under browser login, or internal identity.
           for (const removed of ["email", "account_id", "token_expires_at", "profile"]) {
             assert.equal(removed in status, false, `${removed} must be gone from status`);

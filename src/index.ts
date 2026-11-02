@@ -43,6 +43,7 @@ import {
   type DispatchProbe,
 } from "./transport/session-recovery.js";
 import { createSessionEligibilityStore } from "./transport/session-eligibility.js";
+import { createSessionKeeper, type SessionKeeperStatus } from "./transport/session-keeper.js";
 
 // B6-core: operation-scoped secret redaction (internal, not an MCP surface).
 import { withRedactionScope, safeErrorWithCleanStack, redactSecrets, sanitizeToolResult } from "./redact.js";
@@ -229,6 +230,51 @@ const sessionRecovery = createSessionRecovery({
 });
 
 /**
+ * Keeps the session warm: renews the bearer in the background as soon as it
+ * runs out, through the same single-flight recovery, while tools are in use.
+ * CRUNCHYROLL_KEEP_WARM_MINUTES sets the idle window (default 60; 0 disables).
+ */
+const sessionKeeper = createSessionKeeper(
+  {
+    classify: () => sessionRecovery.classify(),
+    usableUntil: () => authAuthority.usableUntil(),
+    ensureSession: () => sessionRecovery.ensureSession(),
+    now: () => Date.now(),
+    schedule: (callback, ms) => {
+      const timer = setTimeout(callback, ms);
+      // The keeper must never hold the process open by itself.
+      timer.unref?.();
+      return { cancel: () => clearTimeout(timer) };
+    },
+  },
+  { idleAfterMs: keepWarmIdleMs(process.env.CRUNCHYROLL_KEEP_WARM_MINUTES) },
+);
+
+function keepWarmIdleMs(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === "") return 60 * 60_000;
+  const minutes = Number(raw);
+  return Number.isFinite(minutes) && minutes >= 0 ? Math.min(minutes, 24 * 60) * 60_000 : 60 * 60_000;
+}
+
+type NextAction = "NONE" | "CALL_CRUNCHYROLL_LOGIN" | "WAIT_FOR_LOGOUT" | "RETRY_LATER";
+
+/**
+ * One closed instruction for the agent, derived from the session and the
+ * keeper. It answers "can I just call a content tool now?" without guessing.
+ */
+async function nextAction(keeper: SessionKeeperStatus): Promise<NextAction> {
+  const session = sessionRecovery.classify();
+  if (session === "LOGGING_OUT") return "WAIT_FOR_LOGOUT";
+  if (session === "USABLE") return "NONE";
+  if (session === "LOGGED_OUT" || session === "REVOKED" || keeper.keep_warm === "NEEDS_LOGIN") {
+    return "CALL_CRUNCHYROLL_LOGIN";
+  }
+  if (session === "NEVER_ESTABLISHED" && !(await sessionEligibility.isEligible())) return "CALL_CRUNCHYROLL_LOGIN";
+  // EXPIRED, or a saved session a content call renews by itself.
+  return keeper.keep_warm === "RETRYING" ? "RETRY_LATER" : "NONE";
+}
+
+/**
  * Carries the per-call dispatch probe to the transport's channel opener. A
  * provider channel is opened inside the authorized execution, immediately
  * before the request, so "no channel opened" proves "nothing dispatched".
@@ -240,6 +286,7 @@ async function callContentTool(
   args: Record<string, unknown>,
   signal?: AbortSignal,
 ): Promise<unknown> {
+  sessionKeeper.touch();
   return callWithSession(
     sessionRecovery,
     (probe) => dispatchScope.run(probe, () => contentGateway.callTool(name, args)),
@@ -804,6 +851,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
             );
           }
           const outcome = await authOrchestrator.login();
+          // A fresh login starts the keep-warm cycle.
+          if (outcome.accepted) sessionKeeper.touch();
           return jsonResult({ accepted: outcome.accepted, ...outcome.readiness });
       }
 
@@ -835,6 +884,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
         const session = managedBrowser();
         await session.start();
         await session.openWatchPage(episodeId);
+        // Watching counts as activity: content calls after the episode stay fast.
+        sessionKeeper.touch();
         const opened = { opened: true, episode_id: episodeId, url: `${CRUNCHYROLL_WATCH_URL_PREFIX}${episodeId}` };
         // Without options the result is exactly the original contract.
         const steps: Array<["autoplay" | "fullscreen", PlayerAction]> = [];
@@ -894,7 +945,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
         // Strictly read-only (§10): it never logs in, refreshes, mints,
         // commits, invalidates, mutates storage, navigates or reopens a
         // browser. It reports current known readiness and nothing else.
-        const status = authOrchestrator.readiness();
+        // The keeper's view is a read of timers already planned; reporting it
+        // starts nothing.
+        const keeper = sessionKeeper.status();
+        const status = {
+          ...authOrchestrator.readiness(),
+          session: { state: sessionRecovery.classify(), ...keeper },
+          next_action: await nextAction(keeper),
+        };
         return jsonResult(status);
       }
 
@@ -1024,6 +1082,10 @@ async function main() {
     }
   };
   await server.connect(transport);
+  // Optional warm start: re-establish a saved session right away instead of on
+  // the first tool call. Off by default, because it opens the browser at
+  // server start even if no Crunchyroll tool is ever used.
+  if (process.env.CRUNCHYROLL_WARM_START === "1") sessionKeeper.start();
   console.error("Crunchyroll MCP server running on stdio");
 }
 
