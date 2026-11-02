@@ -54,7 +54,7 @@ const SRC = join(REPO_ROOT, "src");
 const ACCOUNT_SENTINEL = "SYNTHETIC-ACCOUNT-ID-BT8";
 const BEARER_SENTINEL = "SYNTHETIC-BEARER-BT8-MUST-NOT-LEAK";
 
-const BT8_MUTATIONS = ["ADD_TO_WATCHLIST", "REMOVE_FROM_WATCHLIST", "UPDATE_PLAYHEAD"];
+const BT8_MUTATIONS = ["ADD_TO_WATCHLIST", "REMOVE_FROM_WATCHLIST", "UPDATE_PLAYHEAD", "SET_FAVORITE"];
 
 // ── Synthetic descriptors ───────────────────────────────────────────────────
 
@@ -223,10 +223,11 @@ describe("BT8.1 — mutation and method are closed at construction", () => {
   });
 
   test("D: INV-M3 — a method outside the closed set is refused", () => {
-    for (const bogus of ["PUT", "PATCH", "HEAD", "OPTIONS", "get", "post", "", null, undefined]) {
+    for (const bogus of ["PUT", "HEAD", "OPTIONS", "get", "post", "patch", "", null, undefined]) {
       refuses(write({ method: bogus }), `method ${JSON.stringify(bogus)} must be refused`);
     }
-    assert.deepEqual([...HTTP_METHODS], ["GET", "POST", "DELETE"]);
+    // PATCH joined the closed set for SET_FAVORITE's partial update.
+    assert.deepEqual([...HTTP_METHODS], ["GET", "POST", "PATCH", "DELETE"]);
   });
 
   test("INV-M2 — method and mutation may never disagree", () => {
@@ -370,12 +371,16 @@ describe("BT8.4 — the capability is used only by the three migrated mutations"
     const update = PRODUCTION_OPERATIONS.find((d) => String(d.id) === "UPDATE_PLAYHEAD")!;
     assert.equal(update.mutation, "PROGRESS");
     assert.equal(update.method, "POST");
+    const favorite = PRODUCTION_OPERATIONS.find((d) => String(d.id) === "SET_FAVORITE")!;
+    assert.equal(favorite.mutation, "ACCOUNT");
+    assert.equal(favorite.method, "PATCH");
+    assert.equal(favorite.response?.body, "IGNORED");
   });
 
-  test("all three BT8 mutations are registered", () => {
+  test("all BT8 mutations and SET_FAVORITE are registered", () => {
     const ids = PRODUCTION_OPERATIONS.map((d) => String(d.id));
     for (const id of BT8_MUTATIONS) assert.equal(ids.includes(id), true, `${id} must be registered`);
-    assert.equal(PRODUCTION_OPERATIONS.length, 17, "16 tool operations + internal GET_OBJECTS");
+    assert.equal(PRODUCTION_OPERATIONS.length, 18, "17 tool operations + internal GET_OBJECTS");
   });
 
   test("UPDATE reaches the same dispatcher/gateway mutation boundary", async () => {

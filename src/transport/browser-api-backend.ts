@@ -384,7 +384,10 @@ export function createBrowserApiBackend(ports: BrowserApiBackendPorts): Transpor
           }
 
           let json: unknown;
-          if (contract?.body === "EMPTY") {
+          if (contract?.body === "IGNORED") {
+            // Decided by status alone; nothing of the body is read.
+            json = undefined;
+          } else if (contract?.body === "EMPTY") {
             // A write may legitimately answer with no document and no content
             // type. Demanding JSON here would report a successful change as an
             // unreadable response — so what is checked instead is that nothing

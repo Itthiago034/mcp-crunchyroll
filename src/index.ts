@@ -547,6 +547,27 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
 
+    {
+      name: "crunchyroll_set_favorite",
+      description:
+        "Set whether a series or movie is a favorite (the heart). Idempotent: pass the state you want, favorite true or false; repeating the call never undoes it. Favoriting an item that is not on the watchlist adds it first (added_to_watchlist: true). Unfavoriting an item not on the watchlist is a NOOP.",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+      inputSchema: {
+        type: "object",
+        properties: {
+          content_id: { type: "string", description: "Series or movie ID" },
+          favorite: { type: "boolean", description: "true to favorite, false to unfavorite" },
+        },
+        required: ["content_id", "favorite"],
+        additionalProperties: false,
+      },
+    },
+
     // History & Progress
     {
       name: "crunchyroll_get_history",

@@ -81,9 +81,9 @@ const render = (operation: string, params: Record<string, unknown>): string =>
 // ── F-1 ─────────────────────────────────────────────────────────────────────
 
 describe("F-1 — GET_CONTINUE_WATCHING is deferred, not migrated", () => {
-  test("the production table holds seventeen operations and not this one", () => {
+  test("the production table holds eighteen operations and not this one", () => {
     const ids = PRODUCTION_OPERATIONS.map((d) => d.id as unknown as string).sort();
-    assert.equal(ids.length, 17, "PRODUCTION_OPERATIONS must be exactly 17 (16 + internal GET_OBJECTS)");
+    assert.equal(ids.length, 18, "PRODUCTION_OPERATIONS must be exactly 18 (17 + internal GET_OBJECTS)");
     assert.equal(ids.includes("GET_CONTINUE_WATCHING"), false);
     assert.deepEqual(ids, [
       "ADD_TO_WATCHLIST",
@@ -102,6 +102,7 @@ describe("F-1 — GET_CONTINUE_WATCHING is deferred, not migrated", () => {
       "GET_WATCHLIST",
       "REMOVE_FROM_WATCHLIST",
       "SEARCH",
+      "SET_FAVORITE",
       "UPDATE_PLAYHEAD",
     ]);
   });
@@ -421,10 +422,10 @@ describe("F-1/F-2 — the rest of BT7 is untouched", () => {
     );
   });
 
-  test("the public surface is twenty-three tools", () => {
+  test("the public surface is twenty-four tools", () => {
     const index = readFileSync(join(SRC, "index.ts"), "utf-8");
     const names = [...index.matchAll(/name: "(crunchyroll_[a-z_]+)"/g)].map((m) => m[1]);
-    assert.equal(new Set(names).size, 23);
+    assert.equal(new Set(names).size, 24);
     assert.ok(names.includes("crunchyroll_continue_watching"), "the deferred tool stays published");
     assert.ok(names.includes("crunchyroll_get_playheads"));
   });

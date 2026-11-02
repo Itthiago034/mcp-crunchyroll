@@ -8,7 +8,7 @@ import type {
   ParamSpec, ResolvedCall, ResponseContract,
 } from "./types.js";
 import {
-  contentId, contentIdList, HTTP_METHODS, MUTATION_CLASSES, optionalBoolean, optionalOneOf,
+  contentId, contentIdList, HTTP_METHODS, MUTATION_CLASSES, optionalBoolean, optionalOneOf, requiredBoolean,
   requiredIntegerInRange, searchText, slugList,
 } from "./types.js";
 import { TransportError } from "./transport-error.js";
@@ -173,7 +173,9 @@ export function createOperationRegistry(
     // INV-M5. A body belongs to a POST and to nothing else. The legacy DELETE
     // sent none, a GET body is meaningless here, and allowing one anyway would
     // widen the wire for no operation that exists.
-    if (d.body !== undefined && (d.method !== "POST" || d.mutation === false)) {
+    // PATCH carries the partial update it names (SET_FAVORITE), so it may
+    // carry a body too; GET and DELETE still may not.
+    if (d.body !== undefined && ((d.method !== "POST" && d.method !== "PATCH") || d.mutation === false)) {
       throw new TransportError(
         "INVALID_ARGUMENTS",
         `operation ${String(d.id)} declares a body on a non-mutating or non-POST method`
@@ -189,7 +191,7 @@ export function createOperationRegistry(
         contract === undefined ||
         !Array.isArray(contract.successStatuses) ||
         contract.successStatuses.length === 0 ||
-        (contract.body !== "JSON" && contract.body !== "EMPTY")
+        (contract.body !== "JSON" && contract.body !== "EMPTY" && contract.body !== "IGNORED")
       ) {
         throw new TransportError(
           "INVALID_ARGUMENTS",
@@ -548,7 +550,7 @@ function accountRead(spec: {
  */
 export function accountMutation(spec: {
   id: string;
-  method: "POST" | "DELETE";
+  method: "POST" | "PATCH" | "DELETE";
   pathTemplate: string;
   mutation: "ACCOUNT" | "PROGRESS";
   callerParams: Record<string, ParamSpec>;
@@ -757,6 +759,28 @@ export const PRODUCTION_OPERATIONS: readonly OperationDescriptor[] = Object.free
     response: {
       successStatuses: [204],
       body: "EMPTY",
+      determinedNotFound: "watchlist-item-absent",
+    },
+  }),
+  // Favorite state of a watchlist item. The body states the INTENT
+  // (is_favorite true or false), so repeating the call after a failure can
+  // never undo it, unlike the site's heart toggle. The answer's shape is not
+  // needed and is never read: the status alone decides. A 404 means the item is
+  // not on the watchlist; the gateway adds it first when favoriting.
+  accountMutation({
+    id: "SET_FAVORITE",
+    method: "PATCH",
+    pathTemplate: "/content/v2/{accountId}/watchlist/{content_id}",
+    mutation: "ACCOUNT",
+    callerParams: { content_id: contentId, favorite: requiredBoolean },
+    body: {
+      contentType: "application/json",
+      fields: { is_favorite: "favorite" },
+      fixedFields: {},
+    },
+    response: {
+      successStatuses: [200, 204],
+      body: "IGNORED",
       determinedNotFound: "watchlist-item-absent",
     },
   }),

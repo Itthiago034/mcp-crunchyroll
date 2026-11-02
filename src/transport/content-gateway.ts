@@ -78,6 +78,7 @@ export const CONTENT_TOOL_OPERATIONS: ReadonlyMap<string, OperationId> = new Map
       ["crunchyroll_continue_watching", "GET_CONTINUE_WATCHING"],
       ["crunchyroll_get_playheads", "GET_PLAYHEADS"],
       ["crunchyroll_update_playhead", "UPDATE_PLAYHEAD"],
+      ["crunchyroll_set_favorite", "SET_FAVORITE"],
       ["crunchyroll_get_recommendations", "GET_RECOMMENDATIONS"],
       ["crunchyroll_get_similar", "GET_SIMILAR"],
       ["crunchyroll_get_subscription", "GET_SUBSCRIPTION"],
@@ -309,6 +310,52 @@ export function createContentGateway(
             retry_performed: false,
             verify_with: "crunchyroll_get_watchlist",
           };
+        }
+
+        case "SET_FAVORITE": {
+          const favorite = args.favorite;
+          const contentIdArg = args.content_id;
+          if (typeof favorite !== "boolean") throw new TransportError("INVALID_ARGUMENTS", "favorite");
+          const call = { content_id: contentIdArg, favorite };
+          const result = (fields: Record<string, unknown>) => ({
+            tool: "crunchyroll_set_favorite",
+            operation: "SET_FAVORITE",
+            mutation: true,
+            mutation_class: "ACCOUNT",
+            content_id: contentIdArg,
+            favorite,
+            retry_performed: false,
+            verify_with: "crunchyroll_get_watchlist",
+            ...fields,
+          });
+          try {
+            await transport.execute(operation, call);
+            return result({ added_to_watchlist: false, outcome: "APPLIED", outcome_certainty: "CERTAIN" });
+          } catch (error) {
+            const absent =
+              error instanceof TransportError &&
+              error.kind === "API_NOT_FOUND" &&
+              error.detail === "watchlist-item-absent";
+            if (!absent) throw error;
+          }
+          // Not on the watchlist. Unfavoriting it is already true; favoriting
+          // it means adding it first, as the site's heart does.
+          if (!favorite) {
+            return result({
+              added_to_watchlist: false,
+              outcome: "NOOP",
+              outcome_certainty: "CERTAIN",
+              reason: "NOT_ON_WATCHLIST",
+            });
+          }
+          try {
+            await transport.execute("ADD_TO_WATCHLIST" as unknown as OperationId, { content_id: contentIdArg });
+          } catch (error) {
+            // Added concurrently by someone else: the precondition holds anyway.
+            if (!(error instanceof TransportError && error.kind === "API_CONFLICT")) throw error;
+          }
+          await transport.execute(operation, call);
+          return result({ added_to_watchlist: true, outcome: "APPLIED", outcome_certainty: "CERTAIN" });
         }
 
         case "UPDATE_PLAYHEAD": {

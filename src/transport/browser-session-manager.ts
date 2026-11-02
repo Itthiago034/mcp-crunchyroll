@@ -1499,7 +1499,7 @@ export function createBrowserSessionManager(
           // ASSEMBLED, and anything assembled is worth checking twice, on both
           // sides of the boundary that carries it. The registry already refuses
           // a body on anything but a POST; this is the page's own refusal.
-          if (input.body !== undefined && input.method !== "POST") {
+          if (input.body !== undefined && input.method !== "POST" && input.method !== "PATCH") {
             throw new BrowserLifecycleError("BROWSER_UNAVAILABLE", "body-method");
           }
           if (

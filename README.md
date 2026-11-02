@@ -177,6 +177,7 @@ The bearer observed from the browser carries no refresh token and expires within
 | `crunchyroll_add_to_watchlist` | Add a content ID to the authenticated account's watchlist | `204 No Content` |
 | `crunchyroll_remove_from_watchlist` | Remove a content ID from the authenticated account's watchlist | `204 No Content` |
 | `crunchyroll_update_playhead` | Submit a playhead for a content ID | `204 No Content` |
+| `crunchyroll_set_favorite` | `{"content_id", "favorite": true \| false}`: set the favorite (heart) state. Idempotent, never a toggle; favoriting an item not on the watchlist adds it first (`added_to_watchlist: true`), unfavoriting one that is absent is a `NOOP` | `200` / `204` (status only; the body is not read). Not yet confirmed against the live API |
 
 Mutation identity is derived from the authenticated browser context. The caller supplies only the functional inputs in each closed tool schema and cannot select `accountId`.
 
@@ -186,12 +187,16 @@ A provider response such as bad request, conflict, or operation-specific not fou
 
 | Tool | Purpose |
 |---|---|
-| `crunchyroll_play` | Open an episode's watch page (`https://www.crunchyroll.com/watch/<episode_id>`) in a focused tab of the signed-in managed browser, reusing the playback tab if one is open. Optional `autoplay` / `fullscreen` booleans run the native player controls once the player loads |
-| `crunchyroll_player_control` | `{"action": "play" \| "pause" \| "fullscreen" \| "exit_fullscreen" \| "status"}` on the playback tab; reports `executed`, `verified`, `outcome` and the observed `state` |
+| `crunchyroll_play` | Open an episode's watch page (`https://www.crunchyroll.com/watch/<episode_id>`) in a focused tab of the signed-in managed browser, reusing the playback tab if one is open. Optional `autoplay` / `fullscreen` booleans run the native player controls once the player loads. With `autoplay`, `playing_verified` is true only when `current_time` advanced |
+| `crunchyroll_player_control` | `{"action": "play" \| "pause" \| "fullscreen" \| "exit_fullscreen" \| "status"}` on the playback tab; reports `executed`, `verified`, `outcome` and the observed `state` (including `player_error`). A confirmed `play` also reports `progress`: `ADVANCING` when `current_time` was seen moving, `STALLED` otherwise |
 
 `episode_id` must be a plain uppercase Crunchyroll id from `crunchyroll_get_episodes`; nothing else reaches the URL. Playback uses the browser's own signed-in session and makes no provider API request from the server.
 
 Player control runs one frozen page function with a closed command set, only in the playback tab's page and player-frame contexts on `www.crunchyroll.com` / `static.crunchyroll.com`. It exposes no script, CDP or port to the caller, never reads cookies or tokens, and reports success only when a later observation confirms the requested state. Autoplay and fullscreen remain subject to the browser's own policies; a refusal is reported as `REFUSED_BY_BROWSER`, never bypassed. See [ARQUITETURA.md](ARQUITETURA.md) and [SEGURANCA.md](SEGURANCA.md).
+
+### Results and errors
+
+Every tool returns compact JSON text and the same object as `structuredContent`. Errors carry `code`, `retryable` and a fixed `hint`; a `403` also carries the closed shape of the refusal (`html-response` for an edge or bot challenge, `json-response` for a provider permission answer) and never any of its content.
 
 ### Deferred tools
 

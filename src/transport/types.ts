@@ -7,7 +7,7 @@
 /** Closed set of transport operations. Extended only when an endpoint migrates. */
 export type OperationId = string & { readonly __brand: "OperationId" };
 
-export type HttpMethod = "GET" | "POST" | "DELETE";
+export type HttpMethod = "GET" | "POST" | "PATCH" | "DELETE";
 
 /**
  * BT8.1. The SAME closed set, available at runtime.
@@ -18,7 +18,7 @@ export type HttpMethod = "GET" | "POST" | "DELETE";
  * provider evidence in this project asks for either, and BT8's design admits a
  * method only when evidence requires it.
  */
-export const HTTP_METHODS: readonly HttpMethod[] = Object.freeze(["GET", "POST", "DELETE"]);
+export const HTTP_METHODS: readonly HttpMethod[] = Object.freeze(["GET", "POST", "PATCH", "DELETE"]);
 
 /**
  * WHOSE data an endpoint addresses — an identity question.
@@ -118,7 +118,12 @@ export interface BodySpec {
  */
 export interface ResponseContract {
   readonly successStatuses: readonly number[];
-  readonly body: "JSON" | "EMPTY";
+  /**
+   * JSON: a document is required and parsed. EMPTY: nothing may arrive.
+   * IGNORED: success is decided by the status alone and the body is never
+   * read or interpreted (for a write whose answer shape is not needed).
+   */
+  readonly body: "JSON" | "EMPTY" | "IGNORED";
   /**
    * A descriptor-declared 404 whose meaning was proved for this operation.
    * It is deliberately absent from every read and from mutations without
@@ -260,6 +265,12 @@ export const slugList: ParamSpec = {
 };
 
 export const optionalBoolean: ParamSpec = {
+  validate: (v) => typeof v === "boolean",
+};
+
+/** A boolean the caller must state explicitly (an intent, never a toggle). */
+export const requiredBoolean: ParamSpec = {
+  required: true,
   validate: (v) => typeof v === "boolean",
 };
 

@@ -47,7 +47,7 @@ async function withClient(
 describe("MCP server harness", () => {
   for (const [label, target] of TARGETS) {
     describe(`${label}`, () => {
-      test("tools/list returns exactly the 23 baseline tool names", async () => {
+      test("tools/list returns exactly the 24 baseline tool names", async () => {
         await withClient(target, async (client) => {
           const list = (await client.sendRequest("tools/list", {}))
             .result as { tools: { name: string }[] };

@@ -1264,11 +1264,11 @@ describe("BT4 closure — T/V/W: no capability BT4 must not have", () => {
     }
   });
 
-  test("U: the public tool contract is exactly 23 names (21 unchanged + crunchyroll_play + crunchyroll_player_control)", () => {
+  test("U: the public tool contract is exactly 24 names (21 unchanged + crunchyroll_play + crunchyroll_player_control + crunchyroll_set_favorite)", () => {
     const baseline = JSON.parse(
       readFileSync(join(BT4_REPO_ROOT, "test/fixtures/baseline-tools.json"), "utf-8")
     ) as Array<{ name: string; inputSchema: { properties?: Record<string, unknown> } }>;
-    assert.equal(baseline.length, 23);
+    assert.equal(baseline.length, 24);
     for (const tool of baseline) {
       for (const property of Object.keys(tool.inputSchema.properties ?? {})) {
         assert.equal(
