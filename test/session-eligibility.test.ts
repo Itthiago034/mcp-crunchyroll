@@ -33,6 +33,26 @@ describe("session eligibility marker", () => {
     await store.clear();
   });
 
+  test("a logout that starts while a login is still recording wins", async () => {
+    const path = join(scratch(), "marker.json");
+    const store = createSessionEligibilityStore(path);
+    // Both start without awaiting each other, as a login racing a logout would.
+    const recording = store.record();
+    const loggingOut = store.recordLogout();
+    await Promise.all([recording, loggingOut]);
+    assert.equal(await store.isEligible(), false, "no marker may survive the logout");
+    assert.equal(store.loggedOutPersisted(), true, "the tombstone must survive");
+  });
+
+  test("a record requested after a logout is a new login and is kept", async () => {
+    const path = join(scratch(), "marker.json");
+    const store = createSessionEligibilityStore(path);
+    await store.recordLogout();
+    await store.record();
+    assert.equal(await store.isEligible(), true);
+    assert.equal(store.loggedOutPersisted(), false);
+  });
+
   test("a marker with loose permissions is not trusted", async () => {
     const path = join(scratch(), "marker.json");
     const store = createSessionEligibilityStore(path);

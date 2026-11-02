@@ -1819,7 +1819,12 @@ export function createBrowserSessionManager(
           } catch {
             throw new BrowserLifecycleError("BROWSER_DISCONNECTED", lost ?? "TAB_CLOSED");
           }
-          const id = watchContentId((info as { targetInfo?: { url?: unknown } })?.targetInfo?.url, base);
+          const url = (info as { targetInfo?: { url?: unknown } })?.targetInfo?.url;
+          // A tab that is still navigating reports an empty URL or about:blank
+          // for a moment. That is "not there yet", not "left": the caller keeps
+          // polling within its own readiness window.
+          if (url === "" || url === "about:blank") return undefined;
+          const id = watchContentId(url, base);
           if (id === undefined) markLost("NAVIGATED_AWAY");
           return id;
         },

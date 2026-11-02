@@ -413,6 +413,22 @@ describe("playback channel — identity, loss and teardown", () => {
     await channel.close();
   });
 
+  test("a tab that is still navigating (empty URL or about:blank) is pending, not lost", async () => {
+    const model = defaultModel();
+    let url = `${WATCH}GXYZ/episode-title`;
+    model.urlFor = () => url;
+    const { manager } = await wire(model);
+    const channel = await manager.openPlaybackControlChannel();
+    for (const transient of ["", "about:blank"]) {
+      url = transient;
+      assert.equal(await channel.currentContentId(), undefined);
+      assert.equal(channel.loss(), undefined, `${JSON.stringify(transient)} must not end the channel`);
+    }
+    url = `${WATCH}GNEXT/next-episode`;
+    assert.equal(await channel.currentContentId(), "GNEXT");
+    await channel.close();
+  });
+
   test("currentContentId reads the validated watch URL only", async () => {
     const model = defaultModel();
     let url = `${WATCH}GXYZ/episode-title`;

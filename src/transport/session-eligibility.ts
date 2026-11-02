@@ -85,6 +85,18 @@ export function createSessionEligibilityStore(
   now: () => number = Date.now,
 ): SessionEligibilityStore {
   const tombstone = loggedOutTombstonePath(path);
+  // Every write runs in arrival order, never interleaved. Without this, a
+  // login's record() still writing when a logout starts could finish AFTER the
+  // logout and recreate the marker and delete the tombstone.
+  let queue: Promise<unknown> = Promise.resolve();
+  const serial = <T>(task: () => Promise<T>): Promise<T> => {
+    const next = queue.then(task, task);
+    queue = next.catch(() => undefined);
+    return next;
+  };
+  // Bumped SYNCHRONOUSLY by every revocation and logout. A record() requested
+  // before the bump belongs to a login that was overtaken and is dropped.
+  let revision = 0;
   return {
     async isEligible() {
       try {
@@ -110,21 +122,29 @@ export function createSessionEligibilityStore(
       }
     },
 
-    async record() {
-      await writePrivate(path, JSON.stringify({ version: MARKER_VERSION, established_at: now() }));
-      await rm(tombstone, { force: true });
+    record() {
+      const requestedAt = revision;
+      return serial(async () => {
+        if (revision !== requestedAt) return; // a logout or revocation came after
+        await writePrivate(path, JSON.stringify({ version: MARKER_VERSION, established_at: now() }));
+        await rm(tombstone, { force: true });
+      });
     },
 
-    async clear() {
+    clear() {
+      revision += 1;
       // `rm` removes a symlink itself, never its target.
-      await rm(path, { force: true });
+      return serial(() => rm(path, { force: true }));
     },
 
-    async recordLogout() {
-      // Eligibility goes first: even if the tombstone cannot be written, no
-      // silent attempt may follow a logout.
-      await rm(path, { force: true });
-      await writePrivate(tombstone, JSON.stringify({ version: MARKER_VERSION, logged_out_at: now() }));
+    recordLogout() {
+      revision += 1;
+      return serial(async () => {
+        // Eligibility goes first: even if the tombstone cannot be written, no
+        // silent attempt may follow a logout.
+        await rm(path, { force: true });
+        await writePrivate(tombstone, JSON.stringify({ version: MARKER_VERSION, logged_out_at: now() }));
+      });
     },
 
     loggedOutPersisted: () => anythingAt(tombstone),
