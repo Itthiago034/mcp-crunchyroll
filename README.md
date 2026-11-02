@@ -7,7 +7,7 @@
 
 **An unofficial anime connector for your AI agent.** Discover titles, organize your account and open Crunchyroll's official player through a closed [Model Context Protocol](https://modelcontextprotocol.io/) tool surface.
 
-[Leia em português](docs/README-pt-BR.md)
+[Leia em português](docs/pt-BR/README.md) · English is the project's primary language; Portuguese translations live in [`docs/pt-BR/`](docs/pt-BR/).
 
 [![CI](https://github.com/Itthiago034/mcp-crunchyroll/actions/workflows/ci.yml/badge.svg)](https://github.com/Itthiago034/mcp-crunchyroll/actions/workflows/ci.yml)
 ![Node.js](https://img.shields.io/badge/Node.js-18%20%7C%2020%20%7C%2022-333333?logo=nodedotjs)
@@ -31,7 +31,7 @@ Available results depend on the authenticated account, region, client, and Crunc
 ## Release status
 
 > [!IMPORTANT]
-> **Development snapshot, not a production approval.** This local branch contains the existing 23-tool surface plus one candidate favorite setter. Registration and passing tests do not guarantee that Crunchyroll will accept a live request. See [the release decision](DECISAO-FINAL.md) for the audit gates.
+> **Development snapshot, not a production approval.** This local branch contains the existing 23-tool surface plus one candidate favorite setter. Registration and passing tests do not guarantee that Crunchyroll will accept a live request. See [the release decision](RELEASE-DECISION.md) for the audit gates.
 
 | Surface | Count | Implementation status |
 |---|---:|---|
@@ -242,7 +242,7 @@ A provider response such as bad request, conflict, or operation-specific not fou
 
 `episode_id` must be a plain uppercase Crunchyroll id from `crunchyroll_get_episodes`; nothing else reaches the URL. Playback uses the browser's own signed-in session and makes no provider API request from the server.
 
-Player control runs one frozen page function with a closed command set, only in the playback tab's page and player-frame contexts on `www.crunchyroll.com` / `static.crunchyroll.com`. It exposes no script, CDP or port to the caller, never reads cookies or tokens, and reports success only when a later observation confirms the requested state. Autoplay and fullscreen remain subject to the browser's own policies; a refusal is reported as `REFUSED_BY_BROWSER`, never bypassed. See [ARQUITETURA.md](ARQUITETURA.md) and [SEGURANCA.md](SEGURANCA.md).
+Player control runs one frozen page function with a closed command set, only in the playback tab's page and player-frame contexts on `www.crunchyroll.com` / `static.crunchyroll.com`. It exposes no script, CDP or port to the caller, never reads cookies or tokens, and reports success only when a later observation confirms the requested state. Autoplay and fullscreen remain subject to the browser's own policies; a refusal is reported as `REFUSED_BY_BROWSER`, never bypassed. See [ARCHITECTURE.md](ARCHITECTURE.md) and [SECURITY-MODEL.md](SECURITY-MODEL.md).
 
 ### Deferred tools
 
@@ -300,11 +300,19 @@ requires interactive sign-in in a visible managed browser.
 
 | Document | What it covers |
 |---|---|
-| [Architecture](ARQUITETURA.md) | Channels, boundaries and component responsibilities |
-| [Security](SEGURANCA.md) | Threat model, guarantees and residual risks |
-| [Tests](TESTES.md) | Test environments and recorded evidence |
+| [Architecture](ARCHITECTURE.md) | Channels, boundaries and component responsibilities |
+| [Security](SECURITY-MODEL.md) | Threat model, guarantees and residual risks |
+| [Tests](TESTING.md) | Test environments and recorded evidence |
 | [Benchmarks](BENCHMARK.md) | Measurements and their real/synthetic/modeled labels |
-| [Release decision](DECISAO-FINAL.md) | Audit and authorized live-validation gates |
+| [Implementation](IMPLEMENTATION.md) | Changes, compatibility and dependencies |
+| [Release decision](RELEASE-DECISION.md) | Audit and authorized live-validation gates |
+| [Agent skill](skills/crunchyroll/SKILL.md) | Tool selection, playback recipes and error handling |
+
+English is the primary language for documentation and the agent skill. Portuguese is
+the secondary language, with a [documentation index in pt-BR](docs/pt-BR/README.md).
+New documentation should be written in English first and link to its Portuguese
+translation when available. Historical reports retain their original evidence and
+validation limits; translating them does not constitute a new validation run or release approval.
 
 <details>
 <summary>Original project artwork</summary>

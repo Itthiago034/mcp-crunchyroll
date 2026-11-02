@@ -1,22 +1,25 @@
-# BENCHMARK — anterior × Crunchyroll MCP 2.0
+# BENCHMARK — previous × Crunchyroll MCP 2.0
 
-Três tipos de número aparecem aqui e **nunca são misturados**:
+*Portuguese version: [pt-BR](docs/pt-BR/benchmark.md).*
 
-- **REAL** — medido nesta sessão, em Chromium real (CfT 131, headless), contra a fixture loopback sintética. Não é a Crunchyroll.
-- **SINTÉTICO** — medido executando código real (a lógica anterior copiada e a nova) contra fakes idênticos de authority/login/gateway. Latências de login/rede são simuladas.
-- **MODELADO** — contagem de chamadas derivada das receitas da skill e do incidente relatado. Não medido; o Hermes não rodou aqui.
+Three kinds of number appear here and they are **never mixed**:
 
-Dados brutos: `docs/validation-results/benchmark-player.json` (gerado em 2026-10-22T23:46Z).
-Reproduzir: `CRUNCHYROLL_BROWSER_EXECUTABLE=<chrome> npx tsx scripts/benchmark-player.ts 15` (usuário sem privilégio).
+- **REAL** — measured in this session, in a real Chromium (CfT 131, headless), against the synthetic loopback fixture. It is not Crunchyroll.
+- **SYNTHETIC** — measured by running real code (the previous logic, copied, and the new one) against identical authority/login/gateway fakes. Login/network latencies are simulated.
+- **MODELED** — call count derived from the skill's recipes and the reported incident. Not measured; Hermes did not run here.
 
-## 1. Controle do player — REAL
+Raw data: `docs/validation-results/benchmark-player.json` (generated at 2026-10-22T23:46Z).
+Reproduce: `CRUNCHYROLL_BROWSER_EXECUTABLE=<chrome> npx tsx scripts/benchmark-player.ts 15` (unprivileged user).
 
-15 iterações por ação, mesma aba, mesmo navegador. "Ad hoc" é uma **aproximação** do caminho
-improvisado pelo Hermes: um processo Node novo por ação, que lê `DevToolsActivePort`, abre o próprio
-WebSocket CDP, anexa à aba e faz `Runtime.evaluate` com `userGesture`. Ela **não** inclui o custo
-dominante do incidente real — os turnos do LLM procurando arquivos, processos e escrevendo scripts.
+## 1. Player control — REAL
 
-| Ação | Nativo p50 / p95 (ms) | Nativo verificado | Ad hoc p50 / p95 (ms) | Ad hoc "ok" auto-relatado |
+15 iterations per action, same tab, same browser. "Ad hoc" is an **approximation** of the path
+Hermes improvised: a new Node process per action that reads `DevToolsActivePort`, opens its own
+CDP WebSocket, attaches to the tab and runs `Runtime.evaluate` with `userGesture`. It does **not**
+include the dominant cost of the real incident — the LLM turns spent looking for files and
+processes and writing scripts.
+
+| Action | Native p50 / p95 (ms) | Native verified | Ad hoc p50 / p95 (ms) | Ad hoc self-reported "ok" |
 |---|---|---:|---|---:|
 | play | 4.9 / 11.5 | 15/15 | 60.2 / 70.8 | 15/15 |
 | pause | 4.3 / 7.1 | 15/15 | 60.4 / 78.3 | 15/15 |
@@ -24,59 +27,59 @@ dominante do incidente real — os turnos do LLM procurando arquivos, processos 
 | exit_fullscreen | 13.7 / 20.0 | 15/15 | 67.6 / 90.8 | 15/15 |
 | status | 3.1 / 4.6 | 15/15 | — | — |
 
-Observações:
-- O nativo verifica por **sonda posterior** independente; o "ok" do ad hoc é o valor de retorno do
-  próprio script (o que o Hermes teria). Ambos funcionaram aqui porque a fixture usada no
-  comparativo tem o vídeo no documento top-level — o script ad hoc **não alcança** o player em
-  iframe cross-site (o caso da suíte real), o nativo sim.
-- `crunchyroll_play`-equivalente com `autoplay` (abrir + esperar player + play verificado): **219 ms** na fixture.
-- CPU do processo Node por ação nativa: **2.38 ms** (média de 75 ações).
-- RSS total do navegador (MiB): 1128 antes → 1156 após 75 ações → 1157 após 5 s ocioso → 1166 após
-  mais 75 ações; 1163 após a rodada ad hoc. Há crescimento modesto (+28, depois +10) que **não**
-  provamos ser zero; a ausência de sessões CDP anexadas foi verificada separadamente
-  (`player-real-browser`, teste 7). Amostra pequena; não extrapolar.
+Notes:
+- The native path verifies through an independent **follow-up probe**; the ad hoc "ok" is the return
+  value of the script itself (what Hermes would have had). Both worked here because the fixture used in
+  the comparison has the video in the top-level document — the ad hoc script **does not reach** a
+  player in a cross-site iframe (the real suite's case), the native one does.
+- `crunchyroll_play`-equivalent with `autoplay` (open + wait for player + verified play): **219 ms** on the fixture.
+- Node process CPU per native action: **2.38 ms** (average over 75 actions).
+- Total browser RSS (MiB): 1128 before → 1156 after 75 actions → 1157 after 5 s idle → 1166 after
+  another 75 actions; 1163 after the ad hoc round. There is modest growth (+28, then +10) that we do
+  **not** prove to be zero; the absence of attached CDP sessions was verified separately
+  (`player-real-browser`, test 7). Small sample; do not extrapolate.
 
-## 2. Autenticação — SINTÉTICO
+## 2. Authentication — SYNTHETIC
 
-Mesmos fakes (login simulado 120 ms, request 20 ms; marcador de elegibilidade presente). Na coluna
-"anterior", as chamadas de recuperação que a skill antiga mandava o agente fazer (login + repetir
-cada falha) estão incluídas.
+Same fakes (simulated login 120 ms, request 20 ms; eligibility marker present). In the
+"previous" column, the recovery calls that the old skill told the agent to make (login + retry
+each failure) are included.
 
-| Cenário | Impl. | Chamadas MCP | Resultados com erro | Tentativas de auth | Tentativas no gateway | Dispatches ao provedor |
+| Scenario | Impl. | MCP calls | Error results | Auth attempts | Gateway attempts | Dispatches to the provider |
 |---|---|---:|---:|---:|---:|---:|
-| Cold start, 1 consulta | anterior | 3 | 1 | 1 | 2 | 1 |
-| | **nova** | **1** | **0** | 1 | **1** | 1 |
-| Cold start, 2 consultas concorrentes | anterior | 5 | 2 | 1 | 4 | 2 |
-| | **nova** | **2** | **0** | 1 | **2** | 2 |
-| Sessão expirada, 1 consulta | anterior | 1 | 0 | 1 | 2 | 1 |
-| | **nova** | 1 | 0 | 1 | **1** | 1 |
-| Expirada, 10 concorrentes | anterior | 10 | 0 | 1 | 20 | 10 |
-| | **nova** | 10 | 0 | 1 | **10** | 10 |
+| Cold start, 1 query | previous | 3 | 1 | 1 | 2 | 1 |
+| | **new** | **1** | **0** | 1 | **1** | 1 |
+| Cold start, 2 concurrent queries | previous | 5 | 2 | 1 | 4 | 2 |
+| | **new** | **2** | **0** | 1 | **2** | 2 |
+| Expired session, 1 query | previous | 1 | 0 | 1 | 2 | 1 |
+| | **new** | 1 | 0 | 1 | **1** | 1 |
+| Expired, 10 concurrent | previous | 10 | 0 | 1 | 20 | 10 |
+| | **new** | 10 | 0 | 1 | **10** | 10 |
 
-Latência de parede: ~141 ms em todos os casos, porque o fake não modela o turno do LLM; o ganho real
-do cold start é **eliminar 2 chamadas MCP e 1 resultado de erro por consulta** (cada um custa um turno
-do modelo). Não declaramos ganho de latência de ponta a ponta.
+Wall-clock latency: ~141 ms in every case, because the fake does not model the LLM turn; the real
+cold-start gain is **eliminating 2 MCP calls and 1 error result per query** (each one costs a model
+turn). We do not claim an end-to-end latency gain.
 
-Retries automáticos de conteúdo: anterior 1 por chamada expirada (pós-falha); nova 0 nos cenários
-acima (a pré-checagem evita) e no máximo 1, só pré-dispatch.
+Automatic content retries: previous 1 per expired call (post-failure); new 0 in the scenarios
+above (the pre-check avoids them) and at most 1, only pre-dispatch.
 
-## 3. Fluxos do agente — MODELADO
+## 3. Agent flows — MODELED
 
-| # | Cenário | Anterior (MCP / terminal) | Nova (MCP / terminal) |
+| # | Scenario | Previous (MCP / terminal) | New (MCP / terminal) |
 |---|---|---|---|
-| 1 | Abrir episódio após cold start ("coloca X ep 12") | 6 / 0 (search falha, login, search, seasons, episodes, play) | 4 / 0 |
-| 2 | Retomar do histórico ("continua") | 4 / 0 (history falha, login, history, play) + play manual | 2 / 0 (history, play com `autoplay`) |
-| 3 | Iniciar reprodução | 1 + improviso: ≥4 chamadas de terminal observadas no incidente (busca de arquivos/processos, descoberta do CDP, criar e rodar script) | 1 / 0 |
-| 4 | Pausar | improviso por terminal | 1 / 0 |
-| 5 | Tela cheia | improviso por terminal + mouse simulado | 1 / 0, com verificação |
-| 6 | Sessão expirada | 1 / 0 (recuperação automática, 2 tentativas no gateway) | 1 / 0 (1 tentativa) |
-| 7 | Duas consultas concorrentes no cold start | 5 / 0 | 2 / 0 |
+| 1 | Open an episode after a cold start ("put on X ep 12") | 6 / 0 (search fails, login, search, seasons, episodes, play) | 4 / 0 |
+| 2 | Resume from history ("continue") | 4 / 0 (history fails, login, history, play) + manual play | 2 / 0 (history, play with `autoplay`) |
+| 3 | Start playback | 1 + improvisation: ≥4 terminal calls observed in the incident (searching for files/processes, discovering CDP, creating and running a script) | 1 / 0 |
+| 4 | Pause | improvisation through the terminal | 1 / 0 |
+| 5 | Fullscreen | improvisation through the terminal + simulated mouse | 1 / 0, with verification |
+| 6 | Expired session | 1 / 0 (automatic recovery, 2 gateway attempts) | 1 / 0 (1 attempt) |
+| 7 | Two concurrent queries on a cold start | 5 / 0 | 2 / 0 |
 
-Taxa de confirmação do estado do player: anterior **não havia** (o improviso não verificava de forma
-independente); nova **100% nas 75 ações reais medidas** (todas `verified: true`).
+Player state confirmation rate: previously **there was none** (the improvisation did not verify
+independently); new **100% across the 75 real actions measured** (all `verified: true`).
 
-## 4. O que não foi medido
+## 4. What was not measured
 
-- Latência ponta a ponta com o Hermes e com a Crunchyroll real.
-- Player Vilos real, modo visível, DRM.
-- Consumo de CPU/RAM do Hermes.
+- End-to-end latency with Hermes and with the real Crunchyroll.
+- Real Vilos player, visible mode, DRM.
+- Hermes CPU/RAM consumption.
