@@ -45,7 +45,7 @@ test("real Chromium validates concurrent HTTP requests, resource limits and reco
   const profileDir = join(base, "profile");
   const seen = new Map<string, number>();
   const guards: Array<{ cookieAbsent: boolean; authorizationExpected: boolean }> = [];
-  const streamResults: Array<{ bytes: number; cancelled: boolean }> = [];
+  const streamResults: Array<{ id: string | null; bytes: number; cancelled: boolean; closedAfterMs: number | null }> = [];
   const sockets = new Set<Socket>();
   let active = 0;
   let peakActive = 0;
@@ -74,10 +74,13 @@ test("real Chromium validates concurrent HTTP requests, resource limits and reco
       assert.ok(budget === 4096 || budget === MAX_API_RESPONSE_BYTES);
       assert.ok(prefixBytes < total);
       res.writeHead(200, { "Content-Type": "application/json", "Content-Length": total });
-      const observation = { bytes: prefixBytes, cancelled: false };
+      const started = performance.now();
+      const observation = { id: url.searchParams.get("id"), bytes: prefixBytes,
+        cancelled: false, closedAfterMs: null as number | null };
       streamResults.push(observation);
       res.once("close", () => {
         observation.cancelled = !res.writableFinished;
+        observation.closedAfterMs = Number((performance.now() - started).toFixed(2));
       });
       // Hold the advertised remainder open: cancellation must close the real
       // response, rather than race a 2 ms producer that may fill browser buffers.
@@ -199,10 +202,13 @@ test("real Chromium validates concurrent HTTP requests, resource limits and reco
       assert.equal(result.response.truncated, true);
       assert.ok(Buffer.byteLength(result.response.body, "utf8") <= budget);
     });
-    // Browser cancellation can reach the server slightly after the CDP result.
-    for (let attempt = 0; active !== 0 && attempt < 100; attempt++) {
+    // Peer cancellation is asynchronous; bound the observation by the same
+    // command budget used for browser transport, rather than a 1 s assumption.
+    const cancellationDeadline = performance.now() + DEFAULT_BROWSER_SESSION_CONFIG.cdpCommandTimeoutMs;
+    while (active !== 0 && performance.now() < cancellationDeadline) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
+    t.diagnostic(JSON.stringify({ activeHttpAfterCancellation: active, oversizedStreams: streamResults }));
     assert.equal(active, 0);
     assert.equal(streamResults.length, 12);
     assert.ok(streamResults.every((stream) => stream.cancelled), "all oversized streams stopped before sending 1 MiB");

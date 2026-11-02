@@ -14,6 +14,8 @@ bounded returned body, peer cancellation before a complete response, and zero
 active requests. This checks cancellation against an unfinished real HTTP
 response without racing a timer-driven producer. Historical measurements below
 describe the earlier fixture; this correction is not a new provider measurement.
+Peer-close observation uses the existing browser command timeout and reports each
+stream's close latency; a missing cancellation still fails the test.
 
 The initial cloud measurements use Chromium 151.0.7922.173 with its native sandbox
 enabled and Node.js 24.19.0. The authenticated Linux validation section separately

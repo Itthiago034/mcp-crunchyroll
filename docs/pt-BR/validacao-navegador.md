@@ -15,6 +15,8 @@ cliente antes de completar a resposta e zero requisições ativas. Isso verifica
 o cancelamento de uma resposta HTTP real ainda aberta sem competir com um
 produtor por temporizador. As medições históricas abaixo usam a fixture anterior;
 esta correção não representa uma nova medição no provedor.
+A observação do encerramento usa o timeout já existente dos comandos do navegador
+e registra a latência de cada stream; a ausência de cancelamento continua falhando.
 
 As medições iniciais na nuvem usam Chromium 151.0.7922.173 com sandbox nativo
 habilitado e Node.js 24.19.0. A seção de validação autenticada no Linux registra
