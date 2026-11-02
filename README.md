@@ -1,36 +1,56 @@
-<p align="center">
-  <img
-    src="docs/assets/mcp-crunchyroll-banner.png"
-    alt="MCP Crunchyroll"
-    width="100%"
-  >
-</p>
+<picture>
+  <source media="(max-width: 600px)" srcset="docs/assets/readme-hero-mobile.svg">
+  <img src="docs/assets/readme-hero.svg" alt="MCP Crunchyroll — your agent, your anime. Discover, organize and open the official player." width="100%">
+</picture>
 
 # MCP Crunchyroll
 
-An unofficial [Model Context Protocol](https://modelcontextprotocol.io/) server for Crunchyroll, written in TypeScript. It gives MCP clients a closed tool surface for catalog discovery, account reads, and account mutations through browser-mediated authentication and provider access.
+**An unofficial anime connector for your AI agent.** Discover titles, organize your account and open Crunchyroll's official player through a closed MCP tool surface.
 
 [![CI](https://github.com/Itthiago034/mcp-crunchyroll/actions/workflows/ci.yml/badge.svg)](https://github.com/Itthiago034/mcp-crunchyroll/actions/workflows/ci.yml)
-![Node.js](https://img.shields.io/badge/Node.js-18%20%7C%2020%20%7C%2022-339933)
-![TypeScript](https://img.shields.io/badge/TypeScript-5.3-3178C6)
-![License](https://img.shields.io/badge/license-MIT-blue)
+![Node.js](https://img.shields.io/badge/Node.js-18%20%7C%2020%20%7C%2022-333333?logo=nodedotjs)
+![MCP](https://img.shields.io/badge/MCP-stdio-f47521)
+![License](https://img.shields.io/badge/license-MIT-333333)
 ![Unofficial](https://img.shields.io/badge/unofficial-community%20project-f47521)
+
+[Quick start](#quick-start) · [Tools](#tool-surface) · [Architecture](#how-it-works) · [Security](#security-boundaries) · [Validation](#development-and-tests)
 
 ## Release status
 
-This branch exposes 23 public tools. Twenty-one are operational: three local authentication/status tools, sixteen production API operations and two playback tools. Two published tools remain deliberately deferred and fail closed.
+> [!IMPORTANT]
+> **Development snapshot, not a production approval.** This local branch contains the existing 23-tool surface plus one candidate favorite setter. Registration and passing tests do not guarantee that Crunchyroll will accept a live request. See [the release decision](DECISAO-FINAL.md) for the audit gates.
 
-| Surface | Count | Status |
+| Surface | Count | Implementation status |
 |---|---:|---|
-| Public MCP tools | 23 | Published |
-| Authentication and status tools | 3 | Operational |
-| Production API operations | 16 | Operational |
-| Playback and player control | 2 | Operational |
-| Deferred tools | 2 | `OPERATION_NOT_MIGRATED` |
+| Authentication and status | 3 | Existing implementations |
+| Catalog and discovery reads | 10 | Existing implementations |
+| Account reads | 3 | Existing implementations |
+| Watchlist and progress mutations | 3 | Existing implementations |
+| Playback and player control | 2 | Existing implementations |
+| Favorite setter | 1 | Candidate; unit-tested, live validation pending |
+| Deferred tools | 2 | Deliberately fail closed |
+| **Advertised tools in this local snapshot** | **24** | **Not a release count** |
 
-The production operations cover catalog reads, account reads, adding and removing watchlist items, and updating playheads. CI validates the project on Node.js 18, 20, and 22 with sandboxed Chrome for Testing.
+### Start with what you want to do
+
+| Your goal | Tools to start with | Boundary |
+|---|---|---|
+| Find something to watch | `crunchyroll_search`, `crunchyroll_browse` | Catalog results depend on the provider and region |
+| Pick the right episode and audio version | `crunchyroll_get_seasons`, `crunchyroll_get_episodes` | Choose from returned IDs and locale metadata |
+| Organize your list | `crunchyroll_get_watchlist`, `crunchyroll_add_to_watchlist` | Writes affect the authenticated account |
+| Open and control playback | `crunchyroll_play`, `crunchyroll_player_control` | Official player; browser policies still apply |
 
 ## How it works
+
+The server has **two distinct paths**: closed provider operations for catalog/account access, and closed player commands for the official web player. Interactive sign-in happens in the managed browser; authentication material is handled internally, not supplied by the agent as tool arguments.
+
+<picture>
+  <source media="(max-width: 600px)" srcset="docs/assets/readme-architecture-mobile.svg">
+  <img src="docs/assets/readme-architecture.svg" alt="MCP client to server, then separate closed paths for provider requests and official-player controls in the managed browser. Human sign-in; no raw JavaScript tool or DRM bypass." width="100%">
+</picture>
+
+<details>
+<summary>Text version of the provider-request path</summary>
 
 ```text
 MCP client
@@ -48,6 +68,8 @@ Managed browser / CDP
 Crunchyroll web services
 ```
 
+</details>
+
 Interactive credentials are entered only in the managed browser. Usernames, passwords, cookies, and bearer tokens are not tool arguments. Migrated provider operations use the browser-mediated transport; callers cannot choose an account ID or override the HTTP method, path, headers, query, or raw request body.
 
 This project is not affiliated with or endorsed by Crunchyroll, LLC.
@@ -58,7 +80,9 @@ This project is not affiliated with or endorsed by Crunchyroll, LLC.
 - npm
 - A supported Chromium-family browser for interactive authentication, unless `CRUNCHYROLL_BROWSER_EXECUTABLE` points to one explicitly
 
-## Install and build
+<a id="install-and-build"></a>
+
+## Quick start
 
 ```bash
 git clone https://github.com/Itthiago034/mcp-crunchyroll.git
@@ -108,7 +132,12 @@ hermes mcp add crunchyroll --command node --args /absolute/path/to/mcp-crunchyro
 hermes mcp test crunchyroll
 ```
 
+<details>
+<summary>Linux desktop and browser-session details</summary>
+
 Hermes exposes the tools as `mcp__crunchyroll__crunchyroll_*` and starts stdio servers with a filtered environment that keeps `HOME`, `PATH` and `XDG_*` but drops `DISPLAY`, `WAYLAND_DISPLAY` and `DBUS_SESSION_BUS_ADDRESS`. On Linux, when no display variable reaches the server, it recovers the user's own desktop session from sockets owned by the current user (`$XDG_RUNTIME_DIR/wayland-N`, `$XDG_RUNTIME_DIR/bus`, `/tmp/.X11-unix/XN`), so `crunchyroll_login` can open its window without extra `env` entries. It also restores the desktop identity (`KDE_SESSION_VERSION`, `DESKTOP_SESSION`, `XDG_CURRENT_DESKTOP`, ...) from `systemctl --user show-environment`: without it Chromium picks a different password store than the manual sign-in did (for example `basic` instead of KWallet 6), cannot decrypt the profile's cookies and is challenged again. Variables the client does pass are never replaced.
+
+</details>
 
 ## Authentication
 
@@ -177,6 +206,9 @@ The bearer observed from the browser carries no refresh token and expires within
 | `crunchyroll_add_to_watchlist` | Add a content ID to the authenticated account's watchlist | `204 No Content` |
 | `crunchyroll_remove_from_watchlist` | Remove a content ID from the authenticated account's watchlist | `204 No Content` |
 | `crunchyroll_update_playhead` | Submit a playhead for a content ID | `204 No Content` |
+| `crunchyroll_set_favorite` | Set an explicit favorite boolean; never toggle | Candidate contract: `204 No Content`; live validation pending |
+
+**Favorite setter caveat:** this local addition is unit-tested but has not completed live provider verification. `favorite: false` on an absent item is a no-op; `favorite: true` may add the item before setting its favorite flag. Do not treat it as a verified release feature yet.
 
 Mutation identity is derived from the authenticated browser context. The caller supplies only the functional inputs in each closed tool schema and cannot select `accountId`.
 
@@ -202,7 +234,7 @@ These names remain visible for compatibility, but v0.1.0 intentionally refuses t
 | `crunchyroll_continue_watching` | Deferred / fail-closed |
 | `crunchyroll_get_subscription` | Deferred / fail-closed |
 
-They are not counted among the 19 operational tools.
+These two tools are excluded from the implemented paths described above; their presence in the advertised catalog is not a claim of availability.
 
 ## Security boundaries
 
@@ -244,6 +276,23 @@ requires interactive sign-in in a visible managed browser.
 - The project opens and controls the official web player only; it does not download media or bypass DRM, autoplay or fullscreen policies.
 - Fullscreen and autoplay can still be refused by the browser or by the player frame (see `REFUSED_BY_BROWSER` in the skill).
 - Authentication can require user interaction in the managed browser.
+
+## Read further
+
+| Document | What it covers |
+|---|---|
+| [Architecture](ARQUITETURA.md) | Channels, boundaries and component responsibilities |
+| [Security](SEGURANCA.md) | Threat model, guarantees and residual risks |
+| [Tests](TESTES.md) | Test environments and recorded evidence |
+| [Benchmarks](BENCHMARK.md) | Measurements and their real/synthetic/modeled labels |
+| [Release decision](DECISAO-FINAL.md) | Audit and authorized live-validation gates |
+
+<details>
+<summary>Original project artwork</summary>
+
+<img src="docs/assets/mcp-crunchyroll-banner.png" alt="Original MCP Crunchyroll project artwork in orange and black" width="100%">
+
+</details>
 
 ## Credits and license
 

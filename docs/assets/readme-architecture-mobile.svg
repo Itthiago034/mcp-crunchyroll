@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="910" viewBox="0 0 640 910" role="img" aria-labelledby="title desc">
+<title id="title">Two paths. One managed browser.</title><desc id="desc">MCP client to server, then two distinct closed paths: operation descriptors to provider requests, and player commands to the official web player. Human sign-in occurs in the managed browser. No caller-selected account identity, raw JavaScript tool or DRM bypass.</desc>
+<defs><marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L8 4L0 8" fill="none" stroke="#f47521"/></marker></defs>
+<style>text{font-family:'Segoe UI',Arial,sans-serif}.wire{fill:none;stroke:#f47521;stroke-width:2;marker-end:url(#arrow)}</style>
+<rect x="1" y="1" width="638" height="908" rx="14" fill="#0c0e10" stroke="#373c41"/>
+<text x="32" y="48" font-size="30" font-weight="600" fill="#f5f5f2">Two paths.</text><text x="32" y="87" font-size="30" font-weight="600" fill="#ff944c">One managed browser.</text>
+<path d="M320 226V259M320 365V418H175V451M320 418H465V451M175 562V657M465 562V657" class="wire"/>
+<rect x="32" y="127" width="576" height="99" rx="8" fill="#14171a" stroke="#373c41"/>
+<text x="54" y="169" font-size="28" fill="#e4e6e8">MCP client</text><text x="54" y="203" font-size="23" fill="#a8aeb5">Typed tool calls · stdio</text>
+<rect x="32" y="259" width="576" height="106" rx="8" fill="#21180f" stroke="#b66a34"/>
+<text x="54" y="302" font-size="28" fill="#ff944c">MCP server</text><text x="54" y="337" font-size="23" fill="#c8b5a6">Validation + internal auth context</text>
+<g fill="#14171a" stroke="#373c41"><rect x="32" y="451" width="276" height="111" rx="8"/><rect x="332" y="451" width="276" height="111" rx="8"/></g>
+<g font-size="25" fill="#e4e6e8"><text x="52" y="493">Operation</text><text x="52" y="527">descriptors</text><text x="352" y="493">Closed player</text><text x="352" y="527">commands</text></g>
+<rect x="20" y="615" width="600" height="174" rx="10" fill="none" stroke="#747b84" stroke-dasharray="6 6"/>
+<text x="32" y="600" font-size="21" fill="#a8aeb5">Managed browser · human sign-in</text>
+<g fill="#14171a" stroke="#373c41"><rect x="40" y="657" width="260" height="106" rx="8"/><rect x="340" y="657" width="260" height="106" rx="8"/></g>
+<g font-size="25" fill="#e4e6e8"><text x="60" y="698">Provider</text><text x="60" y="732">requests</text><text x="360" y="698">Official web</text><text x="360" y="732">player</text></g>
+<text x="32" y="837" font-size="22" fill="#c2c6cb">No raw JavaScript or CDP tool.</text><text x="32" y="874" font-size="22" fill="#c2c6cb">No DRM bypass. Browser policies apply.</text>
+</svg>

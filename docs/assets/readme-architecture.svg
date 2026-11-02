@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="442" viewBox="0 0 1120 442" role="img" aria-labelledby="title desc">
+<title id="title">Two paths. One managed browser.</title><desc id="desc">The MCP client sends typed calls to the server. Closed operation descriptors make catalog and account requests inside the managed browser. A separate closed player-command channel controls the official player. Human sign-in occurs in the managed browser. Auth material is handled internally and is not exposed as tool arguments.</desc>
+<defs><marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L8 4L0 8" fill="none" stroke="#f47521"/></marker></defs>
+<style>text{font-family:'Segoe UI',Arial,sans-serif}.mono{font-family:Consolas,'Liberation Mono',monospace}.wire{fill:none;stroke:#f47521;stroke-width:1.5;marker-end:url(#arrow)}</style>
+<rect x="1" y="1" width="1118" height="440" rx="14" fill="#0c0e10" stroke="#373c41"/>
+<text x="32" y="44" font-size="24" font-weight="600" fill="#f5f5f2">Two paths. One managed browser.</text>
+<text x="32" y="75" font-size="16" fill="#a8aeb5">Provider access and player control are distinct, closed channels.</text>
+<path d="M212 223H252M466 223H501V161H540M501 223V300H540M787 161H842M787 300H842" class="wire"/>
+<rect x="24" y="173" width="188" height="100" rx="8" fill="#14171a" stroke="#373c41"/>
+<text x="44" y="210" font-size="20" fill="#e4e6e8">MCP client</text><text x="44" y="239" font-size="15" fill="#a8aeb5">Typed calls · stdio</text>
+<rect x="252" y="173" width="214" height="100" rx="8" fill="#21180f" stroke="#b66a34"/>
+<text x="272" y="210" font-size="20" fill="#ff944c">MCP server</text><text x="272" y="239" font-size="15" fill="#c8b5a6">Validation + auth context</text>
+<rect x="540" y="114" width="247" height="94" rx="8" fill="#14171a" stroke="#373c41"/>
+<text x="560" y="149" font-size="19" fill="#e4e6e8">Operation descriptors</text><text x="560" y="177" font-size="15" fill="#a8aeb5">Catalog + account requests</text>
+<rect x="540" y="253" width="247" height="94" rx="8" fill="#14171a" stroke="#373c41"/>
+<text x="560" y="288" font-size="19" fill="#e4e6e8">Player commands</text><text x="560" y="316" font-size="15" fill="#a8aeb5">Frozen function + closed enum</text>
+<rect x="817" y="96" width="279" height="270" rx="10" fill="none" stroke="#747b84" stroke-dasharray="5 6"/>
+<text x="837" y="87" class="mono" font-size="12" letter-spacing=".6" fill="#a8aeb5">MANAGED BROWSER · HUMAN SIGN-IN</text>
+<rect x="842" y="128" width="228" height="66" rx="7" fill="#14171a" stroke="#373c41"/>
+<text x="862" y="156" font-size="19" fill="#e4e6e8">Provider requests</text><text x="862" y="180" font-size="14" fill="#a8aeb5">Authenticated browser context</text>
+<rect x="842" y="267" width="228" height="66" rx="7" fill="#14171a" stroke="#373c41"/>
+<text x="862" y="295" font-size="19" fill="#e4e6e8">Official web player</text><text x="862" y="319" font-size="14" fill="#a8aeb5">Browser policies still apply</text>
+<path d="M32 386H1088" stroke="#373c41"/>
+<text x="32" y="418" font-size="15" fill="#c2c6cb">No caller-chosen account identity</text><text x="421" y="418" font-size="15" fill="#c2c6cb">No raw JavaScript or CDP tool</text><text x="811" y="418" font-size="15" fill="#c2c6cb">No DRM bypass</text>
+</svg>
