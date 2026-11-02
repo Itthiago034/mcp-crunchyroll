@@ -537,6 +537,7 @@ export function createBrowserSessionManager(
     removeExitListener = undefined;
     processHandle?.dispose();
     processHandle = undefined;
+    releaseApiAttachment();
     disposeConnection();
     endpoint = undefined;
     managedTargetId = undefined;
@@ -1013,6 +1014,161 @@ export function createBrowserSessionManager(
     }
   };
 
+  // ── Shared page attachment for the API execution channel ────────────────
+  //
+  // One flat CDP session on the managed page, kept across requests. It tracks
+  // the page's default Crunchyroll context through navigations, and is dropped
+  // (and re-created on next use) whenever the connection generation, the
+  // managed target or the session itself changes, or a request on it fails.
+  interface ApiAttachment {
+    readonly generation: number;
+    readonly targetId: string;
+    readonly sessionId: string;
+    readonly connection: CdpConnection;
+    contextId: number | undefined;
+    live: boolean;
+    unsubscribe: Array<() => void>;
+  }
+  let apiAttachment: ApiAttachment | undefined;
+  let apiAttachmentFlight: Promise<ApiAttachment> | undefined;
+
+  // The connection is going away: forget the attachment without talking to it.
+  function releaseApiAttachment(): void {
+    const current = apiAttachment;
+    apiAttachment = undefined;
+    if (!current) return;
+    current.live = false;
+    for (const off of current.unsubscribe) {
+      try { off(); } catch {}
+    }
+    current.unsubscribe = [];
+  }
+
+  const dropApiAttachment = async (target?: ApiAttachment): Promise<void> => {
+    const current = target ?? apiAttachment;
+    if (!current) return;
+    if (apiAttachment === current) apiAttachment = undefined;
+    if (!current.live) return;
+    current.live = false;
+    for (const off of current.unsubscribe) {
+      try { off(); } catch {}
+    }
+    current.unsubscribe = [];
+    try {
+      await current.connection.send("Target.detachFromTarget", { sessionId: current.sessionId });
+    } catch {
+      // a disconnected browser is already the outcome a drop wants
+    }
+  };
+
+  const attachApiSession = async (
+    active: ConnectionRegistration,
+    targetId: string,
+  ): Promise<ApiAttachment> => {
+    const generation = active.generation;
+    const attached = (await active.connection.send("Target.attachToTarget", {
+      targetId,
+      flatten: true,
+    })) as { sessionId?: unknown };
+    const sessionId = attached.sessionId;
+    if (typeof sessionId !== "string" || sessionId.length === 0) {
+      throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
+    }
+    const attachment: ApiAttachment = {
+      generation,
+      targetId,
+      sessionId,
+      connection: active.connection,
+      contextId: undefined,
+      live: true,
+      unsubscribe: [],
+    };
+
+    // Only contexts announced on THIS page's session are ever considered, and
+    // among those only the main frame's default context on the expected
+    // origin. An extension, a devtools page, an iframe or an unrelated
+    // isolated world can never match, and nothing is ever "recovered" by
+    // falling back to another one.
+    attachment.unsubscribe.push(
+      active.connection.on("Runtime.executionContextCreated", (params, frameSessionId) => {
+        if (frameSessionId !== sessionId || !attachment.live) return;
+        if (generation !== activeConnectionGeneration) return;
+        const context = (params as { context?: { id?: unknown; origin?: unknown; auxData?: unknown } })
+          ?.context;
+        if (!context || typeof context.id !== "number") return;
+        if (context.origin !== CRUNCHYROLL_PAGE_ORIGIN) return;
+        const auxData = context.auxData as { isDefault?: unknown; frameId?: unknown } | undefined;
+        if (auxData?.isDefault !== true) return;
+        if (auxData.frameId !== undefined && auxData.frameId !== targetId) return;
+        attachment.contextId = context.id;
+      }),
+      active.connection.on("Runtime.executionContextDestroyed", (params, frameSessionId) => {
+        if (frameSessionId !== sessionId) return;
+        const id = (params as { executionContextId?: unknown } | null)?.executionContextId;
+        if (id === attachment.contextId) attachment.contextId = undefined;
+      }),
+      active.connection.on("Runtime.executionContextsCleared", (_params, frameSessionId) => {
+        if (frameSessionId !== sessionId) return;
+        attachment.contextId = undefined;
+      }),
+      active.connection.on("Target.detachedFromTarget", (params) => {
+        if ((params as { sessionId?: unknown } | null)?.sessionId !== sessionId) return;
+        attachment.live = false;
+        if (apiAttachment === attachment) apiAttachment = undefined;
+      }),
+    );
+
+    try {
+      await active.connection.send("Runtime.enable", undefined, sessionId);
+    } catch (error) {
+      await dropApiAttachment(attachment);
+      throw error;
+    }
+    if (attachment.contextId === undefined) {
+      // Fail closed: no legitimate Crunchyroll page context exists right now.
+      await dropApiAttachment(attachment);
+      throw new BrowserLifecycleError("BROWSER_UNAVAILABLE", "no-page-context");
+    }
+    return attachment;
+  };
+
+  const acquireApiAttachment = async (active: ConnectionRegistration): Promise<ApiAttachment> => {
+    const targetId = await manager.ensureManagedPage();
+    const cached = apiAttachment;
+    if (
+      cached &&
+      cached.live &&
+      cached.generation === active.generation &&
+      cached.connection === active.connection &&
+      cached.targetId === targetId &&
+      cached.contextId !== undefined
+    ) {
+      return cached;
+    }
+    // Concurrent first requests share one attach instead of racing several.
+    if (apiAttachmentFlight) return apiAttachmentFlight;
+    const flight = (async () => {
+      if (cached) await dropApiAttachment(cached);
+      const fresh = await attachApiSession(active, targetId);
+      if (
+        active.generation !== activeConnectionGeneration ||
+        lifecycleState !== "BROWSER_READY" ||
+        stopRequested
+      ) {
+        await dropApiAttachment(fresh);
+        throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
+      }
+      apiAttachment = fresh;
+      return fresh;
+    })();
+    apiAttachmentFlight = flight;
+    try {
+      return await flight;
+    } finally {
+      if (apiAttachmentFlight === flight) apiAttachmentFlight = undefined;
+    }
+  };
+
   const stopInternal = async () => {
     stopRequested = true;
     managedTargetId = undefined;
@@ -1313,59 +1469,15 @@ export function createBrowserSessionManager(
       ) {
         throw new BrowserLifecycleError("BROWSER_UNAVAILABLE");
       }
-      const targetId = await manager.ensureManagedPage();
-      const generation = active.generation;
-
-      const attached = (await active.connection.send("Target.attachToTarget", {
-        targetId,
-        flatten: true,
-      })) as { sessionId?: unknown };
-      const sessionId = attached.sessionId;
-      if (typeof sessionId !== "string" || sessionId.length === 0) {
-        throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
-      }
-
-      // Only contexts announced on THIS page's session are ever considered, and
-      // among those only the page's own default context on the expected origin.
-      // An extension, a devtools page or an unrelated isolated world can never
-      // match, and nothing is ever "recovered" by falling back to another one.
-      let executionContextId: number | undefined;
-      const unsubscribeContext = active.connection.on("Runtime.executionContextCreated", (params, frameSessionId) => {
-        if (frameSessionId !== sessionId) return;
-        if (generation !== activeConnectionGeneration) return;
-        const context = (params as { context?: { id?: unknown; origin?: unknown; auxData?: unknown } })
-          ?.context;
-        if (!context || typeof context.id !== "number") return;
-        if (context.origin !== CRUNCHYROLL_PAGE_ORIGIN) return;
-        if ((context.auxData as { isDefault?: unknown } | undefined)?.isDefault !== true) return;
-        executionContextId = context.id;
-      });
-
-      const detach = async (): Promise<void> => {
-        try {
-          await active.connection.send("Target.detachFromTarget", { sessionId });
-        } catch {
-          // a disconnected browser is already the outcome close wants
-        }
-      };
-
-      try {
-        await active.connection.send("Runtime.enable", undefined, sessionId);
-      } catch (error) {
-        await detach();
-        throw error;
-      } finally {
-        unsubscribeContext();
-      }
-
-      if (executionContextId === undefined) {
-        // Fail closed: no legitimate Crunchyroll page context exists right now.
-        await detach();
-        throw new BrowserLifecycleError("BROWSER_UNAVAILABLE", "no-page-context");
-      }
-
+      // Latency: the page session is attached ONCE and reused by every later
+      // request on the same connection generation and managed target. Only the
+      // per-request `Runtime.callFunctionOn` crosses CDP on the hot path; the
+      // attach / Runtime.enable / detach round trips are paid on first use and
+      // after the page, target or connection changes.
+      const attachment = await acquireApiAttachment(active);
+      const generation = attachment.generation;
+      const sessionId = attachment.sessionId;
       let closed = false;
-      const contextId = executionContextId;
 
       const channel: ApiExecutionChannel = {
         connectionGeneration: generation,
@@ -1390,6 +1502,12 @@ export function createBrowserSessionManager(
             stopRequested
           ) {
             throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
+          }
+          // Read at request time: a navigation replaces the page context and the
+          // attachment tracks it. No context right now is a pre-dispatch refusal.
+          const contextId = attachment.contextId;
+          if (!attachment.live || contextId === undefined) {
+            throw new BrowserLifecycleError("BROWSER_UNAVAILABLE", "no-page-context");
           }
 
           let timer: { cancel(): void } | undefined;
@@ -1447,6 +1565,9 @@ export function createBrowserSessionManager(
               deadline,
             ]);
           } catch (error) {
+            // The shared attachment is no longer trusted after any failure on
+            // it: the next request re-attaches from scratch.
+            void dropApiAttachment(attachment);
             if (error === deadlineError) throw error;
             throw new BrowserLifecycleError(
               "BROWSER_DISCONNECTED",
@@ -1499,9 +1620,9 @@ export function createBrowserSessionManager(
         },
 
         async close() {
-          if (closed) return;
+          // Closing a channel releases this handle only. The shared page
+          // attachment stays for the next request.
           closed = true;
-          await detach();
         },
       };
       return channel;

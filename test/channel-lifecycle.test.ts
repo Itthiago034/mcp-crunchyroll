@@ -3,17 +3,47 @@ import { test } from "node:test";
 import { BrowserLifecycleError } from "../src/transport/browser-lifecycle-error.js";
 import { wireFakes } from "./_fake-browser-seams.js";
 
-test("100 API channels release their context listeners on the retained CDP connection", async () => {
+test("100 API channels share one page attachment and never accumulate listeners", async () => {
   const h = wireFakes();
   try {
     await h.manager.start();
     const connection = h.connector.connections[0];
     for (let i = 0; i < 100; i++) {
       const channel = await h.manager.openApiExecutionChannel();
-      assert.equal(connection.listenerCount("Runtime.executionContextCreated"), 0);
+      // One persistent tracker for the shared attachment, never one per channel.
+      assert.equal(connection.listenerCount("Runtime.executionContextCreated"), 1);
       await channel.close();
     }
+    const count = (method: string) => connection.calls.filter((call) => call.method === method).length;
+    // Latency: attach + Runtime.enable are paid once, not once per request.
+    assert.equal(count("Target.attachToTarget"), 1);
+    assert.equal(count("Runtime.enable"), 1);
+    assert.equal(count("Target.detachFromTarget"), 0);
     assert.equal(h.connector.connections.length, 1);
+  } finally {
+    await h.manager.stop();
+    h.cleanup();
+  }
+  // Stopping the browser releases the attachment's listeners too.
+  assert.equal(h.connector.connections[0].listenerCount("Runtime.executionContextCreated"), 0);
+});
+
+test("a destroyed page context makes the next channel re-attach instead of using a stale id", async () => {
+  const h = wireFakes();
+  try {
+    await h.manager.start();
+    const connection = h.connector.connections[0];
+    const first = await h.manager.openApiExecutionChannel();
+    await first.close();
+    const attach = connection.calls.find((call) => call.method === "Target.attachToTarget");
+    assert.ok(attach);
+    const sessionCalls = connection.calls.filter((call) => call.method === "Runtime.enable");
+    const sessionId = (sessionCalls[0] as { sessionId?: string }).sessionId;
+    connection.emitEvent("Runtime.executionContextsCleared", {}, sessionId);
+    const second = await h.manager.openApiExecutionChannel();
+    await second.close();
+    assert.equal(connection.calls.filter((call) => call.method === "Target.attachToTarget").length, 2);
+    assert.equal(connection.calls.filter((call) => call.method === "Target.detachFromTarget").length, 1);
   } finally {
     await h.manager.stop();
     h.cleanup();
