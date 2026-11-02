@@ -70,7 +70,29 @@ export interface PublicPlayerState {
   readonly current_time: number;
   readonly duration: number;
   readonly ready_state: number;
+  /** The video element's own media error, or null. */
+  readonly player_error: MediaErrorName | null;
 }
+
+export type MediaErrorName =
+  | "MEDIA_ERR_ABORTED"
+  | "MEDIA_ERR_NETWORK"
+  | "MEDIA_ERR_DECODE"
+  | "MEDIA_ERR_SRC_NOT_SUPPORTED";
+
+const MEDIA_ERRORS: Record<number, MediaErrorName> = {
+  1: "MEDIA_ERR_ABORTED",
+  2: "MEDIA_ERR_NETWORK",
+  3: "MEDIA_ERR_DECODE",
+  4: "MEDIA_ERR_SRC_NOT_SUPPORTED",
+};
+
+/**
+ * Whether playback was seen MOVING: `ADVANCING` means current_time grew between
+ * two observations, `STALLED` means it did not within the bounded wait, and
+ * `NOT_CHECKED` means the caller did not ask for the check.
+ */
+export type PlaybackProgress = "ADVANCING" | "STALLED" | "NOT_CHECKED";
 
 export interface PlayerControlReport {
   /** The action the caller asked for. */
@@ -85,6 +107,8 @@ export interface PlayerControlReport {
   readonly reason?: string;
   /** The last observed player state, or null when none could be observed. */
   readonly state: PublicPlayerState | null;
+  /** Only on a confirmed play when PerformOptions.confirmProgressMs was given. */
+  readonly progress?: PlaybackProgress;
   readonly message: string;
 }
 
@@ -125,6 +149,12 @@ export interface PerformOptions {
   readonly expectContentId?: string;
   /** Wait up to this long for the player to load before acting. Default: no wait. */
   readonly waitForReadyMs?: number;
+  /**
+   * For `play`: after the state is reached, watch current_time for up to this
+   * long and report whether it advanced. Returns as soon as it does, so a
+   * healthy stream costs one or two probes. Default: no check.
+   */
+  readonly confirmProgressMs?: number;
   readonly signal?: AbortSignal;
 }
 
@@ -161,6 +191,9 @@ const MESSAGES: Record<PlayerOutcome, string> = {
   BUSY: "Too many player actions are already queued.",
 };
 
+const STALLED_MESSAGE =
+  "The player is not paused, but current_time did not advance yet (buffering, an ad, or a stalled stream). Check again with crunchyroll_player_control status.";
+
 function isLoading(state: PlayerFrameState): boolean {
   return !state.hasSource || state.readyState < 1;
 }
@@ -178,6 +211,7 @@ export function toPublicState(state: PlayerFrameState): PublicPlayerState {
     current_time: Math.round(state.currentTime * 10) / 10,
     duration: Math.round(state.duration * 10) / 10,
     ready_state: state.readyState,
+    player_error: MEDIA_ERRORS[state.mediaError ?? 0] ?? null,
   });
 }
 
@@ -197,7 +231,13 @@ export function createPlayerController(ports: PlayerControllerPorts): PlayerCont
   const report = (
     action: PlayerAction,
     outcome: PlayerOutcome,
-    fields: { executed: boolean; verified: boolean; state: PlayerFrameState | undefined; reason?: string },
+    fields: {
+      executed: boolean;
+      verified: boolean;
+      state: PlayerFrameState | undefined;
+      reason?: string;
+      progress?: PlaybackProgress;
+    },
   ): PlayerControlReport => {
     const success = outcome === "CONFIRMED";
     return Object.freeze({
@@ -208,7 +248,8 @@ export function createPlayerController(ports: PlayerControllerPorts): PlayerCont
       outcome,
       ...(fields.reason ? { reason: fields.reason } : {}),
       state: fields.state ? toPublicState(fields.state) : null,
-      message: MESSAGES[outcome],
+      ...(fields.progress ? { progress: fields.progress } : {}),
+      message: fields.progress === "STALLED" ? MESSAGES.CONFIRMED + " " + STALLED_MESSAGE : MESSAGES[outcome],
     });
   };
 
@@ -281,8 +322,31 @@ export function createPlayerController(ports: PlayerControllerPorts): PlayerCont
 
       // 3. Already there: nothing is sent, and the observation is the evidence.
       const reached = REACHED[action];
+
+      /** For a confirmed play: did current_time actually move? Bounded, early exit. */
+      const progressOf = async (
+        from: PlayerFrameState,
+      ): Promise<{ progress?: PlaybackProgress; state: PlayerFrameState }> => {
+        const budget = action === "play" ? Math.max(0, options.confirmProgressMs ?? 0) : 0;
+        if (budget === 0) return { state: from };
+        const until = ports.now() + Math.min(budget, Math.max(0, remaining()));
+        let state = from;
+        for (;;) {
+          if (ports.now() >= until) return { progress: "STALLED", state };
+          await ports.sleep(timing.pollIntervalMs);
+          const next = await command("probe");
+          if (!next) throw new Stop("PLAYER_UNAVAILABLE", "CONTEXT_LOST");
+          if (next.state.currentTime > from.currentTime) return { progress: "ADVANCING", state: next.state };
+          state = next.state;
+          if (state.paused || state.ended || (state.mediaError ?? 0) !== 0) return { progress: "STALLED", state };
+        }
+      };
+
       if (reached(probe.state)) {
-        return report(action, "CONFIRMED", { executed: false, verified: true, state: probe.state, reason: "ALREADY_IN_STATE" });
+        const checked = await progressOf(probe.state);
+        return report(action, "CONFIRMED", {
+          executed: false, verified: true, state: checked.state, reason: "ALREADY_IN_STATE", progress: checked.progress,
+        });
       }
 
       // 4. The action itself.
@@ -298,7 +362,10 @@ export function createPlayerController(ports: PlayerControllerPorts): PlayerCont
       let observed = result.state;
       for (;;) {
         if (reached(observed)) {
-          return report(action, "CONFIRMED", { executed, verified: true, state: observed });
+          const checked = await progressOf(observed);
+          return report(action, "CONFIRMED", {
+            executed, verified: true, state: checked.state, progress: checked.progress,
+          });
         }
         if (ports.now() >= verifyUntil) break;
         await ports.sleep(timing.pollIntervalMs);

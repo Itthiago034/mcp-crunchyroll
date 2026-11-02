@@ -222,7 +222,7 @@ describe("player controller — play, pause, fullscreen", () => {
     assert.equal(report.executed, false);
     assert.deepEqual(h.sent, ["probe"]);
     assert.deepEqual(Object.keys(report.state!).sort(), [
-      "buffering", "current_time", "duration", "ended", "fullscreen", "loading", "muted", "paused", "playing", "ready_state",
+      "buffering", "current_time", "duration", "ended", "fullscreen", "loading", "muted", "paused", "player_error", "playing", "ready_state",
     ]);
   });
 });
@@ -437,5 +437,77 @@ describe("player controller — honesty property over every scripted failure", (
         }
       }
     }
+  });
+});
+
+// ── Playback progress (opened vs. actually playing) ──────────────────────────
+
+function progressHarness(opts: { advance: boolean; mediaError?: number }) {
+  let time = 0;
+  let state = frame({ paused: true, currentTime: 10 });
+  const sent: PlayerCommand[] = [];
+  const channel: PlaybackControlChannel = {
+    connectionGeneration: 1,
+    targetId: "watch-1",
+    loss: () => undefined,
+    async currentContentId() { return undefined; },
+    async run(command) {
+      sent.push(command);
+      if (command === "play") state = { ...state, paused: false };
+      else if (command === "probe" && !state.paused) {
+        state = {
+          ...state,
+          currentTime: opts.advance ? state.currentTime + 0.1 : state.currentTime,
+          mediaError: opts.mediaError ?? 0,
+        };
+      }
+      return { state };
+    },
+    async close() {},
+  };
+  const controller = createPlayerController({
+    openChannel: async () => channel,
+    permission: () => "OK",
+    now: () => time,
+    sleep: async (ms) => { time += ms; await Promise.resolve(); },
+    timing: { verifyTimeoutMs: 1_000, pollIntervalMs: 100, actionDeadlineMs: 5_000, commandDeadlineMs: 2_000 },
+  });
+  return { controller, sent, get time() { return time; } };
+}
+
+describe("player controller — playback progress", () => {
+  test("without confirmProgressMs nothing extra is probed and no progress is reported", async () => {
+    const h = progressHarness({ advance: true });
+    const report = await h.controller.perform("play");
+    assert.equal(report.outcome, "CONFIRMED");
+    assert.equal(report.progress, undefined);
+    assert.deepEqual(h.sent, ["probe", "play"]);
+  });
+
+  test("an advancing current_time is reported as ADVANCING after one extra probe", async () => {
+    const h = progressHarness({ advance: true });
+    const report = await h.controller.perform("play", { confirmProgressMs: 2_000 });
+    assertHonest(report);
+    assert.equal(report.progress, "ADVANCING");
+    assert.deepEqual(h.sent, ["probe", "play", "probe"]);
+    assert.ok(h.time <= 100, "returns as soon as time moves");
+  });
+
+  test("a stuck current_time is STALLED, still honest, and bounded by the wait", async () => {
+    const h = progressHarness({ advance: false });
+    const report = await h.controller.perform("play", { confirmProgressMs: 500 });
+    assertHonest(report);
+    assert.equal(report.outcome, "CONFIRMED");
+    assert.equal(report.progress, "STALLED");
+    assert.match(report.message, /did not advance/);
+    assert.ok(h.time <= 600);
+  });
+
+  test("a media error stops the wait early and is named in the state", async () => {
+    const h = progressHarness({ advance: false, mediaError: 2 });
+    const report = await h.controller.perform("play", { confirmProgressMs: 2_000 });
+    assert.equal(report.progress, "STALLED");
+    assert.equal(report.state?.player_error, "MEDIA_ERR_NETWORK");
+    assert.ok(h.time <= 100);
   });
 });

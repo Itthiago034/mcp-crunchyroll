@@ -253,6 +253,7 @@ export const CRUNCHYROLL_PLAYER_FUNCTION = `
       fullscreen: document.fullscreenElement !== null && document.fullscreenElement !== undefined,
       fullscreenEnabled: document.fullscreenEnabled === true,
       topLevel: window === window.top,
+      mediaError: video !== null && video.error ? finite(video.error.code) : 0,
     });
     const video = pick();
     let error = null;
@@ -342,6 +343,11 @@ function parsePlayerResult(raw: unknown): PlayerCommandResult | undefined {
     fullscreen: state.fullscreen as boolean,
     fullscreenEnabled: state.fullscreenEnabled as boolean,
     topLevel: state.topLevel as boolean,
+    mediaError:
+      typeof state.mediaError === "number" && Number.isInteger(state.mediaError) &&
+      state.mediaError >= 0 && state.mediaError <= 4
+        ? state.mediaError
+        : 0,
   });
   const error = value?.error;
   if (error === null || error === undefined) return Object.freeze({ state: parsed });

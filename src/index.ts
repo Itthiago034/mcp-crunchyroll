@@ -317,6 +317,8 @@ const playerController = createPlayerController({
 
 /** How long crunchyroll_play waits for a freshly opened player before acting. */
 const PLAY_READY_WAIT_MS = 20_000;
+/** After a confirmed play, how long to watch current_time advance. Returns early once it moves. */
+const PLAY_PROGRESS_WAIT_MS = 2_500;
 
 // ── Result shaping ────────────────────────────────────────────────────────────
 
@@ -826,12 +828,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
           const outcome = await playerController.perform(action, {
             expectContentId: episodeId,
             waitForReadyMs: PLAY_READY_WAIT_MS,
+            ...(action === "play" ? { confirmProgressMs: PLAY_PROGRESS_WAIT_MS } : {}),
             signal: extra?.signal,
           });
           reports[key] = outcome;
           allConfirmed &&= outcome.success;
         }
-        return jsonResult({ ...opened, success: allConfirmed, partial: !allConfirmed, ...reports });
+        // "Opened" and "playing" are different facts: playing_verified is true
+        // only when current_time was seen advancing after play.
+        const playReport = reports.autoplay as { progress?: string } | undefined;
+        const playingVerified = playReport ? playReport.progress === "ADVANCING" : undefined;
+        return jsonResult({
+          ...opened,
+          success: allConfirmed,
+          partial: !allConfirmed,
+          ...(playingVerified === undefined ? {} : { playing_verified: playingVerified }),
+          ...reports,
+        });
       }
 
       case "crunchyroll_player_control": {
@@ -849,7 +862,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
             "crunchyroll_player_control takes exactly one argument, action: play, pause, fullscreen, exit_fullscreen or status."
           );
         }
-        const outcome = await playerController.perform(action as PlayerAction, { signal: extra?.signal });
+        const outcome = await playerController.perform(action as PlayerAction, {
+          ...(action === "play" ? { confirmProgressMs: PLAY_PROGRESS_WAIT_MS } : {}),
+          signal: extra?.signal,
+        });
         return jsonResult(outcome, !outcome.success);
       }
 

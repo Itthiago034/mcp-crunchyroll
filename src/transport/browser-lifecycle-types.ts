@@ -202,6 +202,8 @@ export interface PlayerFrameState {
   readonly fullscreen: boolean;
   readonly fullscreenEnabled: boolean;
   readonly topLevel: boolean;
+  /** HTMLMediaElement.error.code (1-4), or 0 when the video has no error. */
+  readonly mediaError?: number;
 }
 
 /** Closed page-side failure names. Anything else is reported as UNKNOWN. */
