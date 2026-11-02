@@ -8,6 +8,8 @@
 
 # MCP Crunchyroll
 
+[Leia em português](docs/README-pt-BR.md)
+
 An unofficial [Model Context Protocol](https://modelcontextprotocol.io/) server for Crunchyroll, written in TypeScript. It gives MCP clients a closed tool surface for catalog discovery, account reads, and account mutations through browser-mediated authentication and provider access.
 
 [![CI](https://github.com/Itthiago034/mcp-crunchyroll/actions/workflows/ci.yml/badge.svg)](https://github.com/Itthiago034/mcp-crunchyroll/actions/workflows/ci.yml)
@@ -15,6 +17,27 @@ An unofficial [Model Context Protocol](https://modelcontextprotocol.io/) server 
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.3-3178C6)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Unofficial](https://img.shields.io/badge/unofficial-community%20project-f47521)
+
+## What you can ask
+
+After connecting the server and completing interactive sign-in, try asking your MCP client:
+
+- “Search Crunchyroll for Frieren.”
+- “Show the seasons and episodes for this series.”
+- “What anime have I watched recently?”
+- “Show my watchlist and recommend something similar.”
+
+Available results depend on the authenticated account, region, client, and Crunchyroll's services. These examples describe catalog and account operations; the server does not play videos.
+
+## Quick start
+
+1. Install Node.js 18 or newer and a supported Chromium-family browser.
+2. Clone and build the repository using the commands below.
+3. Add the built server to your MCP client using the configuration below.
+4. Invoke `crunchyroll_login({})` and sign in yourself in the managed browser.
+5. Check `crunchyroll_status({})`, then try a prompt above.
+
+Hermes users can also refer to the included `manifest.yaml`. The actual setup depends on your Hermes version.
 
 ## Release status
 
