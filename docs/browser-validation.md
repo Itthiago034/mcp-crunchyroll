@@ -2,6 +2,19 @@
 
 *Portuguese version: [pt-BR](pt-BR/validacao-navegador.md).*
 
+## Fixture correction — 2026-11-02
+
+PR #5's Node 18 and 20 jobs failed at the assertion that all oversized streams
+stopped before the server sent 1 MiB. The truncation and response-byte-limit
+assertions had passed. The previous fixture wrote 16 KiB every 2 ms, so that
+server-side assertion also depended on scheduling and browser/network buffering.
+The fixture now advertises a 1 MiB response, sends only the requested budget
+plus 16 KiB, and holds the remainder open. It still requires truncation, a
+bounded returned body, peer cancellation before a complete response, and zero
+active requests. This checks cancellation against an unfinished real HTTP
+response without racing a timer-driven producer. Historical measurements below
+describe the earlier fixture; this correction is not a new provider measurement.
+
 The initial cloud measurements use Chromium 151.0.7922.173 with its native sandbox
 enabled and Node.js 24.19.0. The authenticated Linux validation section separately
 records the report submitted by the operator of their PC. Results are observations

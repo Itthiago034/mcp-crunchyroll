@@ -2,6 +2,20 @@
 
 *Versão principal em inglês: [English](../browser-validation.md).*
 
+## Correção da fixture — 2026-11-02
+
+Os jobs Node 18 e 20 do PR #5 falharam na asserção de que todos os streams
+excedentes paravam antes de o servidor enviar 1 MiB. As verificações de
+truncamento e limite de bytes da resposta já haviam passado. A fixture anterior
+escrevia 16 KiB a cada 2 ms; essa asserção no servidor também dependia do
+agendamento e dos buffers do navegador e da rede. Agora a fixture anuncia
+1 MiB, envia apenas o limite solicitado mais 16 KiB e mantém o restante aberto.
+Ela continua exigindo truncamento, resposta dentro do limite, cancelamento pelo
+cliente antes de completar a resposta e zero requisições ativas. Isso verifica
+o cancelamento de uma resposta HTTP real ainda aberta sem competir com um
+produtor por temporizador. As medições históricas abaixo usam a fixture anterior;
+esta correção não representa uma nova medição no provedor.
+
 As medições iniciais na nuvem usam Chromium 151.0.7922.173 com sandbox nativo
 habilitado e Node.js 24.19.0. A seção de validação autenticada no Linux registra
 separadamente o relatório enviado pelo operador do seu PC. Os resultados são

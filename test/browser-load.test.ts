@@ -68,20 +68,20 @@ test("real Chromium validates concurrent HTTP requests, resource limits and reco
       res.writeHead(302, { Location: "/redirect-target" }); res.end(); return;
     }
     if (url.pathname === "/oversize") {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      const observation = { bytes: 0, cancelled: false };
-      streamResults.push(observation);
       const total = 1024 * 1024;
-      const chunk = Buffer.alloc(16 * 1024, 120);
-      const timer = setInterval(() => {
-        observation.bytes += chunk.length;
-        res.write(chunk);
-        if (observation.bytes >= total) { clearInterval(timer); res.end(); }
-      }, 2);
+      const budget = Number(url.searchParams.get("budget"));
+      const prefixBytes = budget + 16 * 1024;
+      assert.ok(budget === 4096 || budget === MAX_API_RESPONSE_BYTES);
+      assert.ok(prefixBytes < total);
+      res.writeHead(200, { "Content-Type": "application/json", "Content-Length": total });
+      const observation = { bytes: prefixBytes, cancelled: false };
+      streamResults.push(observation);
       res.once("close", () => {
-        clearInterval(timer);
-        observation.cancelled = observation.bytes < total;
+        observation.cancelled = !res.writableFinished;
       });
+      // Hold the advertised remainder open: cancellation must close the real
+      // response, rather than race a 2 ms producer that may fill browser buffers.
+      res.write(Buffer.alloc(prefixBytes, 120));
       return;
     }
     const status = url.pathname === "/error" ? Number(url.searchParams.get("status")) : 200;
@@ -193,7 +193,7 @@ test("real Chromium validates concurrent HTTP requests, resource limits and reco
     });
     await pool(12, 6, async (id) => {
       const budget = id % 2 ? 4096 : MAX_API_RESPONSE_BYTES;
-      const result = await request(`/oversize?id=${id}`, budget);
+      const result = await request(`/oversize?id=${id}&budget=${budget}`, budget);
       assert.equal(result.failed, false);
       if (result.failed) throw new Error("Oversized responses must produce the truncation marker");
       assert.equal(result.response.truncated, true);
@@ -206,6 +206,7 @@ test("real Chromium validates concurrent HTTP requests, resource limits and reco
     assert.equal(active, 0);
     assert.equal(streamResults.length, 12);
     assert.ok(streamResults.every((stream) => stream.cancelled), "all oversized streams stopped before sending 1 MiB");
+    assert.ok(streamResults.every((stream) => stream.bytes < 1024 * 1024));
     const resetAttempts = [...seen.entries()].filter(([path]) => path.startsWith("/disconnect"));
     t.diagnostic(JSON.stringify({ resetAttempts: Object.fromEntries(resetAttempts) }));
     assert.equal(resetAttempts.length, 12);
