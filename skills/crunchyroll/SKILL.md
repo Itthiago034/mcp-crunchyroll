@@ -1,6 +1,6 @@
 ---
 name: crunchyroll
-description: "Assistir anime na Crunchyroll do usuário pelo MCP crunchyroll: colocar/abrir/tocar um episódio (\"coloca X ep 12\", \"temporada 2\", dublado ou legendado), continuar de onde parou, próximo episódio, dar play, pausar, tela cheia, buscar títulos, temporadas e episódios, recomendações, lançamentos da temporada, histórico e lista (watchlist). Use SEMPRE que o pedido envolver anime, Crunchyroll, o player ou assistir algo."
+description: "Use when the user asks about anime, Crunchyroll, watching something, or its player: playing episodes or movies, choosing seasons, dubbed or subtitled versions, resuming, the next episode, play/pause/fullscreen, title discovery, recommendations, seasonal releases, history, or the watchlist."
 version: 2.0.0
 author: Thiago
 license: MIT
@@ -12,281 +12,294 @@ metadata:
 
 # Crunchyroll (MCP `crunchyroll`)
 
-Esta skill ensina a usar o servidor MCP `crunchyroll` para encontrar e **tocar** anime na conta
-Crunchyroll do usuário. O vídeo abre numa aba nova do navegador dedicado, que já está logado.
-Você não precisa de navegador próprio, de senha nem de cookies.
+*Portuguese reference: [pt-BR](../../docs/pt-BR/crunchyroll-skill.md).*
 
-As ferramentas aparecem com o prefixo `mcp__crunchyroll__`, por exemplo
-`mcp__crunchyroll__crunchyroll_play`. Neste texto elas são citadas pelo nome curto
-(`crunchyroll_play`), mas **chame sempre o nome completo**. Se o seu ambiente usa
-`tool_describe`/`tool_call`, descreva só as ferramentas de que precisa e chame pelo nome completo.
+This skill explains how to use the `crunchyroll` MCP server to find and **play** anime
+on the user's Crunchyroll account. Video opens in a new tab of the dedicated browser,
+which is already signed in. You need neither your own browser nor passwords or cookies.
 
-## Regras de ouro
+Tools appear with the `mcp__crunchyroll__` prefix, for example
+`mcp__crunchyroll__crunchyroll_play`. This document uses their short names
+(`crunchyroll_play`), but **always call the full name**. If the environment uses
+`tool_describe`/`tool_call`, describe only the tools you need and call them by their full names.
 
-1. **Nunca abra a Crunchyroll com outro navegador** (`browser_exec`, `browser_navigate`, curl, web
-   fetch). Ele não tem a sessão do usuário e cai na verificação da Cloudflare ("Um momento…",
-   "Verify you are human"). Para tocar, use **somente** `crunchyroll_play`.
-2. **O player só é controlado por `crunchyroll_player_control`** (play, pause, tela cheia, sair da
-   tela cheia, status). É **proibido** improvisar: nada de terminal, `ps`/`find` atrás do navegador,
-   scripts JavaScript, WebSocket direto, porta de depuração (`9222`, `DevToolsActivePort`), CDP
-   avulso, `xdotool` ou cliques simulados. Se a ferramenta oficial falhar, **diga ao usuário o que
-   ela respondeu** (veja "Respostas do player") em vez de contornar a camada de segurança.
-3. **Nunca peça e-mail, senha ou código** ao usuário. O login é feito pelo próprio usuário na janela
-   do navegador dedicado.
-4. **Não invente IDs.** Todo ID (série, temporada, episódio) sai de uma resposta de ferramenta.
-   IDs são letras maiúsculas e números: `G8DHV78ZM`, `GS00377802ENUS`, `GE00377814ENUS`.
-5. **Não repita a mesma chamada com os mesmos argumentos** depois de um erro. Leia o erro e siga a
-   tabela de erros abaixo.
-6. `crunchyroll_continue_watching` e `crunchyroll_get_subscription` **não funcionam** (sempre
-   respondem `OPERATION_NOT_MIGRATED`). Não chame. Para "continuar", use o histórico (receita C).
-7. Responda ao usuário em português, curto: o que você abriu (anime, temporada, episódio, título e
-   idioma). Não despeje JSON.
+## Golden rules
 
-## Os tipos de ID (não confunda)
+1. **Never open Crunchyroll in another browser** (`browser_exec`, `browser_navigate`, curl,
+   web fetch). It does not have the user's session and encounters Cloudflare verification
+   (“Just a moment…”, “Verify you are human”). Use **only** `crunchyroll_play` for playback.
+2. **Control the player only through `crunchyroll_player_control`** (play, pause, fullscreen,
+   exit fullscreen, status). Improvisation is **forbidden**: no terminal, `ps`/`find` to locate
+   the browser, JavaScript scripts, direct WebSocket, debugging port (`9222`, `DevToolsActivePort`),
+   standalone CDP, `xdotool`, or simulated clicks. If the official tool fails, **tell the user
+   what it returned** (see “Player responses”) instead of bypassing the security boundary.
+3. **Never ask the user for an email address, password, or code.** The user signs in directly
+   in the dedicated browser window.
+4. **Do not invent IDs.** Every series, season, or episode ID comes from a tool response.
+   IDs use uppercase letters and digits: `G8DHV78ZM`, `GS00377802ENUS`, `GE00377814ENUS`.
+5. **Do not repeat the same call with the same arguments** after an error. Read the error
+   and follow the error table below.
+6. `crunchyroll_continue_watching` and `crunchyroll_get_subscription` **do not work** (they
+   always return `OPERATION_NOT_MIGRATED`). Do not call them. To resume, use history (Recipe C).
+7. Reply briefly in the user's language; use English when no language preference is known.
+   Say what you opened (anime, season, episode, title, and audio language). Do not dump JSON.
 
-| Tipo | Exemplo | De onde vem | Serve para |
+## ID types (do not confuse them)
+
+| Type | Example | Source | Used by |
 |---|---|---|---|
-| Série | `G8DHV78ZM` | `crunchyroll_search`, `crunchyroll_browse`, `parent_id` do histórico | `crunchyroll_get_seasons`, `crunchyroll_get_series`, `crunchyroll_get_similar` |
-| Temporada | `GS00377802ENUS` | `crunchyroll_get_seasons` → `seasons[].id` ou um valor de `seasons[].audio_versions` | `crunchyroll_get_episodes` |
-| Episódio | `GE00377814ENUS` | `crunchyroll_get_episodes` → `episodes[].id` ou um valor de `episodes[].audio_versions` | `crunchyroll_play`, `crunchyroll_get_episode`, `crunchyroll_get_playheads` |
+| Series | `G8DHV78ZM` | `crunchyroll_search`, `crunchyroll_browse`, history's `parent_id` | `crunchyroll_get_seasons`, `crunchyroll_get_series`, `crunchyroll_get_similar` |
+| Season | `GS00377802ENUS` | `crunchyroll_get_seasons` → `seasons[].id` or a value from `seasons[].audio_versions` | `crunchyroll_get_episodes` |
+| Episode | `GE00377814ENUS` | `crunchyroll_get_episodes` → `episodes[].id` or a value from `episodes[].audio_versions` | `crunchyroll_play`, `crunchyroll_get_episode`, `crunchyroll_get_playheads` |
 
-`crunchyroll_play` só aceita **ID de episódio** (ou de filme). Nunca passe ID de série ou temporada.
+`crunchyroll_play` accepts only an **episode ID** (or movie ID). Never pass a series or season ID.
 
-## Antes de tudo: sessão
+## First: the session
 
-Você **não** precisa checar o login nem chamar `crunchyroll_login` antes de consultar. As ferramentas
-de conteúdo restabelecem a sessão sozinhas, **uma única vez para todas as chamadas simultâneas**,
-quando isso é só reaproveitar uma sessão que o próprio usuário já autorizou no navegador dedicado
-(inclusive na primeira consulta de uma conversa nova). Por isso:
+You **do not** need to check login or call `crunchyroll_login` before querying. Content
+tools re-establish the session automatically, **once for all simultaneous calls**, when
+this merely reuses a session the user has already authorized in the dedicated browser
+(including the first query in a new conversation). Therefore:
 
-- **Não** faça consultas "de teste" nem repita a primeira consulta por precaução.
-- **Não** dispare histórico e recomendações em paralelo "para ganhar tempo": decida antes qual das
-  duas o pedido precisa (Receita F).
+- **Do not** make “test” queries or repeat the first query as a precaution.
+- **Do not** request history and recommendations in parallel “to save time”: first decide
+  which one the request needs (Recipe F).
 
-Quando não dá para restabelecer sozinho, a resposta traz `code` e `hint`. Siga o `code`:
+When automatic recovery is unavailable, the response includes `code` and `hint`. Follow `code`:
 
-| `code` | O que fazer |
+| `code` | Action |
 |---|---|
-| `LOGIN_REQUIRED`, `SILENT_REAUTH_FAILED`, `SILENT_REAUTH_COOLDOWN`, `REAUTH_REQUIRED` | Chame `crunchyroll_login` (sem argumentos) **uma vez**; depois refaça **uma vez** a chamada que falhou. |
-| `LOGGED_OUT` | O usuário saiu da conta. Pergunte se ele quer entrar de novo antes de chamar `crunchyroll_login`. |
-| `LOGGING_OUT` | Um logout está em andamento. Não tente de novo sozinho. |
-| `TIMEOUT` / `CANCELLED` | Avise o usuário; tente de novo só se ele pedir. |
+| `LOGIN_REQUIRED`, `SILENT_REAUTH_FAILED`, `SILENT_REAUTH_COOLDOWN`, `REAUTH_REQUIRED` | Call `crunchyroll_login` (no arguments) **once**, then retry the failed call **once**. |
+| `LOGGED_OUT` | The user signed out. Ask whether they want to sign in again before calling `crunchyroll_login`. |
+| `LOGGING_OUT` | Logout is in progress. Do not retry automatically. |
+| `TIMEOUT` / `CANCELLED` | Inform the user; retry only if they ask. |
 
-Se `crunchyroll_login` demorar e voltar `LOGIN_REQUIRED`, ou der timeout, a sessão do navegador
-acabou. Diga ao usuário, sem tentar de novo por conta própria:
-"A sessão da Crunchyroll expirou. Abra o login manual com `npm run onboard:browser` na pasta
-`~/mcp-crunchyroll-validacao`, entre na conta, feche a janela pelo X e me peça de novo."
-(Se aparecer a verificação da Cloudflare dentro da janela aberta pelo MCP, é o mesmo caso: só o
-login manual resolve.)
+If `crunchyroll_login` takes a long time and returns `LOGIN_REQUIRED`, or times out,
+the browser session has expired. Tell the user, without retrying on your own:
+“Your Crunchyroll session has expired. Run `npm run onboard:browser` in your MCP
+Crunchyroll checkout, sign in, close the window with its close button, and ask me again.”
+The original local setup used `~/mcp-crunchyroll-validacao`; other installations should
+use their own checkout directory.
+(Cloudflare verification inside the window opened by the MCP requires the same manual
+sign-in procedure.)
 
-`crunchyroll_status` só informa o estado. Ele nunca conserta nada.
+`crunchyroll_status` only reports state. It never repairs anything.
 
-## Receita A — "Coloca <anime> [temporada N] ep M"
+## Recipe A — “Play <anime> [season N] episode M”
 
-Exemplo: "coloca Clevatess temporada 2 episódio 12".
+Example: “play Clevatess season 2 episode 12”.
 
-1. `crunchyroll_search` com `{"query": "Clevatess"}`.
-   - A resposta é `{"count", "results": [{"type", "id", "title", "description"}]}` (só séries e
-     filmes).
-   - Escolha o resultado `type: "series"` cujo `title` bate com o pedido. Se houver dois animes
-     diferentes plausíveis, pergunte qual. Se o pedido for um filme, procure `type: "movie_listing"`.
-   - Nenhum resultado: tente o nome em inglês ou japonês (ex.: "Frieren", "Sousou no Frieren") antes
-     de dizer que não achou.
-2. `crunchyroll_get_seasons` com `{"series_id": "<id da série>"}`.
-   - Cada item de `seasons` tem `id`, `title` (ex.: "Clevatess II"), `season_number`,
-     `number_of_episodes`, `subtitle_locales`, `original_audio` e `audio_versions`.
-   - **Séries longas numeradas de forma contínua** (One Piece, Naruto Shippuden, Boruto…): o
-     `episode_number` é o número absoluto do episódio e o `title` da temporada mostra o intervalo, ex.:
-     "Land of Wano (892-1088)", "Egghead (1089-1155)". Para "One Piece ep 1100", escolha a temporada
-     cujo intervalo contém 1100. `season_number` nessas séries não corresponde ao que o usuário chama de
-     "temporada".
-   - "Temporada 2" = o item com `season_number: 2`. Sem temporada no pedido, use a 1 se o episódio
-     couber nela; se o usuário disse só "ep M" e a série tem várias temporadas, prefira a temporada
-     mais recente que tenha o episódio M **apenas se** ele estiver claramente acompanhando a série
-     (histórico); senão, pergunte.
-   - Ignore itens que não sejam temporadas da série principal (ex.: especiais, recaps) a menos que o
-     usuário peça.
-3. `crunchyroll_get_episodes` com `{"season_id": "<id da temporada>", "episode_number": M}`.
-   - Passar `episode_number` devolve **só** aquele episódio (`count: 1`) e o total da temporada em
-     `season_episode_count`. Use sempre que souber o número: a resposta fica pequena.
-   - Cada episódio tem `id`, `episode_number`, `title`, `is_premium_only`, `availability_status`,
-     `next_episode_id`, `duration_ms`, `original_audio` e `audio_versions`.
-   - `count: 0` → a temporada pode **continuar a numeração da anterior** (ex.: Kaiju No. 8 temporada 2
-     começa no episódio 13). Se `M <= season_episode_count`, chame de novo **sem** `episode_number`,
-     ordene por `episode_number` e pegue o M-ésimo da temporada (o "ep 5 da temporada 2" do Kaiju
-     é o `episode_number` 16). Diga ao usuário os dois números ("5º da temporada, ep. 16"). Se
-     `M > season_episode_count`, diga quantos episódios a temporada tem.
-   - Sem número (ex.: "o que tem nessa temporada?"), chame sem `episode_number` para listar todos.
-4. Escolha o idioma (veja "Idioma e versões") e chame `crunchyroll_play` com
-   `{"episode_id": "<id do episódio escolhido>"}`.
-   - Sucesso: `{"opened": true, "episode_id", "url"}`. O player abre numa aba do navegador dedicado;
-     se já houver um episódio tocando, a mesma aba troca para o novo.
-   - Se o usuário pediu para já começar a tocar e/ou em tela cheia ("coloca e dá play", "em tela
-     cheia"), passe as opções na **mesma** chamada: `{"episode_id": "...", "autoplay": true}` e/ou
-     `"fullscreen": true`. A resposta traz `autoplay`/`fullscreen` com o resultado de cada passo e
-     `partial: true` se algum não foi confirmado. Sem as opções, nada muda.
-5. Responda: "Abri **Clevatess II – ep. 12: The Millennium of a Dark Beast Lord** (dublado em PT-BR)
-   no navegador da Crunchyroll."
+1. Call `crunchyroll_search` with `{"query": "Clevatess"}`.
+   - The response is `{"count", "results": [{"type", "id", "title", "description"}]}` (series
+     and movies only).
+   - Choose the `type: "series"` result whose `title` matches the request. If two different
+     anime are plausible, ask which one. For a movie, look for `type: "movie_listing"`.
+   - No results: try the English or Japanese title (e.g. “Frieren”, “Sousou no Frieren”)
+     before saying you could not find it.
+2. Call `crunchyroll_get_seasons` with `{"series_id": "<series ID>"}`.
+   - Each `seasons` item has `id`, `title` (e.g. “Clevatess II”), `season_number`,
+     `number_of_episodes`, `subtitle_locales`, `original_audio`, and `audio_versions`.
+   - **Long series with continuous numbering** (One Piece, Naruto Shippuden, Boruto…):
+     `episode_number` is the absolute episode number and the season `title` shows its range,
+     e.g. “Land of Wano (892-1088)”, “Egghead (1089-1155)”. For “One Piece ep 1100”, select
+     the season whose range contains 1100. For these series, `season_number` does not
+     correspond to what the user calls a “season”.
+   - “Season 2” means the item with `season_number: 2`. If no season is specified, use
+     season 1 if it contains the episode; if the user said only “ep M” and the series has
+     several seasons, prefer the most recent season containing episode M **only if** history
+     clearly shows they are following that series; otherwise ask.
+   - Ignore items outside the main series seasons (e.g. specials, recaps) unless requested.
+3. Call `crunchyroll_get_episodes` with `{"season_id": "<season ID>", "episode_number": M}`.
+   - Providing `episode_number` returns **only** that episode (`count: 1`) and the season
+     total in `season_episode_count`. Always use it when you know the number to keep responses small.
+   - Each episode has `id`, `episode_number`, `title`, `is_premium_only`, `availability_status`,
+     `next_episode_id`, `duration_ms`, `original_audio`, and `audio_versions`.
+   - `count: 0` → the season may **continue the previous season's numbering** (e.g. Kaiju No. 8
+     season 2 starts at episode 13). If `M <= season_episode_count`, query again **without**
+     `episode_number`, sort by `episode_number`, and select the Mth episode of the season
+     (Kaiju's “season 2 episode 5” has `episode_number` 16). Tell the user both numbers
+     (“5th of the season, episode 16”). If `M > season_episode_count`, state the season's episode count.
+   - Without a number (e.g. “what is in this season?”), omit `episode_number` to list all episodes.
+4. Choose the audio language (see “Languages and versions”) and call `crunchyroll_play` with
+   `{"episode_id": "<selected episode ID>"}`.
+   - Success: `{"opened": true, "episode_id", "url"}`. The player opens in a dedicated
+     browser tab; if an episode is already open, the same tab navigates to the new one.
+   - If the user requests immediate playback and/or fullscreen (“open and play it”, “in
+     fullscreen”), pass the options in the **same** call: `{"episode_id": "...", "autoplay": true}`
+     and/or `"fullscreen": true`. The response includes `autoplay`/`fullscreen` with each
+     step's result and `partial: true` if any step was not confirmed. Without the options,
+     behavior is unchanged.
+5. Reply: “Opened **Clevatess II – ep. 12: The Millennium of a Dark Beast Lord**
+   (Portuguese dub, pt-BR) in the Crunchyroll browser.”
 
-## Receita B — Próximo episódio / episódio seguinte
+## Recipe B — Next episode
 
-1. Descubra o episódio atual: o que você acabou de abrir, ou o primeiro do histórico (Receita C).
-2. `crunchyroll_get_episode` com esse ID → leia `next_episode_id` (vem num idioma qualquer, ex.:
-   `...ENUS`).
-3. Para tocar no mesmo idioma do atual, chame `crunchyroll_get_episode` com o `next_episode_id` e pegue
-   em `versions` a `guid` cujo `audio_locale` é o desejado (em `crunchyroll_get_episode` as versões vêm
-   no formato completo: lista de `{audio_locale, guid, original, ...}`). **Não monte o ID trocando o sufixo na mão**
-   (`ENUS` → `PTBR`): nem todo episódio tem todas as dublagens, e o ID inventado pode não existir.
-4. `crunchyroll_play` com essa `guid`. Sem `next_episode_id`, a temporada acabou: diga isso e ofereça a
-   próxima temporada (`crunchyroll_get_seasons`).
+1. Identify the current episode: the one you just opened, or the first history item (Recipe C).
+2. Call `crunchyroll_get_episode` with that ID → read `next_episode_id` (it may be in any
+   language, e.g. `...ENUS`).
+3. To preserve the current audio language, call `crunchyroll_get_episode` with `next_episode_id`
+   and select the `guid` in `versions` whose `audio_locale` matches the requested language
+   (`crunchyroll_get_episode` returns full versions: a list of `{audio_locale, guid, original, ...}`).
+   **Do not construct an ID by manually changing its suffix** (`ENUS` → `PTBR`): not every
+   episode has every dub, and the invented ID may not exist.
+4. Call `crunchyroll_play` with that `guid`. Without `next_episode_id`, the season has ended:
+   say so and offer the next season (`crunchyroll_get_seasons`).
 
-## Receita C — "Continua de onde parei" / "o que eu estava vendo?"
+## Recipe C — “Resume where I left off” / “What was I watching?”
 
-1. `crunchyroll_get_history` com `{"n": 10}`.
-   - `items[]` vem do mais recente para o mais antigo. Cada item tem `id` (episódio, ex.:
-     `GE00377814PTBR`), `title` (título do episódio), `parent_id` (série), `playhead` (segundos já
-     vistos), `fully_watched`, `date_played` e `episode_metadata` com `series_title`,
-     `season_title`, `season_number`, `episode_number`, `duration_ms`, `original_audio` e
-     `audio_versions`.
-   - Pode haver vários itens do mesmo episódio ou da mesma série; o primeiro é o mais recente.
-2. Pegue o primeiro item (ou o primeiro da série que o usuário citou, comparando `parent_id`).
-   - `fully_watched: false` → abra **esse mesmo** `id` com `crunchyroll_play`; o player retoma do
-     `playhead`. "Continua o anime" quer o vídeo tocando: use
-     `{"episode_id": "<id>", "autoplay": true}` na mesma chamada (não chame o player depois).
-   - `fully_watched: true` → abra o próximo (Receita B, a partir do passo 2).
-   - "Continuar" = retomar o mesmo episódio se não terminou. "Próximo" = sempre o seguinte (Receita B),
-     mesmo que o atual não tenha terminado.
-3. O sufixo do `id` no histórico mostra o idioma que o usuário costuma assistir (`...PTBR` = dublado
-   em português; `...JAJP` = original japonês). Use isso como preferência padrão.
+1. Call `crunchyroll_get_history` with `{"n": 10}`.
+   - `items[]` runs from newest to oldest. Each item has `id` (episode, e.g.
+     `GE00377814PTBR`), `title` (episode title), `parent_id` (series), `playhead` (seconds
+     watched), `fully_watched`, `date_played`, and `episode_metadata` with `series_title`,
+     `season_title`, `season_number`, `episode_number`, `duration_ms`, `original_audio`,
+     and `audio_versions`.
+   - Several entries may refer to the same episode or series; the first is the most recent.
+2. Take the first item (or the first item for the series the user named, comparing `parent_id`).
+   - `fully_watched: false` → open **that same** `id` with `crunchyroll_play`; the player
+     resumes from `playhead`. “Continue the anime” requests playback: use
+     `{"episode_id": "<id>", "autoplay": true}` in the same call (do not call player control afterward).
+   - `fully_watched: true` → open the next episode (Recipe B, starting at step 2).
+   - “Resume” means the same unfinished episode. “Next” always means the following episode
+     (Recipe B), even if the current one is unfinished.
+3. The history `id` suffix indicates the user's usual audio language (`...PTBR` = Portuguese
+   dub; `...JAJP` = Japanese original). Use that as the default preference.
 
-## Receita F — "Coloca um anime para mim" (sem dizer qual)
+## Recipe F — “Put on some anime” (without naming one)
 
-Uma consulta só, escolhida pelo contexto — **não** chame histórico e recomendações juntos:
+Choose one query based on context — **do not** request history and recommendations together:
 
-1. Se a conversa já mostrou o que o usuário está acompanhando, ou ele disse "de novo", "aquele",
-   "o que eu tava vendo": `crunchyroll_get_history {"n": 5}` e siga a Receita C.
-2. Se ele pediu algo novo ("me surpreende", "algo diferente", um gênero): Receita D, **uma** ferramenta.
-3. Sem pista nenhuma: `crunchyroll_get_history {"n": 5}`. Se o primeiro item não terminou
-   (`fully_watched: false`), ofereça continuar ("Quer continuar **X**, ep. N?"); se a lista vier vazia,
-   aí sim use `crunchyroll_get_recommendations {"n": 5}`.
-4. Só abra (`crunchyroll_play`) depois que o usuário escolher, a não ser que ele tenha mandado
-   "pode escolher" — aí abra o primeiro candidato e diga qual foi.
+1. If the conversation already shows what the user is following, or they said “again”,
+   “that one”, or “what I was watching”: use `crunchyroll_get_history {"n": 5}` and Recipe C.
+2. If they request something new (“surprise me”, “something different”, a genre): Recipe D,
+   **one** tool.
+3. With no clues: `crunchyroll_get_history {"n": 5}`. If the first item is unfinished
+   (`fully_watched: false`), offer to resume (“Continue **X**, episode N?”); only if history
+   is empty, use `crunchyroll_get_recommendations {"n": 5}`.
+4. Open (`crunchyroll_play`) only after the user chooses, unless they said “you can choose”;
+   in that case, open the first candidate and name it.
 
-## Receita G — Controlar o player ("dá play", "pausa", "tela cheia")
+## Recipe G — Player control (“play”, “pause”, “fullscreen”)
 
-O episódio já precisa estar aberto pelo `crunchyroll_play`. Uma chamada por pedido:
+The episode must already be open through `crunchyroll_play`. One call per request:
 
-| Pedido | Chamada |
+| Request | Call |
 |---|---|
-| "dá play", "continua", "volta a tocar" | `crunchyroll_player_control {"action": "play"}` |
-| "pausa", "para um pouco" | `crunchyroll_player_control {"action": "pause"}` |
-| "tela cheia", "maximiza o vídeo" | `crunchyroll_player_control {"action": "fullscreen"}` |
-| "sai da tela cheia" | `crunchyroll_player_control {"action": "exit_fullscreen"}` |
-| "tá tocando?", "em que minuto está?" | `crunchyroll_player_control {"action": "status"}` |
-| "tela cheia e dá play" | `fullscreen`, depois `play` (duas chamadas, nessa ordem) |
+| “play”, “continue”, “resume playback” | `crunchyroll_player_control {"action": "play"}` |
+| “pause”, “stop for a moment” | `crunchyroll_player_control {"action": "pause"}` |
+| “fullscreen”, “maximize the video” | `crunchyroll_player_control {"action": "fullscreen"}` |
+| “exit fullscreen” | `crunchyroll_player_control {"action": "exit_fullscreen"}` |
+| “is it playing?”, “what minute is it at?” | `crunchyroll_player_control {"action": "status"}` |
+| “fullscreen and play” | `fullscreen`, then `play` (two calls, in that order) |
 
-**Só diga que deu certo quando `success: true` e `verified: true`.** O campo `state` mostra o que foi
-observado (`playing`, `paused`, `fullscreen`, `current_time`, `duration`).
+**Claim success only when `success: true` and `verified: true`.** The `state` field reports
+observations (`playing`, `paused`, `fullscreen`, `current_time`, `duration`).
 
-### Respostas do player
+### Player responses
 
-| `outcome` | O que dizer / fazer |
+| `outcome` | What to say / do |
 |---|---|
-| `CONFIRMED` | Confirme ("Pronto, tocando em tela cheia."). `reason: "ALREADY_IN_STATE"` = já estava assim. |
-| `REFUSED_BY_BROWSER` | O navegador recusou (`reason` diz o motivo, ex.: `AUTOPLAY_BLOCKED_USER_ACTIVATION_REQUIRED`, `FULLSCREEN_NOT_ALLOWED_IN_FRAME`). Diga ao usuário e sugira clicar no player / apertar `F` na janela. **Não** tente outro jeito. |
-| `NOT_CONFIRMED` | O comando foi enviado mas o estado não mudou. Diga isso; repita **uma** vez só se o usuário pedir. |
-| `PLAYER_LOADING` | O vídeo ainda está carregando. Espere alguns segundos e tente **uma** vez. |
-| `PLAYER_UNAVAILABLE` | Não há player controlável na aba (ex.: página de aviso, anúncio, outra página). Diga isso. |
-| `TAB_NOT_FOUND` | Nenhum episódio aberto: abra com `crunchyroll_play` primeiro (ou pergunte qual). |
-| `TAB_CLOSED`, `SESSION_DISCONNECTED` | A aba/navegador fechou. Abra de novo com `crunchyroll_play` se o usuário quiser. |
-| `NOT_PERMITTED` | Durante/depois de um logout o player não é controlado. Diga isso. |
-| `TIMEOUT`, `BUSY` | Avise e não insista em loop. |
+| `CONFIRMED` | Confirm (“Playing in fullscreen.”). `reason: "ALREADY_IN_STATE"` means it was already in that state. |
+| `REFUSED_BY_BROWSER` | The browser refused (`reason` explains why, e.g. `AUTOPLAY_BLOCKED_USER_ACTIVATION_REQUIRED`, `FULLSCREEN_NOT_ALLOWED_IN_FRAME`). Tell the user and suggest clicking the player / pressing `F` in the window. **Do not** try another method. |
+| `NOT_CONFIRMED` | The command was sent but the state did not change. Say so; retry **once** only if the user asks. |
+| `PLAYER_LOADING` | The video is still loading. Wait a few seconds and retry **once**. |
+| `PLAYER_UNAVAILABLE` | No controllable player in the tab (e.g. notice page, ad, another page). Say so. |
+| `TAB_NOT_FOUND` | No episode is open: open one with `crunchyroll_play` first (or ask which episode). |
+| `TAB_CLOSED`, `SESSION_DISCONNECTED` | The tab/browser closed. Open it again with `crunchyroll_play` if the user wants. |
+| `NOT_PERMITTED` | Player control is unavailable during/after logout. Say so. |
+| `TIMEOUT`, `BUSY` | Inform the user and do not keep looping. |
 
-## Idioma e versões (dublado × legendado)
+## Languages and versions (dubbed vs. subtitled)
 
-Nas listas (`crunchyroll_get_seasons`, `crunchyroll_get_episodes`, `crunchyroll_get_history`) cada item
-traz `original_audio` e `audio_versions`, um mapa **idioma do áudio → ID para tocar**. Exemplo real
-(Clevatess II, ep. 12):
+In lists (`crunchyroll_get_seasons`, `crunchyroll_get_episodes`, `crunchyroll_get_history`),
+each item has `original_audio` and `audio_versions`, a map of **audio locale → playback ID**.
+Real example (Clevatess II, ep. 12):
 
 ```json
 "original_audio": "ja-JP",
 "audio_versions": {"ja-JP": "GE00377814JAJP", "en-US": "GE00377814ENUS", "pt-BR": "GE00377814PTBR"}
 ```
 
-- "Dublado" / "em português" → `audio_versions["pt-BR"]`.
-- "Legendado" / "original" / "em japonês" → `audio_versions[original_audio]` (geralmente `ja-JP`).
-  As legendas em português aparecem no player.
-- O usuário **já disse** o idioma → use direto; **não** consulte o histórico.
-- Sem preferência no pedido → use a do histórico (Receita C, passo 3) se você já o tiver; sem
-  histórico, use o `id` do episódio como veio (a Crunchyroll aplica o idioma preferido da conta).
-- Não existe `pt-BR` no mapa → avise ("não tem dublagem em português; abri legendado") e use a
-  original.
+- Explicit audio language → use the corresponding `audio_versions` entry. For example,
+  “in Portuguese” → `audio_versions["pt-BR"]`; “English dub” → `audio_versions["en-US"]`.
+- “Subtitled”, “original”, or “in Japanese” → `audio_versions[original_audio]` (usually `ja-JP`).
+  The player handles subtitle selection according to its settings; response language alone
+  does not select an audio locale or guarantee a subtitle language.
+- The user **already specified** the language → use it directly; **do not** query history.
+- “Dubbed” without an explicit language → use an audio preference already known from context
+  or history; if none is known, ask which dub. For Portuguese requests, “dublado” / “em português”
+  can refer to `audio_versions["pt-BR"]` as in the example below.
+- No audio preference in the request → use history's preference (Recipe C, step 3) if already
+  available; otherwise use the episode `id` as returned (Crunchyroll applies the account preference).
+- Requested locale missing from the map → explain that the requested dub is unavailable
+  and use the original audio, making that choice clear. For missing `pt-BR`, for example:
+  “There is no Portuguese dub; I opened the original version.”
 
-## Receita D — Descobrir o que assistir
+## Recipe D — Discover what to watch
 
-| Pedido | Ferramenta | Argumentos |
+| Request | Tool | Arguments |
 |---|---|---|
-| "me recomenda algo" | `crunchyroll_get_recommendations` | `{"n": 5}` |
-| "parecido com X" | `crunchyroll_search` → `crunchyroll_get_similar` | `{"series_id": "...", "n": 5}` |
-| "populares", "novidades" | `crunchyroll_browse` | `{"sort_by": "popularity"}` ou `{"sort_by": "newly_added"}` |
-| "anime de romance/ação…" | `crunchyroll_get_categories`, depois `crunchyroll_browse` | `{"categories": "romance", "sort_by": "popularity"}` (use o `id` da categoria) |
-| "lançamentos da temporada" | `crunchyroll_get_simulcast_seasons`, depois `crunchyroll_browse` | `{"seasonal_tag": "fall-2026"}` (o primeiro item é a temporada atual) |
-| "me fala sobre X" | `crunchyroll_search` → `crunchyroll_get_series` | `{"series_id": "..."}` |
+| “recommend something” | `crunchyroll_get_recommendations` | `{"n": 5}` |
+| “similar to X” | `crunchyroll_search` → `crunchyroll_get_similar` | `{"series_id": "...", "n": 5}` |
+| “popular”, “new arrivals” | `crunchyroll_browse` | `{"sort_by": "popularity"}` or `{"sort_by": "newly_added"}` |
+| “romance/action anime…” | `crunchyroll_get_categories`, then `crunchyroll_browse` | `{"categories": "romance", "sort_by": "popularity"}` (use the category `id`) |
+| “this season's releases” | `crunchyroll_get_simulcast_seasons`, then `crunchyroll_browse` | `{"seasonal_tag": "fall-2026"}` (the first item is the current season) |
+| “tell me about X” | `crunchyroll_search` → `crunchyroll_get_series` | `{"series_id": "..."}` |
 
-Apresente 3 a 5 opções com título e uma frase de sinopse em português, e ofereça abrir uma.
-Recomendações podem trazer itens que não são anime (ex.: "The Crunchyroll Anime Awards"): pule-os.
+Present 3 to 5 choices with a title and one-sentence synopsis in the user's language,
+and offer to open one. Recommendations may include non-anime items (e.g. “The Crunchyroll
+Anime Awards”): skip those.
 
-## Receita E — Lista (watchlist)
+## Recipe E — Watchlist
 
-- Ver a lista: `crunchyroll_get_watchlist` com `{"n": 10}`. Cada item já traz `id`, `title`, `type`
-  (`series` ou `movie_listing`), `is_favorite` e `date_added`, do mais recente para o mais antigo.
-  Liste os títulos direto; **não** chame `crunchyroll_get_series` item por item. Se o usuário pedir
-  "a lista toda", use `{"n": 50}` (máximo).
-- Adicionar: busque a série e chame `crunchyroll_add_to_watchlist` com `{"content_id": "<id da série>"}`.
-- Remover: `crunchyroll_remove_from_watchlist` com `{"content_id": "<id da série>"}`.
-- Estas duas alteram a conta. Faça só quando o usuário pedir claramente. Se a resposta for
-  `MUTATION_OUTCOME_UNKNOWN`, **não repita**: confira com `crunchyroll_get_watchlist`.
+- Read: `crunchyroll_get_watchlist` with `{"n": 10}`. Each item already has `id`, `title`,
+  `type` (`series` or `movie_listing`), `is_favorite`, and `date_added`, newest first.
+  List the titles directly; **do not** call `crunchyroll_get_series` for each item. If the
+  user asks for “the whole list”, use `{"n": 50}` (maximum).
+- Add: find the series and call `crunchyroll_add_to_watchlist` with `{"content_id": "<series ID>"}`.
+- Remove: `crunchyroll_remove_from_watchlist` with `{"content_id": "<series ID>"}`.
+- These two operations modify the account. Perform them only when the user clearly asks.
+  If the response is `MUTATION_OUTCOME_UNKNOWN`, **do not repeat**: check with `crunchyroll_get_watchlist`.
 
-## Progresso
+## Progress
 
-- Ler: `crunchyroll_get_playheads` com `{"content_ids": ["GE..."]}` → `playhead` em segundos e
-  `fully_watched`.
-- `crunchyroll_update_playhead` altera a conta: use só se o usuário pedir explicitamente para
-  marcar progresso.
+- Read: `crunchyroll_get_playheads` with `{"content_ids": ["GE..."]}` → `playhead` in seconds
+  and `fully_watched`.
+- `crunchyroll_update_playhead` modifies the account: use it only when the user explicitly
+  asks to mark progress.
 
-## Tabela de erros
+## Error table
 
-| Resposta | O que fazer |
+| Response | Action |
 |---|---|
-| `Not authenticated: log in before requesting content` (com `code`) | Siga a tabela de `code` da seção "Sessão". Sem `code`: `crunchyroll_login` uma vez e refaça a chamada uma vez. |
-| `OPERATION_NOT_MIGRATED` | Ferramenta desativada. Use a alternativa (histórico em vez de continue_watching). Não repita. |
-| `crunchyroll_play takes episode_id ...` | Você passou ID errado (série/temporada, minúsculas, URL) ou uma opção que não é booleana. Pegue o `id` de `crunchyroll_get_episodes`. |
-| `crunchyroll_player_control takes exactly one argument, action...` | Use só `{"action": "play" \| "pause" \| "fullscreen" \| "exit_fullscreen" \| "status"}`. |
-| `Upstream has no such resource` | ID não existe. Volte um passo (busca/temporadas) e pegue o ID da resposta. |
-| `Upstream is rate limiting this client` | Espere um pouco antes de tentar; avise o usuário. |
-| `The managed browser is unavailable` / `BROWSER_UNAVAILABLE` | O navegador dedicado fechou ou está ocupado. Chame `crunchyroll_login` uma vez (ele reabre); se continuar, diga ao usuário para fechar janelas do perfil da Crunchyroll e tentar de novo. |
-| `MCP server 'crunchyroll' lost its stdio subprocess` / timeout | O servidor reiniciou. Chame `crunchyroll_status` uma vez; se ele responder, refaça o pedido. Se não, peça ao usuário para rodar `/reload-mcp`. |
-| `MUTATION_OUTCOME_UNKNOWN` | Não repita a alteração. Confira o estado (watchlist/playheads) e informe. |
+| `Not authenticated: log in before requesting content` (with `code`) | Follow the session `code` table. Without `code`: `crunchyroll_login` once, then retry the call once. |
+| `OPERATION_NOT_MIGRATED` | Disabled tool. Use the alternative (history instead of continue_watching). Do not repeat. |
+| `crunchyroll_play takes episode_id ...` | Wrong ID (series/season, lowercase, URL) or a non-boolean option. Get the `id` from `crunchyroll_get_episodes`. |
+| `crunchyroll_player_control takes exactly one argument, action...` | Use only `{"action": "play" \| "pause" \| "fullscreen" \| "exit_fullscreen" \| "status"}`. |
+| `Upstream has no such resource` | The ID does not exist. Go back one step (search/seasons) and take the ID from the response. |
+| `Upstream is rate limiting this client` | Wait before trying again; inform the user. |
+| `The managed browser is unavailable` / `BROWSER_UNAVAILABLE` | The dedicated browser closed or is busy. Call `crunchyroll_login` once (it reopens it); if the issue persists, tell the user to close Crunchyroll profile windows and try again. |
+| `MCP server 'crunchyroll' lost its stdio subprocess` / timeout | The server restarted. Call `crunchyroll_status` once; if it responds, retry the request. Otherwise ask the user to run `/reload-mcp`. |
+| `MUTATION_OUTCOME_UNKNOWN` | Do not repeat the change. Check the state (watchlist/playheads) and report it. |
 
-## Exemplo completo (real)
+## Complete example (real)
 
-Pedido: "Coloca Clevatess 2ª temporada ep 12 dublado"
+Request: “Play Clevatess season 2 episode 12 with the Portuguese dub.”
 
-1. `crunchyroll_search {"query":"Clevatess"}` → série `G8DHV78ZM` "Clevatess".
+1. `crunchyroll_search {"query":"Clevatess"}` → series `G8DHV78ZM` “Clevatess”.
 2. `crunchyroll_get_seasons {"series_id":"G8DHV78ZM"}` → `season_number: 2` = `GS00377802ENUS`
-   "Clevatess II", 13 episódios.
-3. `crunchyroll_get_episodes {"season_id":"GS00377802ENUS","episode_number":12}` → "The Millennium
-   of a Dark Beast Lord"; `audio_versions["pt-BR"]` = `GE00377814PTBR`.
+   “Clevatess II”, 13 episodes.
+3. `crunchyroll_get_episodes {"season_id":"GS00377802ENUS","episode_number":12}` → “The Millennium
+   of a Dark Beast Lord”; `audio_versions["pt-BR"]` = `GE00377814PTBR`.
 4. `crunchyroll_play {"episode_id":"GE00377814PTBR"}` → `{"opened": true, ...}`.
-5. Resposta: "Abri **Clevatess II – ep. 12: The Millennium of a Dark Beast Lord**, dublado em PT-BR,
-   no navegador da Crunchyroll."
+5. Reply: “Opened **Clevatess II – ep. 12: The Millennium of a Dark Beast Lord**, with the
+   Portuguese dub (pt-BR), in the Crunchyroll browser.”
 
-Quatro chamadas, sem login, sem navegador próprio.
+Four calls, no login, no separate browser.
 
-Pedido seguinte: "Pode colocar em tela cheia e dar play?"
+Follow-up request: “Can you put it in fullscreen and play it?”
 
 1. `crunchyroll_player_control {"action":"fullscreen"}` → `{"success": true, "verified": true, "state": {"fullscreen": true, ...}}`.
 2. `crunchyroll_player_control {"action":"play"}` → `{"success": true, "verified": true, "state": {"playing": true, ...}}`.
-3. Resposta: "Pronto: tela cheia e tocando."
+3. Reply: “Playing in fullscreen.”
 
-Duas chamadas, nenhum terminal, nenhum script.
+Two calls, no terminal, no scripts.
