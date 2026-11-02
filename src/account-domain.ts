@@ -91,7 +91,61 @@ export function parseAccountItems(json: unknown, where: string): { count: number
 }
 
 export const parseWatchlist = (json: unknown) => parseAccountItems(json, "watchlist");
-export const parseHistory = (json: unknown) => parseAccountItems(json, "history");
+
+// History items embed the full episode panel (images, ratings, every locale's
+// metadata): ~8 KB each, ~200 KB per page, which small local agents cannot
+// hold. Keep what is needed to resume or continue a series.
+const HISTORY_EPISODE_FIELDS = [
+  "series_id", "series_title", "season_id", "season_title", "season_number", "episode",
+  "episode_number", "duration_ms", "audio_locale",
+] as const;
+
+/** Same projection as catalog-domain's (this module imports nothing). */
+function compactAudioVersions(raw: unknown): Record<string, unknown> | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const audioVersions: Record<string, string> = {};
+  let originalAudio: string | undefined;
+  for (const version of raw) {
+    if (typeof version !== "object" || version === null) continue;
+    const { audio_locale: locale, guid, original } = version as Record<string, unknown>;
+    if (typeof locale !== "string" || typeof guid !== "string") continue;
+    audioVersions[locale] = guid;
+    if (original === true) originalAudio = locale;
+  }
+  return originalAudio === undefined
+    ? { audio_versions: audioVersions }
+    : { original_audio: originalAudio, audio_versions: audioVersions };
+}
+
+function compactHistoryItem(raw: unknown): unknown {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return raw;
+  const item = raw as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const key of ["id", "date_played", "parent_id", "parent_type", "playhead", "fully_watched"]) {
+    if (item[key] !== undefined) out[key] = item[key];
+  }
+  const panel = item.panel;
+  if (typeof panel === "object" && panel !== null && !Array.isArray(panel)) {
+    const p = panel as Record<string, unknown>;
+    if (p.title !== undefined) out.title = p.title;
+    if (p.type !== undefined) out.type = p.type;
+    const meta = p.episode_metadata;
+    if (typeof meta === "object" && meta !== null && !Array.isArray(meta)) {
+      const m = meta as Record<string, unknown>;
+      const episode: Record<string, unknown> = {};
+      for (const field of HISTORY_EPISODE_FIELDS) {
+        if (m[field] !== undefined) episode[field] = m[field];
+      }
+      out.episode_metadata = { ...episode, ...compactAudioVersions(m.versions) };
+    }
+  }
+  return out;
+}
+
+export function parseHistory(json: unknown): { count: number; items: readonly unknown[] } {
+  const items = dataArray(json, "history").map(compactHistoryItem);
+  return Object.freeze({ count: items.length, items: Object.freeze(items) });
+}
 // `parseContinueWatching` was removed with F-1: its only consumer was the
 // gateway case for an endpoint the provider no longer routes.
 

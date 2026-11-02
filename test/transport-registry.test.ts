@@ -89,6 +89,7 @@ describe("BT1 registry — construction and lookup", () => {
         "GET_EPISODE",
         "GET_EPISODES",
         "GET_HISTORY",
+        "GET_OBJECTS",
         "GET_PLAYHEADS",
         "GET_RECOMMENDATIONS",
         "GET_SEASONS",
@@ -96,8 +97,10 @@ describe("BT1 registry — construction and lookup", () => {
         "GET_SIMILAR",
         "GET_SIMULCAST_SEASONS",
         "GET_WATCHLIST",
+        "GET_WATCHLIST_ENTRY",
         "REMOVE_FROM_WATCHLIST",
         "SEARCH",
+        "SET_FAVORITE",
         "UPDATE_PLAYHEAD",
       ],
       "BT5 categories; BT6 the public catalog reads; BT7 the account reads, " +

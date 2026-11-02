@@ -153,27 +153,83 @@ export function parseBrowse(json: unknown): { count: number; items: BrowseEntry[
   return { count: items.length, items };
 }
 
-/** The series object, passed through as the tool has always published it. */
+/** Image URL sets: the bulk of a detail record, and of no use to an agent. */
+function withoutImages(record: Record<string, unknown>): Record<string, unknown> {
+  const { images: _images, images_localized: _localized, ...rest } = record;
+  return rest;
+}
+
+/** The series object, passed through as the tool has always published it, minus images. */
 export function parseSeries(json: unknown): Record<string, unknown> {
   const [first] = dataArray(json, "series");
   if (first === undefined) throw new CatalogShapeError("series.data[0]");
-  return requireObject(first, "series.data[0]");
+  return withoutImages(requireObject(first, "series.data[0]"));
+}
+
+// Season and episode LISTS are what an agent reads to pick something to play.
+// Hermes spills any MCP result over 50 000 characters to a file.
+// The provider records carry images, ratings and localized copies that make a
+// 13-episode season ~110 KB, which small local models cannot hold. Lists keep
+// only the fields needed to choose and play; get_series/get_episode still
+// return the full record.
+const SEASON_LIST_FIELDS = [
+  "id", "title", "series_id", "season_number", "season_display_number", "number_of_episodes",
+  "is_complete", "is_simulcast", "is_subbed", "is_dubbed", "audio_locale", "audio_locales",
+  "subtitle_locales", "description",
+] as const;
+
+// Episodes share their season's subtitle list and ids, so a list entry keeps
+// only what tells episodes apart.
+const EPISODE_LIST_FIELDS = [
+  "id", "title", "season_number", "episode", "episode_number", "duration_ms", "audio_locale",
+  "is_premium_only", "availability_status", "next_episode_id", "next_episode_title",
+] as const;
+
+/**
+ * Versions reduced to the choice that matters: audio locale → id to play, plus
+ * which audio is the original. A season with fifteen dubs is ~2 KB of version
+ * records per episode; as a map it is a few hundred bytes.
+ */
+export function compactAudioVersions(raw: unknown): Record<string, unknown> | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const audioVersions: Record<string, string> = {};
+  let originalAudio: string | undefined;
+  for (const version of raw) {
+    if (typeof version !== "object" || version === null) continue;
+    const { audio_locale: locale, guid, original } = version as Record<string, unknown>;
+    if (typeof locale !== "string" || typeof guid !== "string") continue;
+    audioVersions[locale] = guid;
+    if (original === true) originalAudio = locale;
+  }
+  return originalAudio === undefined
+    ? { audio_versions: audioVersions }
+    : { original_audio: originalAudio, audio_versions: audioVersions };
+}
+
+function compactRecord(raw: unknown, fields: readonly string[]): unknown {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return raw;
+  const source = raw as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const field of fields) {
+    if (source[field] !== undefined) out[field] = source[field];
+  }
+  return { ...out, ...compactAudioVersions(source.versions) };
 }
 
 export function parseSeasons(json: unknown): { count: number; seasons: unknown[] } {
-  const seasons = dataArray(json, "seasons");
+  const seasons = dataArray(json, "seasons").map((raw) => compactRecord(raw, SEASON_LIST_FIELDS));
   return { count: seasons.length, seasons };
 }
 
 export function parseEpisodes(json: unknown): { count: number; episodes: unknown[] } {
-  const episodes = dataArray(json, "episodes");
+  const episodes = dataArray(json, "episodes").map((raw) => compactRecord(raw, EPISODE_LIST_FIELDS));
   return { count: episodes.length, episodes };
 }
 
 export function parseEpisode(json: unknown): Record<string, unknown> {
   const [first] = dataArray(json, "episode");
   if (first === undefined) throw new CatalogShapeError("episode.data[0]");
-  return requireObject(first, "episode.data[0]");
+  return withoutImages(requireObject(first, "episode.data[0]"));
 }
 
 export function parseSimulcastSeasons(json: unknown): { count: number; seasons: unknown[] } {

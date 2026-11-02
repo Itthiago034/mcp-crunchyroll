@@ -82,12 +82,31 @@ export interface AuthObserverPort {
   >;
 }
 
+/**
+ * Records that a HUMAN-authorized session exists in the dedicated profile, so
+ * a later process may re-establish it silently. It stores no secret: only the
+ * fact. Cleared before logout and on revocation, so neither can be undone by a
+ * silent attempt.
+ */
+export interface SessionEligibilityPort {
+  record(): Promise<void>;
+  clear(): Promise<void>;
+  /** Explicit logout; falls back to `clear` when absent. */
+  recordLogout?(): Promise<void>;
+}
+
 export interface AuthOrchestratorPorts {
   readonly diagnostics: AuthDiagnosticsPort;
   readonly browser: BrowserPresencePort;
   readonly producer: AuthProducerPort;
   readonly observer: AuthObserverPort;
+  readonly eligibility?: SessionEligibilityPort;
 }
+
+/** Why a silent re-establishment did not install a session. */
+export type SilentEstablishOutcome =
+  | { readonly accepted: true }
+  | { readonly accepted: false; readonly reason: "LOGGING_OUT" | "REAUTH_REQUIRED" | "NOT_ESTABLISHED" };
 
 /** What the login tool reports. Safe readiness only — never a credential. */
 export interface LoginOutcomeReport {
@@ -110,6 +129,14 @@ export interface AuthOrchestrator {
    * remains the only source of truth for whether material is installed.
    */
   signalReauthRequired(): void;
+  /**
+   * Re-establish a previously authorized browser session WITHOUT waiting for a
+   * human: the same closed observation as `login()`, bounded by a short
+   * deadline. It never runs during logout or after a revocation, joins any
+   * login already in flight, and never opens a second window. Deciding WHETHER
+   * a silent attempt is appropriate belongs to the caller (session recovery).
+   */
+  establishSilently(options: { readonly observationDeadlineMs: number }): Promise<SilentEstablishOutcome>;
 }
 
 export function createAuthOrchestrator(ports: AuthOrchestratorPorts): AuthOrchestrator {
@@ -117,6 +144,8 @@ export function createAuthOrchestrator(ports: AuthOrchestratorPorts): AuthOrches
   let logoutFlight: Promise<LogoutOutcomeReport> | undefined;
   /** Single-flight: a second login joins rather than opening a second window. */
   let loginFlight: Promise<LoginOutcomeReport> | undefined;
+  /** Whether the flight above is a bounded silent attempt rather than an interactive one. */
+  let loginFlightSilent = false;
   /** Set only by an explicit reauth signal, never by mere unavailability. */
   let reauthRequired = false;
 
@@ -147,6 +176,7 @@ export function createAuthOrchestrator(ports: AuthOrchestratorPorts): AuthOrches
     // The dead attempt must stop claiming the gate: it can no longer succeed,
     // so it must neither report AUTHENTICATING nor absorb a later login.
     loginFlight = undefined;
+    loginFlightSilent = false;
   };
 
   const browserFlags = (): { running: boolean; connected: boolean; degraded: boolean } => {
@@ -219,7 +249,11 @@ export function createAuthOrchestrator(ports: AuthOrchestratorPorts): AuthOrches
    * attempt revalidates itself after each one and immediately before the only
    * irreversible step (BT4-R1).
    */
-  const runLoginDecision = async (attempt: number, signal: AbortSignal): Promise<boolean> => {
+  const runLoginDecision = async (
+    attempt: number,
+    signal: AbortSignal,
+    observationDeadlineMs?: number,
+  ): Promise<boolean> => {
     /** Is this attempt still the one allowed to act? */
     const current = (): boolean => attempt === currentAttempt && !signal.aborted && !logoutFlight;
 
@@ -231,7 +265,9 @@ export function createAuthOrchestrator(ports: AuthOrchestratorPorts): AuthOrches
     }
     if (!current()) return false;
 
-    const observed = await ports.observer.observeNextAuthMaterial({ signal });
+    const observed = await ports.observer.observeNextAuthMaterial(
+      observationDeadlineMs === undefined ? { signal } : { signal, deadlineMs: observationDeadlineMs },
+    );
     // Timeout, cancel or an unavailable channel all return the caller to an
     // explicit state; none of them is an error the model must interpret.
     if (observed.kind !== "OBSERVED") return false;
@@ -253,16 +289,49 @@ export function createAuthOrchestrator(ports: AuthOrchestratorPorts): AuthOrches
     const installed = await ports.producer.establishFromObservedMaterial(observed.material);
     if (installed.kind === "ESTABLISHED") {
       reauthRequired = false;
+      // Best effort and secret-free. A failure only costs a future silent
+      // attempt; it can never make the installed session less valid.
+      if (current()) await ports.eligibility?.record().catch(() => undefined);
       return true;
     }
     return false;
   };
 
-  return {
+  /** Start one attempt and hold the gate for it. The caller has checked the gate is free. */
+  const startAttempt = (silent: boolean, observationDeadlineMs?: number): Promise<LoginOutcomeReport> => {
+    const attempt = ++attemptSequence;
+    currentAttempt = attempt;
+    const abort = new AbortController();
+    loginAbort = abort;
+
+    const run = async (): Promise<LoginOutcomeReport> => {
+      let accepted = false;
+      try {
+        accepted = await runLoginDecision(attempt, abort.signal, observationDeadlineMs);
+      } finally {
+        // Release the gate BEFORE reporting, so the answer is the exit state
+        // — but only if it is still ours. A cancelled attempt that finishes
+        // late must not clear the gate a newer attempt now holds.
+        if (currentAttempt === attempt) {
+          loginFlight = undefined;
+          loginFlightSilent = false;
+          loginAbort = undefined;
+        }
+      }
+      return Object.freeze({ accepted, readiness: readiness() });
+    };
+
+    loginFlightSilent = silent;
+    loginFlight = run();
+    return loginFlight;
+  };
+
+  const orchestrator: AuthOrchestrator = {
     readiness,
 
     signalReauthRequired(): void {
       reauthRequired = true;
+      void ports.eligibility?.clear().catch(() => undefined);
     },
 
     async login(): Promise<LoginOutcomeReport> {
@@ -277,32 +346,31 @@ export function createAuthOrchestrator(ports: AuthOrchestratorPorts): AuthOrches
         return Object.freeze({ accepted: true, readiness: readiness() });
       }
 
+      // A bounded silent attempt is already on the page the human would use.
+      // Join it; if it ends without a session, the interactive wait starts
+      // here instead of the human receiving the silent attempt's short timeout.
+      if (loginFlight && loginFlightSilent) {
+        const silent = await loginFlight;
+        if (silent.accepted || logoutFlight) return silent;
+        return orchestrator.login();
+      }
+
       // Idempotent: a second call joins the first and opens no second window.
       if (loginFlight) return loginFlight;
 
-      const attempt = ++attemptSequence;
-      currentAttempt = attempt;
-      const abort = new AbortController();
-      loginAbort = abort;
+      return startAttempt(false);
+    },
 
-      const run = async (): Promise<LoginOutcomeReport> => {
-        let accepted = false;
-        try {
-          accepted = await runLoginDecision(attempt, abort.signal);
-        } finally {
-          // Release the gate BEFORE reporting, so the answer is the exit state
-          // — but only if it is still ours. A cancelled attempt that finishes
-          // late must not clear the gate a newer attempt now holds.
-          if (currentAttempt === attempt) {
-            loginFlight = undefined;
-            loginAbort = undefined;
-          }
-        }
-        return Object.freeze({ accepted, readiness: readiness() });
-      };
-
-      loginFlight = run();
-      return loginFlight;
+    async establishSilently(options): Promise<SilentEstablishOutcome> {
+      if (logoutFlight) return Object.freeze({ accepted: false as const, reason: "LOGGING_OUT" as const });
+      if (authenticatedWorkPermitted()) return Object.freeze({ accepted: true as const });
+      // A revocation is the provider's decision; only a human login undoes it.
+      if (reauthRequired) return Object.freeze({ accepted: false as const, reason: "REAUTH_REQUIRED" as const });
+      const flight = loginFlight ?? startAttempt(true, Math.max(1, options.observationDeadlineMs));
+      const outcome = await flight;
+      return outcome.accepted
+        ? Object.freeze({ accepted: true as const })
+        : Object.freeze({ accepted: false as const, reason: logoutFlight ? "LOGGING_OUT" as const : "NOT_ESTABLISHED" as const });
     },
 
     async logout(): Promise<LogoutOutcomeReport> {
@@ -318,6 +386,10 @@ export function createAuthOrchestrator(ports: AuthOrchestratorPorts): AuthOrches
       const run = async (): Promise<LogoutOutcomeReport> => {
         let persistence: unknown;
         try {
+          // Eligibility goes first: a logout interrupted at any later point must
+          // still leave nothing a silent attempt could re-establish.
+          const eligibility = ports.eligibility;
+          await (eligibility?.recordLogout ? eligibility.recordLogout() : eligibility?.clear())?.catch(() => undefined);
           // The authority is invalidated inside the producer BEFORE any
           // filesystem work; a failed or partial clear can never restore it.
           persistence = (await ports.producer.logout()).persistence;
@@ -337,4 +409,5 @@ export function createAuthOrchestrator(ports: AuthOrchestratorPorts): AuthOrches
       return logoutFlight;
     },
   };
+  return orchestrator;
 }

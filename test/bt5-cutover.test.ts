@@ -155,8 +155,16 @@ describe("BT5 cutover — migrated vs unmigrated, decided in one place", () => {
       "crunchyroll_logout",
       "crunchyroll_status",
     ]);
-    const contentTools = baseline.map((t) => t.name).filter((n) => !authTools.has(n));
-    assert.equal(contentTools.length, 18);
+    // Playback opens a browser tab and player control drives it; neither makes
+    // a provider API request.
+    const browserTools = new Set(["crunchyroll_play", "crunchyroll_player_control"]);
+    const contentTools = baseline
+      .map((t) => t.name)
+      .filter((n) => !authTools.has(n) && !browserTools.has(n));
+    for (const tool of browserTools) {
+      assert.equal(CONTENT_TOOL_OPERATIONS.has(tool), false, `${tool} must not reach the API transport`);
+    }
+    assert.equal(contentTools.length, 19);
     for (const tool of contentTools) {
       assert.equal(CONTENT_TOOL_OPERATIONS.has(tool), true, `${tool} is unmapped`);
     }

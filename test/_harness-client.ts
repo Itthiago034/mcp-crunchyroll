@@ -1,4 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir, userInfo } from "node:os";
+import { join } from "node:path";
 import readline from "node:readline";
 
 export type McpMessage = Record<string, unknown> & { id?: number };
@@ -9,7 +12,10 @@ export interface McpHarnessOptions {
   cwd: string;
   timeoutMs?: number;
   // Optional environment for tests that relocate the config dir via $HOME.
-  // Unset: inherits process.env (unchanged existing behavior).
+  // Unset: inherits process.env — except that a $HOME still pointing at the
+  // account's REAL home is replaced by a throwaway directory, so no spawned
+  // server can read the developer's real profile, session eligibility marker
+  // or running managed browser. A test that relocated $HOME keeps its value.
   env?: NodeJS.ProcessEnv;
 }
 
@@ -25,13 +31,23 @@ export class McpClient {
   private options: McpHarnessOptions;
   notifications: string[] = [];
   stderr: string[] = [];
+  private isolatedHome: string | undefined;
 
   constructor(options: McpHarnessOptions) {
     this.options = options;
+    let env = this.options.env;
+    if (!env) {
+      if (!process.env.HOME || process.env.HOME === userInfo().homedir) {
+        this.isolatedHome = mkdtempSync(join(tmpdir(), "mcp-harness-home-"));
+        env = { ...process.env, HOME: this.isolatedHome };
+      } else {
+        env = process.env;
+      }
+    }
     this.proc = spawn(this.options.command, this.options.args, {
       cwd: this.options.cwd,
       stdio: ["pipe", "pipe", "pipe"],
-      env: this.options.env ?? process.env,
+      env,
     });
     const rl = readline.createInterface({ input: this.proc.stdout as NodeJS.ReadableStream });
     rl.on("line", (raw) => {
@@ -86,5 +102,11 @@ export class McpClient {
     this.proc.kill();
     for (const [, p] of this.pending) clearTimeout(p.timer);
     this.pending.clear();
+    const home = this.isolatedHome;
+    this.isolatedHome = undefined;
+    if (!home) return;
+    const remove = () => rmSync(home, { recursive: true, force: true });
+    if (this.proc.exitCode !== null || this.proc.signalCode !== null) remove();
+    else this.proc.once("exit", remove);
   }
 }

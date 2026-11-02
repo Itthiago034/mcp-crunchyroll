@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 440" width="1200" height="440" role="img" aria-labelledby="title desc">
+<title id="title">MCP Crunchyroll — your agent, your anime</title>
+<desc id="desc">An unofficial connector for discovery, account tools and the official web player. Illustrative tool names, not a recorded execution.</desc>
+<defs><pattern id="grid" width="44" height="44" patternUnits="userSpaceOnUse"><path d="M44 0H0V44" fill="none" stroke="#ffffff" stroke-opacity=".035"/></pattern></defs>
+<style>text{font-family:'Segoe UI',Arial,sans-serif}.mono{font-family:Consolas,'Liberation Mono',monospace}.route{stroke-dasharray:7 9;animation:route 4s ease-out 1}@keyframes route{from{stroke-dashoffset:80}to{stroke-dashoffset:0}}@media(prefers-reduced-motion:reduce){.route{animation:none}}</style>
+<rect x="1" y="1" width="1198" height="438" rx="16" fill="#0c0e10" stroke="#303336"/>
+<rect x="2" y="2" width="1196" height="436" rx="16" fill="url(#grid)"/>
+<path d="M1150 -60A310 310 0 0 1 1160 470" fill="none" stroke="#f47521" stroke-opacity=".1" stroke-width="70"/>
+<path d="M1127 -60A310 310 0 0 1 1137 470" fill="none" stroke="#f47521" stroke-opacity=".24"/>
+<path d="M48 43h22m-22 7h13" stroke="#f47521" stroke-width="3"/>
+<text x="84" y="52" font-size="16" font-weight="600" letter-spacing="2.2" fill="#d7dadd">MCP CRUNCHYROLL</text>
+<text x="48" y="151" font-size="64" font-weight="700" letter-spacing="-2.5" fill="#f5f5f2">Your agent.</text>
+<text x="48" y="223" font-size="64" font-weight="700" letter-spacing="-2.5" fill="#ff944c">Your anime.</text>
+<text x="51" y="272" font-size="21" fill="#c2c6cb">Discover. Organize. Open the official player.</text>
+<text x="51" y="307" font-size="17" fill="#9ba2aa">Human sign-in. Closed tools. No DRM bypass.</text>
+<path d="M51 349H606" stroke="#33373b"/>
+<text x="51" y="385" class="mono" font-size="13" letter-spacing="1" fill="#a8aeb5">TYPESCRIPT</text><text x="181" y="385" fill="#50555b">/</text>
+<text x="205" y="385" class="mono" font-size="13" letter-spacing="1" fill="#a8aeb5">MCP · STDIO</text><text x="339" y="385" fill="#50555b">/</text>
+<text x="363" y="385" class="mono" font-size="13" letter-spacing="1" fill="#a8aeb5">UNOFFICIAL</text>
+<text x="756" y="89" class="mono" font-size="12" letter-spacing="2" fill="#a8aeb5">ONE CLOSED TOOL SURFACE</text>
+<path d="M718 157v164m0-164h28m-28 82h28m-28 82h28" fill="none" stroke="#f47521" stroke-opacity=".65" class="route"/>
+<circle cx="718" cy="157" r="4" fill="#f47521"/>
+<g fill="#14171a" stroke="#373c41"><rect x="746" y="123" width="397" height="66" rx="8"/><rect x="746" y="205" width="397" height="66" rx="8"/><rect x="746" y="287" width="397" height="66" rx="8"/></g>
+<g class="mono" font-size="17" fill="#e4e6e8"><text x="768" y="163">crunchyroll_search</text><text x="768" y="245">crunchyroll_play</text><text x="768" y="327">crunchyroll_player_control</text></g>
+<text x="756" y="386" font-size="13" fill="#a8aeb5">Illustrative tools · not an execution recording</text>
+</svg>

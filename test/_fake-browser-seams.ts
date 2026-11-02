@@ -183,6 +183,8 @@ export class FakeConnection implements CdpConnection {
   private readonly historicalCloseListeners = new Set<() => void>();
   private closed = false;
   private nextTargetId = 1;
+  /** Pages the fake browser already has open, answered by Target.getTargets. */
+  targetInfos: Array<Record<string, unknown>> | undefined;
 
   constructor(
     private readonly closeAfterHandshake = false,
@@ -190,6 +192,7 @@ export class FakeConnection implements CdpConnection {
     private readonly failHandshake = false,
     private readonly onBrowserClose?: () => void,
     private readonly apiExecution: WireFakeOptions["apiExecution"] = "success",
+    private readonly failBrowserClose = false,
   ) {}
 
   async send(
@@ -205,9 +208,13 @@ export class FakeConnection implements CdpConnection {
       return { product: "FakeBrowser/1.0" };
     }
     if (method === "Browser.close") {
+      if (this.failBrowserClose) throw new Error("synthetic close failure");
       this.onBrowserClose?.();
       this.emitClose();
       return {};
+    }
+    if (method === "Target.getTargets" && this.targetInfos) {
+      return { targetInfos: this.targetInfos };
     }
     if (method === "Target.createTarget") {
       return { targetId: `managed-${this.nextTargetId++}` };
@@ -236,6 +243,7 @@ export class FakeConnection implements CdpConnection {
       }
       if (this.apiExecution === "page-exception") return { exceptionDetails: {} };
       if (this.apiExecution === "malformed") return { result: { value: { status: "bad" } } };
+      if (this.apiExecution === "null-result") return null;
       return {
         result: {
           value: { status: 204, contentType: "", body: "", truncated: false },
@@ -245,10 +253,20 @@ export class FakeConnection implements CdpConnection {
     return {};
   }
 
-  on(event: string, listener: (params: unknown, sessionId?: string) => void): void {
+  listenerCount(event: string): number {
+    return this.eventListeners.get(event)?.size ?? 0;
+  }
+
+  on(event: string, listener: (params: unknown, sessionId?: string) => void): () => void {
     const listeners = this.eventListeners.get(event) ?? new Set();
     listeners.add(listener);
     this.eventListeners.set(event, listeners);
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0 && this.eventListeners.get(event) === listeners) {
+        this.eventListeners.delete(event);
+      }
+    };
   }
 
   close(): void { this.emitClose(); }
@@ -285,6 +303,7 @@ export class FakeConnector {
   constructor(
     private readonly options: WireFakeOptions,
     private readonly inspector: FakeProcessIdentityInspector,
+    private readonly spawner: FakeSpawner,
   ) {}
 
   async connect(_url: string): Promise<CdpConnection> {
@@ -304,8 +323,12 @@ export class FakeConnector {
         if (this.options.adoptedExitsOnClose) {
           this.inspector.setStartTime(this.inspector.adoptedPid, null);
         }
+        if (!this.options.ignoreBrowserClose) {
+          void this.spawner.launches.at(-1)?.emitExit(0, null);
+        }
       },
       this.options.apiExecution,
+      Boolean(this.options.failBrowserClose),
     );
     this.connections.push(connection);
     if (isFirst && this.options.closeImmediatelyAfterConnect) connection.emitClose();
@@ -370,9 +393,12 @@ export interface WireFakeOptions {
   exitBeforeReady?: boolean;
   neverReady?: boolean;
   ignoreSigterm?: boolean;
+  ignoreBrowserClose?: boolean;
+  failBrowserClose?: boolean;
   launchDeadlineMs?: number;
   cdpCommandTimeoutMs?: number;
   initialPageUrl?: string;
+  watchPageBaseUrl?: string;
   alwaysCrash?: boolean;
   failReconnects?: number;
   closeImmediatelyAfterConnect?: boolean;
@@ -381,7 +407,7 @@ export interface WireFakeOptions {
   adoptedExitsOnClose?: boolean;
   distinctRuntimeExecutable?: boolean;
   runtimeCmdlineRewritten?: boolean;
-  apiExecution?: "success" | "pending" | "disconnect" | "page-exception" | "malformed";
+  apiExecution?: "success" | "pending" | "disconnect" | "page-exception" | "malformed" | "null-result";
 }
 
 export function wireFakes(options: WireFakeOptions = {}) {
@@ -464,7 +490,7 @@ export function wireFakes(options: WireFakeOptions = {}) {
   }
   const spawner = new FakeSpawner(profileDir, options, processInspector);
   const clock = new FakeClock();
-  const connector = new FakeConnector(options, processInspector);
+  const connector = new FakeConnector(options, processInspector, spawner);
   const seams: BrowserSessionSeams = { spawner, clock, connector, processInspector };
   const config: BrowserSessionConfig = {
     launchMode: options.launchMode ?? "visible",
@@ -473,6 +499,7 @@ export function wireFakes(options: WireFakeOptions = {}) {
     launchDeadlineMs: options.launchDeadlineMs ?? 30_000,
     cdpCommandTimeoutMs: options.cdpCommandTimeoutMs ?? 10_000,
     initialPageUrl: options.initialPageUrl ?? "about:blank",
+    ...(options.watchPageBaseUrl ? { watchPageBaseUrl: options.watchPageBaseUrl } : {}),
     profileDir,
     executablePath,
   };

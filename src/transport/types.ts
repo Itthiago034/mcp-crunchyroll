@@ -7,18 +7,17 @@
 /** Closed set of transport operations. Extended only when an endpoint migrates. */
 export type OperationId = string & { readonly __brand: "OperationId" };
 
-export type HttpMethod = "GET" | "POST" | "DELETE";
+export type HttpMethod = "GET" | "POST" | "DELETE" | "PATCH";
 
 /**
  * BT8.1. The SAME closed set, available at runtime.
  *
  * `tsconfig` typechecks `src/` only, so a union alone is never exercised by the
  * suite — the identical reasoning BT5-FIX1 gave for closing `auth` and `scope`
- * at registry construction. `PUT` and `PATCH` are deliberately absent: no
- * provider evidence in this project asks for either, and BT8's design admits a
- * method only when evidence requires it.
+ * at registry construction. PATCH supports the explicit favorite setter;
+ * PUT remains absent. Methods enter only with an operation contract.
  */
-export const HTTP_METHODS: readonly HttpMethod[] = Object.freeze(["GET", "POST", "DELETE"]);
+export const HTTP_METHODS: readonly HttpMethod[] = Object.freeze(["GET", "POST", "DELETE", "PATCH"]);
 
 /**
  * WHOSE data an endpoint addresses — an identity question.
@@ -149,6 +148,11 @@ export interface OperationDescriptor {
    * guessed would silently drop or duplicate it.
    */
   readonly queryParams: Readonly<Record<string, string>>;
+  /**
+   * Response cap for this operation, when it legitimately exceeds the default
+   * MAX_API_RESPONSE_BYTES. A constant of this build, never a caller value.
+   */
+  readonly maxResponseBytes?: number;
   /**
    * BT7. Query key → a DECLARED, array-valued caller param, emitted once per
    * element in caller order (`wire[]=A&wire[]=B`).

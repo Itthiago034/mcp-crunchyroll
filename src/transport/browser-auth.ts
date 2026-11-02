@@ -35,8 +35,12 @@ const TOKEN_ENDPOINT_PATH = "/auth/v1/token";
 /** An HTML challenge page must never become a multi-megabyte anything. */
 export const MAX_AUTH_RESPONSE_BYTES = 64 * 1024;
 
-/** How long one interactive login waits for a mint before giving up. */
-export const DEFAULT_OBSERVATION_DEADLINE_MS = 300_000;
+/**
+ * How long one interactive login waits for a mint before giving up. Kept below
+ * the 300 s tool-call timeout of common MCP clients (Hermes among them), so
+ * the client receives the honest LOGIN_REQUIRED instead of its own timeout.
+ */
+export const DEFAULT_OBSERVATION_DEADLINE_MS = 240_000;
 
 // ── Outcomes ────────────────────────────────────────────────────────────────
 
@@ -64,6 +68,12 @@ export interface BrowserAuthPorts {
   openInterception(urlPattern: string): Promise<ResponseInterception>;
   now(): number;
   schedule(callback: () => void, ms: number): { cancel(): void };
+  /**
+   * Called once the channel is armed and listening. Lets the composition root
+   * reload an already-open page so a signed-in browser mints immediately
+   * instead of on its own refresh schedule. Failures are ignored.
+   */
+  afterArmed?(): Promise<void>;
 }
 
 export interface BrowserAuthObserver {
@@ -188,6 +198,8 @@ export function createBrowserAuthObserver(ports: BrowserAuthPorts): BrowserAuthO
         interception.onPaused((event: PausedResponse) => {
           void handlePaused(event);
         });
+
+        void ports.afterArmed?.().catch(() => undefined);
 
         const handlePaused = async (event: PausedResponse): Promise<void> => {
           // The browser's own response ALWAYS proceeds, whatever we decide

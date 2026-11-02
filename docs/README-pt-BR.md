@@ -7,8 +7,9 @@ Servidor não oficial de Model Context Protocol (MCP) para pesquisar o catálogo
 - Pesquisar animes e consultar séries, temporadas e episódios.
 - Consultar histórico, lista de acompanhamento e recomendações.
 - Adicionar ou remover títulos da lista e atualizar o progresso.
+- Abrir e controlar o player oficial no navegador gerenciado.
 
-A versão 0.1.0 publica 21 ferramentas; 19 estão operacionais. As ferramentas de continuar assistindo e consultar assinatura ainda estão desativadas. O servidor **não reproduz vídeos**, não baixa mídia e não contorna DRM.
+Este branch publica 24 ferramentas. Além do catálogo e da conta, ele abre e controla o player oficial da Crunchyroll no navegador gerenciado; `crunchyroll_set_favorite` é uma candidata ainda sem validação ao vivo. As ferramentas de continuar assistindo e consultar assinatura seguem desativadas. O servidor **não baixa mídia e não contorna DRM**.
 
 ## Instalação
 

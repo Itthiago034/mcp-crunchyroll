@@ -20,10 +20,18 @@ import type {
   ApiExecutionChannel,
   ApiExecutionRequest,
   ApiExecutionResponse,
+  PlaybackChannelLoss,
+  PlaybackControlChannel,
+  PlayerCommand,
+  PlayerCommandResult,
+  PlayerFrameState,
+  PlayerMediaError,
+  PlayerPageError,
 } from "./browser-lifecycle-types.js";
-import { MAX_API_RESPONSE_BYTES } from "./browser-lifecycle-types.js";
+import { MAX_API_RESPONSE_BYTES, PLAYER_COMMANDS, PLAYER_MEDIA_ERRORS } from "./browser-lifecycle-types.js";
 import { BrowserLifecycleError } from "./browser-lifecycle-error.js";
 import { createCdpConnector } from "./cdp-client.js";
+import { desktopSessionEnvironment } from "./desktop-session.js";
 import {
   clearOwnershipRecord,
   clearStaleEndpoint,
@@ -62,7 +70,12 @@ export interface BrowserSessionManager {
    * material observed on an older connection can refuse to act on it.
    */
   connectionGeneration(): number | undefined;
-  start(): Promise<void>;
+  /**
+   * Start or adopt the owned browser. With `adoptOnly`, only an already-running
+   * browser that passes every ownership check is adopted; nothing is spawned,
+   * so a control action can never open a browser window by itself.
+   */
+  start(options?: { readonly adoptOnly?: boolean }): Promise<void>;
   stop(): Promise<void>;
   restart(): Promise<void>;
   managedPageId(): string | undefined;
@@ -78,6 +91,19 @@ export interface BrowserSessionManager {
    */
   openResponseInterception(urlPattern: string): Promise<ResponseInterception>;
   /**
+   * Reload the EXISTING managed page, so the provider's own page mints a fresh
+   * bearer while an interception is armed. Takes no URL. A missing page is a
+   * no-op: creating one already navigates.
+   */
+  reloadManagedPage(): Promise<void>;
+  /**
+   * Open a Crunchyroll playback page for ONE content id in a focused tab of the
+   * signed-in browser, reusing an existing playback tab when there is one. The id must be a plain Crunchyroll id; the URL is
+   * the configured fixed prefix plus that id. The tab is not the managed page,
+   * so re-authentication never navigates away from what is playing.
+   */
+  openWatchPage(contentId: string): Promise<void>;
+  /**
    * BT5: open the closed browser-context execution channel on the managed
    * Crunchyroll page.
    *
@@ -86,6 +112,14 @@ export interface BrowserSessionManager {
    * function, no method string and no access to any other execution context.
    */
   openApiExecutionChannel(): Promise<ApiExecutionChannel>;
+  /**
+   * Open the closed playback control channel on the playback tab: the tab this
+   * manager opened with `openWatchPage`, or the single watch tab of the owned
+   * browser. It runs one frozen page function with a closed command enum, only
+   * in page and player-frame contexts on the configured origins. There is no
+   * evaluate, no caller-chosen function and no other target.
+   */
+  openPlaybackControlChannel(): Promise<PlaybackControlChannel>;
   onStateChange(
     listener: (from: BrowserLifecycleState, to: BrowserLifecycleState) => void,
   ): void;
@@ -118,7 +152,9 @@ const CRUNCHYROLL_PAGE_ORIGIN = "https://www.crunchyroll.com";
  * write can never be sent under whatever default the page would have chosen.
  */
 export const CRUNCHYROLL_FETCH_FUNCTION = `
-  async function (url, method, authorization, maxChars, bodyText, bodyContentType) {
+  async function (url, method, authorization, maxBytes, bodyText, bodyContentType) {
+    if (!["GET", "POST", "DELETE", "PATCH"].includes(method)) throw new Error("method");
+    if (bodyText !== undefined && method !== "POST" && method !== "PATCH") throw new Error("body-method");
     const headers = { Authorization: authorization };
     const init = { method, headers, credentials: "omit", redirect: "manual" };
     if (typeof bodyText === "string") {
@@ -127,12 +163,41 @@ export const CRUNCHYROLL_FETCH_FUNCTION = `
     }
     const response = await fetch(url, init);
     const contentType = response.headers.get("content-type") || "";
-    const text = await response.text();
-    const truncated = text.length > maxChars;
+    let text = "";
+    let truncated = false;
+    if (response.body) {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let bytes = 0;
+      let finished = false;
+      try {
+        while (true) {
+          const chunk = await reader.read();
+          if (chunk.done) {
+            finished = true;
+            text += decoder.decode();
+            break;
+          }
+          const remaining = maxBytes - bytes;
+          if (chunk.value.byteLength > remaining) {
+            text += decoder.decode(chunk.value.subarray(0, remaining), { stream: true });
+            truncated = true;
+            break;
+          }
+          bytes += chunk.value.byteLength;
+          text += decoder.decode(chunk.value, { stream: true });
+        }
+      } finally {
+        if (!finished) {
+          try { await reader.cancel(); } catch {}
+        }
+        reader.releaseLock();
+      }
+    }
     return {
       status: response.status,
       contentType,
-      body: truncated ? text.slice(0, maxChars) : text,
+      body: text,
       truncated,
     };
   }
@@ -143,14 +208,203 @@ function isCrunchyrollApiUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
     return (
-      parsed.protocol === "https:" &&
-      parsed.hostname === "www.crunchyroll.com" &&
+      parsed.origin === CRUNCHYROLL_PAGE_ORIGIN &&
       parsed.username === "" &&
       parsed.password === ""
     );
   } catch {
     return false;
   }
+}
+
+// ── Player control — the frozen player function ─────────────────────────────
+
+/**
+ * The ONE function the playback channel ever runs in a player frame, frozen as
+ * a source literal exactly like the fetch function above.
+ *
+ * `command` is a member of a closed enum validated in Node before it is sent;
+ * the switch below is the page's own refusal of anything else. It touches only
+ * the frame's own `<video>` elements and the Fullscreen API, reads no cookie,
+ * storage or network state, and returns primitives only — never `currentSrc`,
+ * whose stream URL carries signed policy. `playWaitMs` bounds how long `play()`
+ * may stay pending, so a stalled source reports PENDING instead of hanging.
+ */
+export const CRUNCHYROLL_PLAYER_FUNCTION = `
+  async function (command, playWaitMs) {
+    const pick = () => {
+      let best = null;
+      let bestScore = -1;
+      for (const video of Array.from(document.querySelectorAll("video"))) {
+        const rect = video.getBoundingClientRect();
+        const sourced = video.currentSrc || video.srcObject ? 1 : 0;
+        const score = sourced * 1e9 + Math.max(0, rect.width) * Math.max(0, rect.height);
+        if (score > bestScore) { best = video; bestScore = score; }
+      }
+      return best;
+    };
+    const finite = (value) => (typeof value === "number" && isFinite(value) ? value : 0);
+    const mediaError = (video) => {
+      if (!video || !video.error) return null;
+      switch (video.error.code) {
+        case 1: return "MEDIA_ABORTED";
+        case 2: return "MEDIA_NETWORK";
+        case 3: return "MEDIA_DECODE";
+        case 4: return "MEDIA_SOURCE_NOT_SUPPORTED";
+        default: return "MEDIA_UNKNOWN";
+      }
+    };
+    const audioLocale = (video) => {
+      const track = video && video.audioTracks
+        ? Array.from(video.audioTracks).find((track) => track.enabled === true) : null;
+      const language = track && track.language;
+      return typeof language === "string" && /^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8}){0,2}$/.test(language)
+        ? language : null;
+    };
+    const snapshot = (video) => ({
+      playerError: mediaError(video),
+      audioLocale: audioLocale(video),
+      hasVideo: video !== null,
+      hasSource: video !== null && Boolean(video.currentSrc || video.srcObject),
+      paused: video === null ? true : video.paused,
+      ended: video === null ? false : video.ended,
+      readyState: video === null ? 0 : video.readyState,
+      currentTime: video === null ? 0 : finite(video.currentTime),
+      duration: video === null ? 0 : finite(video.duration),
+      muted: video === null ? false : video.muted,
+      fullscreen: document.fullscreenElement !== null && document.fullscreenElement !== undefined,
+      fullscreenEnabled: document.fullscreenEnabled === true,
+      topLevel: window === window.top,
+    });
+    const video = pick();
+    let error = null;
+    try {
+      if (command === "probe") {
+        // read only
+      } else if (command === "play") {
+        if (video === null) error = "NO_VIDEO";
+        else {
+          const outcome = await Promise.race([
+            video.play().then(() => "started"),
+            new Promise((resolve) => setTimeout(() => resolve("pending"), playWaitMs)),
+          ]);
+          if (outcome === "pending") error = "PENDING";
+        }
+      } else if (command === "pause") {
+        if (video === null) error = "NO_VIDEO";
+        else video.pause();
+      } else if (command === "enter_fullscreen") {
+        if (video === null) error = "NO_VIDEO";
+        else if (document.fullscreenEnabled !== true) error = "FULLSCREEN_DISABLED";
+        else if (!document.fullscreenElement) {
+          const target = window === window.top ? (video.parentElement || video) : document.documentElement;
+          await target.requestFullscreen({ navigationUI: "hide" });
+        }
+      } else if (command === "exit_fullscreen") {
+        if (document.fullscreenElement) await document.exitFullscreen();
+      } else {
+        error = "UNSUPPORTED_COMMAND";
+      }
+    } catch (caught) {
+      const name = caught && caught.name;
+      error =
+        name === "NotAllowedError" ? "NOT_ALLOWED" :
+        name === "AbortError" ? "ABORTED" :
+        name === "NotSupportedError" ? "NOT_SUPPORTED" :
+        name === "TypeError" ? "TYPE_ERROR" : "UNKNOWN";
+    }
+    return { state: snapshot(video), error };
+  }
+`;
+
+const PLAYER_PAGE_ERRORS: readonly PlayerPageError[] = Object.freeze([
+  "NO_VIDEO",
+  "NOT_ALLOWED",
+  "ABORTED",
+  "NOT_SUPPORTED",
+  "TYPE_ERROR",
+  "PENDING",
+  "FULLSCREEN_DISABLED",
+  "UNSUPPORTED_COMMAND",
+  "UNKNOWN",
+]);
+
+/** How long the page lets one `play()` stay pending before reporting PENDING. */
+const PLAYER_PLAY_WAIT_MS = 3_000;
+
+const CONTENT_ID = /^[A-Z0-9]{1,32}$/;
+
+/**
+ * Reduce whatever the page returned to the closed state shape. Every field is
+ * type-checked; anything malformed makes the whole result unusable rather than
+ * partially trusted.
+ */
+function parsePlayerResult(raw: unknown): PlayerCommandResult | undefined {
+  const frame = (typeof raw === "object" && raw !== null ? raw : {}) as {
+    result?: { value?: unknown };
+    exceptionDetails?: unknown;
+  };
+  if (frame.exceptionDetails !== undefined) return undefined;
+  const value = frame.result?.value as { state?: Record<string, unknown>; error?: unknown } | undefined;
+  const state = value?.state;
+  if (typeof state !== "object" || state === null) return undefined;
+  const booleans = ["hasVideo", "hasSource", "paused", "ended", "muted", "fullscreen", "fullscreenEnabled", "topLevel"];
+  const numbers = ["readyState", "currentTime", "duration"];
+  if (!booleans.every((key) => typeof state[key] === "boolean")) return undefined;
+  if (!numbers.every((key) => typeof state[key] === "number" && Number.isFinite(state[key]))) return undefined;
+  const parsed: PlayerFrameState = Object.freeze({
+    ...(state.playerError == null ? {} : {
+      playerError: PLAYER_MEDIA_ERRORS.includes(state.playerError as PlayerMediaError)
+        ? state.playerError as PlayerMediaError : "MEDIA_UNKNOWN",
+    }),
+    ...(typeof state.audioLocale === "string" && /^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8}){0,2}$/.test(state.audioLocale)
+      ? { audioLocale: state.audioLocale } : {}),
+    hasVideo: state.hasVideo as boolean,
+    hasSource: state.hasSource as boolean,
+    paused: state.paused as boolean,
+    ended: state.ended as boolean,
+    readyState: state.readyState as number,
+    currentTime: state.currentTime as number,
+    duration: state.duration as number,
+    muted: state.muted as boolean,
+    fullscreen: state.fullscreen as boolean,
+    fullscreenEnabled: state.fullscreenEnabled as boolean,
+    topLevel: state.topLevel as boolean,
+  });
+  const error = value?.error;
+  if (error === null || error === undefined) return Object.freeze({ state: parsed });
+  return Object.freeze({
+    state: parsed,
+    error: PLAYER_PAGE_ERRORS.includes(error as PlayerPageError) ? (error as PlayerPageError) : "UNKNOWN",
+  });
+}
+
+/** Parsed-origin membership, never a prefix test. */
+function originAllowed(url: unknown, origins: readonly string[]): boolean {
+  if (typeof url !== "string") return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.username === "" && parsed.password === "" && origins.includes(parsed.origin);
+  } catch {
+    return false;
+  }
+}
+
+/** The content id of a watch URL under `base`, compared field by field. */
+function watchContentId(url: unknown, base: string): string | undefined {
+  if (typeof url !== "string") return undefined;
+  let parsed: URL;
+  let prefix: URL;
+  try {
+    parsed = new URL(url);
+    prefix = new URL(base);
+  } catch {
+    return undefined;
+  }
+  if (parsed.origin !== prefix.origin || parsed.username !== "" || parsed.password !== "") return undefined;
+  if (!parsed.pathname.startsWith(prefix.pathname)) return undefined;
+  const id = parsed.pathname.slice(prefix.pathname.length).split("/")[0];
+  return CONTENT_ID.test(id) ? id : undefined;
 }
 
 interface ValidatedProcessIdentity {
@@ -258,6 +512,7 @@ export function createBrowserSessionManager(
 ): BrowserSessionManager {
   let lifecycleState: BrowserLifecycleState = "STOPPED";
   let startFlight: Promise<void> | undefined;
+  let startFlightAdoptOnly = false;
   let stopFlight: Promise<void> | undefined;
   let stopRequested = false;
   let processHandle: BrowserProcessHandle | undefined;
@@ -272,6 +527,8 @@ export function createBrowserSessionManager(
   let reconnectFlight: Promise<void> | undefined;
   let managedTargetId: string | undefined;
   let managedPageFlight: Promise<string> | undefined;
+  /** The tab `openWatchPage` last opened or reused. Browser-scoped target id. */
+  let playbackTargetId: string | undefined;
   const stateListeners = new Set<(
     from: BrowserLifecycleState,
     to: BrowserLifecycleState,
@@ -312,6 +569,7 @@ export function createBrowserSessionManager(
     endpoint = undefined;
     managedTargetId = undefined;
     managedPageFlight = undefined;
+    playbackTargetId = undefined;
   };
 
   const createManagedPage = async (recreated: boolean): Promise<string> => {
@@ -323,6 +581,19 @@ export function createBrowserSessionManager(
       active.generation !== activeConnectionGeneration
     ) {
       throw new BrowserLifecycleError("BROWSER_UNAVAILABLE");
+    }
+    // The dedicated browser outlives this process and is adopted by the next
+    // one. Reuse a page already on the managed origin instead of opening a new
+    // tab per process: otherwise every client session leaves one more live
+    // Crunchyroll tab behind. Playback tabs are left alone.
+    const reusable = await findReusableManagedPage(active);
+    if (reusable) {
+      if (active.generation !== activeConnectionGeneration) {
+        throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
+      }
+      managedTargetId = reusable;
+      if (recreated) emit({ type: "page.recreated" });
+      return reusable;
     }
     const result = (await active.connection.send("Target.createTarget", {
       url: config.initialPageUrl,
@@ -339,6 +610,63 @@ export function createBrowserSessionManager(
     return result.targetId;
   };
 
+  const findReusableManagedPage = async (
+    active: ConnectionRegistration,
+  ): Promise<string | undefined> => {
+    let origin: string;
+    try {
+      origin = new URL(config.initialPageUrl).origin;
+    } catch {
+      return undefined;
+    }
+    if (origin === "null") return undefined;
+    let listed: unknown;
+    try {
+      listed = await active.connection.send("Target.getTargets", {});
+    } catch {
+      return undefined;
+    }
+    const infos = (listed as { targetInfos?: unknown } | undefined)?.targetInfos;
+    if (!Array.isArray(infos)) return undefined;
+    for (const info of infos) {
+      if (typeof info !== "object" || info === null) continue;
+      const { type, url, targetId, attached } = info as Record<string, unknown>;
+      if (type !== "page" || typeof url !== "string" || typeof targetId !== "string") continue;
+      if (attached === true) continue;
+      if (config.watchPageBaseUrl && url.startsWith(config.watchPageBaseUrl)) continue;
+      let pageOrigin: string;
+      try {
+        pageOrigin = new URL(url).origin;
+      } catch {
+        continue;
+      }
+      if (pageOrigin === origin) return targetId;
+    }
+    return undefined;
+  };
+
+  const findPlaybackPage = async (
+    active: ConnectionRegistration,
+    base: string,
+  ): Promise<string | undefined> => {
+    let listed: unknown;
+    try {
+      listed = await active.connection.send("Target.getTargets", {});
+    } catch {
+      return undefined;
+    }
+    const infos = (listed as { targetInfos?: unknown } | undefined)?.targetInfos;
+    if (!Array.isArray(infos)) return undefined;
+    for (const info of infos) {
+      if (typeof info !== "object" || info === null) continue;
+      const { type, url, targetId } = info as Record<string, unknown>;
+      if (type !== "page" || typeof url !== "string" || typeof targetId !== "string") continue;
+      if (targetId === managedTargetId) continue;
+      if (url.startsWith(base)) return targetId;
+    }
+    return undefined;
+  };
+
   const beginManagedPageCreation = (recreated: boolean): Promise<string> => {
     if (managedPageFlight) return managedPageFlight;
     managedPageFlight = createManagedPage(recreated).finally(() => {
@@ -349,8 +677,10 @@ export function createBrowserSessionManager(
 
   const prepareTargetObservation = async (registration: ConnectionRegistration) => {
     registration.connection.on("Target.targetDestroyed", (params) => {
+      if (registration.generation !== activeConnectionGeneration) return;
+      const destroyed = (params as { targetId?: unknown } | null)?.targetId;
+      if (destroyed !== undefined && destroyed === playbackTargetId) playbackTargetId = undefined;
       if (
-        registration.generation !== activeConnectionGeneration ||
         typeof params !== "object" ||
         params === null ||
         (params as { targetId?: unknown }).targetId !== managedTargetId
@@ -586,7 +916,7 @@ export function createBrowserSessionManager(
     }
   }
 
-  const startInternal = async (attempt = 1) => {
+  const startInternal = async (attempt = 1, adoptOnly = false) => {
     const launchDeadline = seams.clock.now() + config.launchDeadlineMs;
     transition("BROWSER_STARTING");
     stopRequested = false;
@@ -621,6 +951,10 @@ export function createBrowserSessionManager(
         await clearOwnershipRecord(config.profileDir).catch(() => undefined);
         await clearStaleEndpoint(config.profileDir).catch(() => undefined);
       }
+    }
+    if (adoptOnly) {
+      transition("STOPPED");
+      throw new BrowserLifecycleError("BROWSER_UNAVAILABLE", "no-owned-browser");
     }
     await clearStaleEndpoint(config.profileDir);
     await clearOwnershipRecord(config.profileDir);
@@ -718,20 +1052,35 @@ export function createBrowserSessionManager(
 
     if (processHandle.source === "spawned") {
       const handle = processHandle;
-      let timeout: { cancel(): void } | undefined;
       const exited = new Promise<void>((resolve) => {
         stopExitResolve = resolve;
       });
-      const timedOut = new Promise<"timeout">((resolve) => {
-        timeout = seams.clock.setTimeout(() => resolve("timeout"), config.cdpCommandTimeoutMs);
-      });
-      handle.requestTermination();
-      const outcome = await Promise.race([exited.then(() => "exit" as const), timedOut]);
-      if (outcome === "timeout") {
-        handle.forceKill();
-        await exited;
+      const waitForExit = async () => {
+        let timeout: { cancel(): void } | undefined;
+        const timedOut = new Promise<"timeout">((resolve) => {
+          timeout = seams.clock.setTimeout(() => resolve("timeout"), config.cdpCommandTimeoutMs);
+        });
+        try {
+          return await Promise.race([exited.then(() => "exit" as const), timedOut]);
+        } finally {
+          timeout?.cancel();
+        }
+      };
+      // Let Chromium flush the persistent profile before stopping the process.
+      // SIGTERM alone can exit before recently accepted cookies reach disk.
+      // A CDP acknowledgement is not an exit: wait for the owned child itself.
+      let closedNormally = false;
+      if (connection) {
+        void connection.send("Browser.close").catch(() => undefined);
+        closedNormally = (await waitForExit()) === "exit";
       }
-      timeout?.cancel();
+      if (!closedNormally) {
+        handle.requestTermination();
+        if ((await waitForExit()) === "timeout") {
+          handle.forceKill();
+          await exited;
+        }
+      }
       stopExitResolve = undefined;
       disposeActive();
       await clearOwnershipRecord(config.profileDir);
@@ -770,10 +1119,20 @@ export function createBrowserSessionManager(
     // at one and are reset to zero when the connection is disposed.
     connectionGeneration: () =>
       activeConnectionGeneration === 0 ? undefined : activeConnectionGeneration,
-    start() {
+    start(options = {}) {
       if (lifecycleState === "BROWSER_READY") return Promise.resolve();
-      if (startFlight) return startFlight;
-      startFlight = startInternal().finally(() => { startFlight = undefined; });
+      const adoptOnly = options.adoptOnly === true;
+      if (startFlight) {
+        // A full start that finds an adopt-only flight must still be able to
+        // spawn: if adoption fails, it starts again on its own terms.
+        if (startFlightAdoptOnly && !adoptOnly) return startFlight.catch(() => manager.start());
+        return startFlight;
+      }
+      startFlightAdoptOnly = adoptOnly;
+      startFlight = startInternal(1, adoptOnly).finally(() => {
+        startFlight = undefined;
+        startFlightAdoptOnly = false;
+      });
       return startFlight;
     },
     stop() {
@@ -792,6 +1151,83 @@ export function createBrowserSessionManager(
       }
       if (managedTargetId) return managedTargetId;
       return beginManagedPageCreation(false);
+    },
+    async reloadManagedPage() {
+      const active = connectionRegistration;
+      const targetId = managedTargetId;
+      if (
+        lifecycleState !== "BROWSER_READY" ||
+        stopRequested ||
+        !active ||
+        active.generation !== activeConnectionGeneration ||
+        !targetId
+      ) {
+        return;
+      }
+      const attached = (await active.connection.send("Target.attachToTarget", {
+        targetId,
+        flatten: true,
+      })) as { sessionId?: unknown };
+      const sessionId = attached.sessionId;
+      if (typeof sessionId !== "string" || sessionId.length === 0) {
+        throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
+      }
+      try {
+        // Reload what the page shows (a signed-in Crunchyroll page) instead of
+        // returning to the login URL: a plain reload is ordinary browsing,
+        // repeated trips to /login are what bot protection flags.
+        await active.connection.send("Page.reload", {}, sessionId);
+      } finally {
+        try { await active.connection.send("Target.detachFromTarget", { sessionId }); } catch {}
+      }
+    },
+    async openWatchPage(contentId: string) {
+      if (typeof contentId !== "string" || !/^[A-Z0-9]{1,32}$/.test(contentId)) {
+        throw new BrowserLifecycleError("BROWSER_UNAVAILABLE");
+      }
+      const base = config.watchPageBaseUrl;
+      const active = connectionRegistration;
+      if (
+        !base ||
+        lifecycleState !== "BROWSER_READY" ||
+        stopRequested ||
+        !active ||
+        active.generation !== activeConnectionGeneration
+      ) {
+        throw new BrowserLifecycleError("BROWSER_UNAVAILABLE");
+      }
+      const url = `${base}${contentId}`;
+      // "Play X" while something is already playing means switch to X: reuse
+      // an existing playback tab instead of stacking one tab per request.
+      let targetId = await findPlaybackPage(active, base);
+      if (targetId) {
+        const attached = (await active.connection.send("Target.attachToTarget", {
+          targetId,
+          flatten: true,
+        })) as { sessionId?: unknown };
+        const sessionId = attached.sessionId;
+        if (typeof sessionId !== "string" || sessionId.length === 0) {
+          throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
+        }
+        try {
+          await active.connection.send("Page.navigate", { url }, sessionId);
+        } finally {
+          try { await active.connection.send("Target.detachFromTarget", { sessionId }); } catch {}
+        }
+      } else {
+        const result = (await active.connection.send("Target.createTarget", { url })) as {
+          targetId?: unknown;
+        };
+        if (typeof result.targetId !== "string" || result.targetId.length === 0) {
+          throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
+        }
+        targetId = result.targetId;
+      }
+      if (active.generation !== activeConnectionGeneration) {
+        throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
+      }
+      playbackTargetId = targetId;
+      await active.connection.send("Target.activateTarget", { targetId });
     },
     async openResponseInterception(urlPattern: string) {
       const active = connectionRegistration;
@@ -818,7 +1254,7 @@ export function createBrowserSessionManager(
       const listeners = new Set<(event: PausedResponse) => void>();
       let closed = false;
 
-      active.connection.on("Fetch.requestPaused", (params, frameSessionId) => {
+      const unsubscribePaused = active.connection.on("Fetch.requestPaused", (params, frameSessionId) => {
         if (closed) return;
         if (frameSessionId !== sessionId) return;
         if (generation !== activeConnectionGeneration) return;
@@ -842,11 +1278,17 @@ export function createBrowserSessionManager(
 
       // Response stage only, for exactly the pattern the caller fixed. No
       // request-stage pause, so nothing here can modify an outgoing request.
-      await active.connection.send(
-        "Fetch.enable",
-        { patterns: [{ urlPattern, requestStage: "Response" }] },
-        sessionId
-      );
+      try {
+        await active.connection.send(
+          "Fetch.enable",
+          { patterns: [{ urlPattern, requestStage: "Response" }] },
+          sessionId
+        );
+      } catch (error) {
+        unsubscribePaused();
+        try { await active.connection.send("Target.detachFromTarget", { sessionId }); } catch {}
+        throw error;
+      }
 
       const interception: ResponseInterception = {
         connectionGeneration: generation,
@@ -870,6 +1312,7 @@ export function createBrowserSessionManager(
         async close() {
           if (closed) return;
           closed = true;
+          unsubscribePaused();
           listeners.clear();
           // Best effort: a disconnected browser is already the outcome close
           // wants, and teardown must never throw over it.
@@ -915,7 +1358,7 @@ export function createBrowserSessionManager(
       // An extension, a devtools page or an unrelated isolated world can never
       // match, and nothing is ever "recovered" by falling back to another one.
       let executionContextId: number | undefined;
-      active.connection.on("Runtime.executionContextCreated", (params, frameSessionId) => {
+      const unsubscribeContext = active.connection.on("Runtime.executionContextCreated", (params, frameSessionId) => {
         if (frameSessionId !== sessionId) return;
         if (generation !== activeConnectionGeneration) return;
         const context = (params as { context?: { id?: unknown; origin?: unknown; auxData?: unknown } })
@@ -926,8 +1369,6 @@ export function createBrowserSessionManager(
         executionContextId = context.id;
       });
 
-      await active.connection.send("Runtime.enable", undefined, sessionId);
-
       const detach = async (): Promise<void> => {
         try {
           await active.connection.send("Target.detachFromTarget", { sessionId });
@@ -935,6 +1376,15 @@ export function createBrowserSessionManager(
           // a disconnected browser is already the outcome close wants
         }
       };
+
+      try {
+        await active.connection.send("Runtime.enable", undefined, sessionId);
+      } catch (error) {
+        await detach();
+        throw error;
+      } finally {
+        unsubscribeContext();
+      }
 
       if (executionContextId === undefined) {
         // Fail closed: no legitimate Crunchyroll page context exists right now.
@@ -958,8 +1408,11 @@ export function createBrowserSessionManager(
           // BT8.1. Re-checked here for the same reason the origin is: a body is
           // ASSEMBLED, and anything assembled is worth checking twice, on both
           // sides of the boundary that carries it. The registry already refuses
-          // a body on anything but a POST; this is the page's own refusal.
-          if (input.body !== undefined && input.method !== "POST") {
+          // a body on anything but POST/PATCH; this is the page's own refusal.
+          if (!["GET", "POST", "DELETE", "PATCH"].includes(input.method)) {
+            throw new BrowserLifecycleError("BROWSER_UNAVAILABLE", "method");
+          }
+          if (input.body !== undefined && input.method !== "POST" && input.method !== "PATCH") {
             throw new BrowserLifecycleError("BROWSER_UNAVAILABLE", "body-method");
           }
           if (
@@ -1036,7 +1489,10 @@ export function createBrowserSessionManager(
             timer?.cancel();
           }
 
-          const frame = raw as {
+          // A valid JSON/CDP result can still be null or a primitive. Preserve
+          // post-dispatch uncertainty instead of leaking an incidental TypeError.
+          const frame = (typeof raw === "object" && raw !== null && !Array.isArray(raw)
+            ? raw : {}) as {
             result?: { value?: unknown };
             exceptionDetails?: unknown;
           };
@@ -1081,6 +1537,261 @@ export function createBrowserSessionManager(
       };
       return channel;
     },
+    async openPlaybackControlChannel(): Promise<PlaybackControlChannel> {
+      const base = config.watchPageBaseUrl;
+      const origins = config.playerFrameOrigins;
+      const active = connectionRegistration;
+      if (!base || !origins || origins.length === 0) {
+        throw new BrowserLifecycleError("BROWSER_UNAVAILABLE", "player-control-unconfigured");
+      }
+      if (
+        lifecycleState !== "BROWSER_READY" ||
+        stopRequested ||
+        !active ||
+        active.generation !== activeConnectionGeneration
+      ) {
+        throw new BrowserLifecycleError("BROWSER_UNAVAILABLE");
+      }
+      const generation = active.generation;
+      const cdp = active.connection;
+
+      // ── Which tab: the one we opened, else the ONLY watch tab ─────────────
+      let listed: unknown;
+      try {
+        listed = await cdp.send("Target.getTargets", {});
+      } catch {
+        throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
+      }
+      const infos = (listed as { targetInfos?: unknown } | undefined)?.targetInfos;
+      const watchTabs: string[] = [];
+      let ownTabNavigating = false;
+      for (const info of Array.isArray(infos) ? infos : []) {
+        if (typeof info !== "object" || info === null) continue;
+        const { type, url, targetId } = info as Record<string, unknown>;
+        if (type !== "page" || typeof targetId !== "string" || targetId === managedTargetId) continue;
+        if (watchContentId(url, base) !== undefined) watchTabs.push(targetId);
+        // Mid-navigation Chromium reports an empty URL. The tab WE navigated is
+        // still ours then; any other URL means it left the watch path.
+        else if (targetId === playbackTargetId && (url === "" || url === "about:blank")) ownTabNavigating = true;
+      }
+      let targetId: string;
+      if (playbackTargetId !== undefined && (ownTabNavigating || watchTabs.includes(playbackTargetId))) {
+        targetId = playbackTargetId;
+      } else if (watchTabs.length === 1) {
+        targetId = watchTabs[0];
+      } else {
+        throw new BrowserLifecycleError(
+          "BROWSER_UNAVAILABLE",
+          watchTabs.length === 0 ? "no-playback-tab" : "ambiguous-playback-tab",
+        );
+      }
+      if (generation !== activeConnectionGeneration) {
+        throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
+      }
+
+      const attached = (await cdp.send("Target.attachToTarget", { targetId, flatten: true })) as {
+        sessionId?: unknown;
+      };
+      const sessionId = attached?.sessionId;
+      if (typeof sessionId !== "string" || sessionId.length === 0) {
+        throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
+      }
+
+      // ── Context bookkeeping, restricted to this tab and its player frames ──
+      //
+      // Only the page's own session and the iframe sessions auto-attached UNDER
+      // it are ever considered, and only default worlds on an allowed origin.
+      // An extension, an isolated world, another tab or an unrelated frame can
+      // never become a target.
+      interface FrameContext { readonly sessionId: string; readonly id: number; readonly top: boolean }
+      const contexts = new Map<string, FrameContext>();
+      const childSessions = new Set<string>();
+      const ours = (sid: string | undefined) => sid === sessionId || (sid !== undefined && childSessions.has(sid));
+      let lost: PlaybackChannelLoss | undefined;
+      const unsubscribers: Array<() => void> = [];
+      const markLost = (reason: PlaybackChannelLoss) => { if (!lost) lost = reason; };
+      const childEnables: Array<Promise<unknown>> = [];
+
+      unsubscribers.push(cdp.on("Runtime.executionContextCreated", (params, sid) => {
+        if (!ours(sid) || generation !== activeConnectionGeneration) return;
+        const context = (params as { context?: { id?: unknown; origin?: unknown; auxData?: unknown } })?.context;
+        if (!context || typeof context.id !== "number") return;
+        if ((context.auxData as { isDefault?: unknown } | undefined)?.isDefault !== true) return;
+        if (!originAllowed(context.origin, origins)) return;
+        contexts.set(`${sid}:${context.id}`, Object.freeze({ sessionId: sid!, id: context.id, top: sid === sessionId }));
+      }));
+      unsubscribers.push(cdp.on("Runtime.executionContextDestroyed", (params, sid) => {
+        const id = (params as { executionContextId?: unknown })?.executionContextId;
+        if (ours(sid) && typeof id === "number") contexts.delete(`${sid}:${id}`);
+      }));
+      unsubscribers.push(cdp.on("Runtime.executionContextsCleared", (_params, sid) => {
+        if (!ours(sid)) return;
+        for (const [key, context] of contexts) if (context.sessionId === sid) contexts.delete(key);
+      }));
+      unsubscribers.push(cdp.on("Target.attachedToTarget", (params, sid) => {
+        if (!ours(sid) || generation !== activeConnectionGeneration) return;
+        const child = params as { sessionId?: unknown; targetInfo?: { type?: unknown } };
+        if (typeof child?.sessionId !== "string") return;
+        if (child.targetInfo?.type !== "iframe") {
+          void cdp.send("Target.detachFromTarget", { sessionId: child.sessionId }, sid).catch(() => undefined);
+          return;
+        }
+        childSessions.add(child.sessionId);
+        // Kept, so opening the channel can wait for the frames that already
+        // exist: a probe issued before their contexts arrive would miss them.
+        childEnables.push(cdp.send("Runtime.enable", undefined, child.sessionId).catch(() => undefined));
+      }));
+      unsubscribers.push(cdp.on("Target.detachedFromTarget", (params) => {
+        const detached = (params as { sessionId?: unknown })?.sessionId;
+        if (detached === sessionId) markLost("TAB_CLOSED");
+        else if (typeof detached === "string" && childSessions.delete(detached)) {
+          for (const [key, context] of contexts) if (context.sessionId === detached) contexts.delete(key);
+        }
+      }));
+      unsubscribers.push(cdp.on("Target.targetDestroyed", (params) => {
+        if ((params as { targetId?: unknown })?.targetId === targetId) markLost("TAB_CLOSED");
+      }));
+      unsubscribers.push(cdp.onClose(() => markLost("DISCONNECTED")));
+
+      const release = async () => {
+        for (const unsubscribe of unsubscribers.splice(0)) unsubscribe();
+        contexts.clear();
+        try { await cdp.send("Target.detachFromTarget", { sessionId }); } catch { /* already gone */ }
+      };
+
+      try {
+        await cdp.send("Runtime.enable", undefined, sessionId);
+        await cdp.send(
+          "Target.setAutoAttach",
+          { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
+          sessionId,
+        );
+        // Existing frames are announced before setAutoAttach answers; their
+        // Runtime.enable answers only after their contexts were announced.
+        await Promise.all(childEnables.splice(0));
+      } catch {
+        await release();
+        throw new BrowserLifecycleError("BROWSER_DISCONNECTED");
+      }
+
+      const assertUsable = () => {
+        if (generation !== activeConnectionGeneration) markLost("DISCONNECTED");
+        if (lost) throw new BrowserLifecycleError("BROWSER_DISCONNECTED", lost);
+        if (lifecycleState !== "BROWSER_READY" || stopRequested) {
+          throw new BrowserLifecycleError("BROWSER_DISCONNECTED", "DISCONNECTED");
+        }
+      };
+
+      const invoke = async (
+        context: FrameContext,
+        command: PlayerCommand,
+        userGesture: boolean,
+      ): Promise<PlayerCommandResult | undefined> => {
+        let raw: unknown;
+        try {
+          raw = await cdp.send(
+            "Runtime.callFunctionOn",
+            {
+              functionDeclaration: CRUNCHYROLL_PLAYER_FUNCTION,
+              executionContextId: context.id,
+              arguments: [{ value: command }, { value: PLAYER_PLAY_WAIT_MS }],
+              awaitPromise: true,
+              returnByValue: true,
+              silent: true,
+              userGesture,
+            },
+            context.sessionId,
+          );
+        } catch {
+          // A context that vanished mid-call (navigation, frame removal) is not
+          // a reason to try another one for the SAME command: report nothing.
+          return undefined;
+        }
+        return parsePlayerResult(raw);
+      };
+
+      let closed = false;
+      const channel: PlaybackControlChannel = {
+        connectionGeneration: generation,
+        targetId,
+        loss: () => (closed ? "CLOSED" : generation !== activeConnectionGeneration ? "DISCONNECTED" : lost),
+        async currentContentId() {
+          assertUsable();
+          let info: unknown;
+          try {
+            info = await cdp.send("Target.getTargetInfo", { targetId });
+          } catch {
+            throw new BrowserLifecycleError("BROWSER_DISCONNECTED", lost ?? "TAB_CLOSED");
+          }
+          const id = watchContentId((info as { targetInfo?: { url?: unknown } })?.targetInfo?.url, base);
+          if (id === undefined) markLost("NAVIGATED_AWAY");
+          return id;
+        },
+        async run(command: PlayerCommand, deadlineMs: number) {
+          if (closed) throw new BrowserLifecycleError("BROWSER_UNAVAILABLE", "channel-closed");
+          if (!PLAYER_COMMANDS.includes(command)) {
+            throw new BrowserLifecycleError("BROWSER_UNAVAILABLE", "command");
+          }
+          assertUsable();
+          let timer: { cancel(): void } | undefined;
+          const deadlineError = new BrowserLifecycleError("BROWSER_UNAVAILABLE", "deadline");
+          const deadline = new Promise<never>((_resolve, reject) => {
+            timer = seams.clock.setTimeout(() => reject(deadlineError), deadlineMs);
+          });
+          const work = async (): Promise<PlayerCommandResult | undefined> => {
+            const frames = [...contexts.values()].sort((a, b) => Number(b.top) - Number(a.top));
+            const probes: Array<{ context: FrameContext; result: PlayerCommandResult }> = [];
+            for (const context of frames) {
+              const result = await invoke(context, "probe", false);
+              assertUsable();
+              if (result) probes.push({ context, result });
+            }
+            const anyFullscreen = probes.some((probe) => probe.result.state.fullscreen);
+            const players = probes.filter((probe) => probe.result.state.hasVideo);
+            if (players.length === 0) return undefined;
+            const player = players.find((probe) => probe.result.state.hasSource) ?? players[0];
+            const merge = (result: PlayerCommandResult): PlayerCommandResult => Object.freeze({
+              ...result,
+              state: Object.freeze({ ...result.state, fullscreen: result.state.fullscreen || anyFullscreen }),
+            });
+            if (command === "probe") return merge(player.result);
+            if (command === "exit_fullscreen") {
+              // Exit wherever fullscreen actually is; the top document first,
+              // because leaving it there leaves it everywhere.
+              for (const probe of probes) {
+                if (!probe.result.state.fullscreen) continue;
+                await invoke(probe.context, "exit_fullscreen", false);
+                assertUsable();
+              }
+              const after = await invoke(player.context, "probe", false);
+              assertUsable();
+              return after ? Object.freeze({ state: after.state }) : undefined;
+            }
+            if (command === "play" || command === "enter_fullscreen") {
+              // A gesture-gated request goes to the foreground tab, and only
+              // that one command carries the CDP user gesture.
+              await cdp.send("Target.activateTarget", { targetId }).catch(() => undefined);
+              assertUsable();
+            }
+            const result = await invoke(player.context, command, command === "play" || command === "enter_fullscreen");
+            assertUsable();
+            if (!result) throw new BrowserLifecycleError("BROWSER_UNAVAILABLE", "context-lost");
+            return command === "enter_fullscreen" ? result : merge(result);
+          };
+          try {
+            return await Promise.race([work(), deadline]);
+          } finally {
+            timer?.cancel();
+          }
+        },
+        async close() {
+          if (closed) return;
+          closed = true;
+          await release();
+        },
+      };
+      return channel;
+    },
     onStateChange(listener) { stateListeners.add(listener); },
     onLifecycleEvent(listener) { lifecycleListeners.add(listener); },
   };
@@ -1098,7 +1809,11 @@ const REAL_CLOCK: Clock = {
 
 const REAL_SPAWNER: ProcessSpawner = {
   spawn(executable, args) {
-    const child = spawn(executable, [...args], { stdio: "ignore", detached: false });
+    const child = spawn(executable, [...args], {
+      stdio: "ignore",
+      detached: false,
+      env: desktopSessionEnvironment(),
+    });
     let terminal: BrowserProcessExit | undefined;
     const listeners = new Set<(exit: BrowserProcessExit) => void>();
     const finish = (code: number | null, signal: string | null) => {

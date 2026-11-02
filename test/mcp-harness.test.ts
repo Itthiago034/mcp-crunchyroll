@@ -1,7 +1,8 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpClient } from "./_harness-client.js";
@@ -46,7 +47,7 @@ async function withClient(
 describe("MCP server harness", () => {
   for (const [label, target] of TARGETS) {
     describe(`${label}`, () => {
-      test("tools/list returns exactly the 21 baseline tool names, unchanged", async () => {
+      test("tools/list returns exactly the 24 baseline tool names", async () => {
         await withClient(target, async (client) => {
           const list = (await client.sendRequest("tools/list", {}))
             .result as { tools: { name: string }[] };
@@ -202,6 +203,109 @@ describe("MCP server harness", () => {
           assert.equal(status.authenticated, status.logged_in);
           assert.equal(status.player_ready, false, "BT4 owns no player");
         });
+      });
+
+      // ── Crunchyroll MCP 2.0: player control and session recovery ───────────
+
+      test("crunchyroll_player_control refuses unknown actions and unknown fields", async () => {
+        await withClient(target, async (client) => {
+          for (const args of [
+            { action: "seek" },
+            { action: "play", script: "document.querySelector('video').play()" },
+            { action: "status", port: 9222 },
+            {},
+            { action: 1 },
+          ]) {
+            const result = await client.sendRequest("tools/call", { name: "crunchyroll_player_control", arguments: args });
+            assert.equal(result.error?.code, -32602, JSON.stringify(args));
+            assert.equal(JSON.stringify(result).includes("querySelector"), false, "no argument is echoed");
+          }
+        });
+      });
+
+      test("crunchyroll_player_control with no playback tab is a structured refusal, not a browser launch", async () => {
+        await withClient(target, async (client) => {
+          const result = await client.sendRequest("tools/call", {
+            name: "crunchyroll_player_control",
+            arguments: { action: "status" },
+          });
+          assert.equal(result.error, undefined, "unexpected MCP-level error");
+          const body = result.result as { content: { text: string }[]; isError?: boolean };
+          const report = JSON.parse(body.content[0].text) as Record<string, unknown>;
+          assert.equal(body.isError, true);
+          assert.equal(report.success, false);
+          assert.equal(report.verified, false);
+          assert.ok(["SESSION_DISCONNECTED", "TAB_NOT_FOUND"].includes(report.outcome as string), String(report.outcome));
+          const status = JSON.parse(((await client.sendRequest("tools/call", { name: "crunchyroll_status", arguments: {} }))
+            .result as { content: { text: string }[] }).content[0].text) as Record<string, unknown>;
+          assert.equal(status.browser_running, false, "a control action never spawns a browser");
+        });
+      });
+
+      test("crunchyroll_play refuses non-boolean options and unknown fields", async () => {
+        await withClient(target, async (client) => {
+          for (const args of [
+            { episode_id: "GRVN8MNQY", autoplay: "yes" },
+            { episode_id: "GRVN8MNQY", fullscreen: 1 },
+            { episode_id: "GRVN8MNQY", url: "https://evil.invalid/" },
+            { episode_id: "../GRVN8MNQY" },
+          ]) {
+            const result = await client.sendRequest("tools/call", { name: "crunchyroll_play", arguments: args });
+            assert.equal(result.error?.code, -32602, JSON.stringify(args));
+          }
+        });
+      });
+
+      test("cold start without a recorded authorization: structured LOGIN_REQUIRED, no browser", async () => {
+        await withClient(target, async (client) => {
+          const result = await client.sendRequest("tools/call", {
+            name: "crunchyroll_get_history",
+            arguments: { n: 1 },
+          });
+          const body = result.result as { content: { text: string }[]; isError?: boolean };
+          const payload = JSON.parse(body.content[0].text) as Record<string, unknown>;
+          assert.equal(body.isError, true);
+          assert.equal(payload.code, "LOGIN_REQUIRED");
+          assert.equal(payload.session_state, "NEVER_ESTABLISHED");
+          assert.match(String(payload.hint), /crunchyroll_login/);
+          assert.match(String(payload.error), /Not authenticated/);
+          const status = JSON.parse(((await client.sendRequest("tools/call", { name: "crunchyroll_status", arguments: {} }))
+            .result as { content: { text: string }[] }).content[0].text) as Record<string, unknown>;
+          assert.equal(status.browser_running, false, "recovery never opens a browser for a never-authorized profile");
+        });
+      });
+
+      test("a logout survives a process restart: player control and silent recovery stay refused", async () => {
+        const home = mkdtempSync(join(tmpdir(), "mcp-harness-logout-"));
+        const env = { ...process.env, HOME: home };
+        try {
+          const first = new McpClient({ command: target.command, args: target.args, cwd: ROOT, env });
+          await first.initialize();
+          await first.sendRequest("tools/call", { name: "crunchyroll_logout", arguments: {} });
+          first.kill();
+
+          const second = new McpClient({ command: target.command, args: target.args, cwd: ROOT, env });
+          try {
+            await second.initialize();
+            const player = await second.sendRequest("tools/call", {
+              name: "crunchyroll_player_control",
+              arguments: { action: "play" },
+            });
+            const report = JSON.parse((player.result as { content: { text: string }[] }).content[0].text);
+            assert.equal(report.outcome, "NOT_PERMITTED");
+            assert.equal(report.executed, false);
+            const content = await second.sendRequest("tools/call", {
+              name: "crunchyroll_get_history",
+              arguments: { n: 1 },
+            });
+            const payload = JSON.parse((content.result as { content: { text: string }[] }).content[0].text);
+            assert.equal(payload.code, "LOGGED_OUT");
+          } finally {
+            second.kill();
+          }
+        } finally {
+          rmSync(home, { recursive: true, force: true });
+        }
       });
 
       test("server shuts down cleanly", async () => {

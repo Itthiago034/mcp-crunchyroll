@@ -1,0 +1,16 @@
+{
+  "target": "Crunchyroll real via MCP stdio",
+  "plannedRequests": 12,
+  "concurrency": 2,
+  "completedRequests": 0,
+  "status": "blocked",
+  "blockers": [
+    "interactive_login_required",
+    "interactive_browser_display_unavailable"
+  ],
+  "readiness": {
+    "authenticated": false,
+    "browserConnected": false,
+    "authState": "LOGIN_REQUIRED"
+  }
+}

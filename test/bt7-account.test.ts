@@ -166,9 +166,20 @@ describe("BT7 — the production table after the account-read migration", () => 
     // whose whole meaning is "this is served here now".
     assert.deepEqual(
       PRODUCTION_OPERATIONS.map((d) => String(d.id)).sort(),
-      [...BT5_BT6_OPERATIONS, ...BT7_OPERATIONS, "ADD_TO_WATCHLIST", "REMOVE_FROM_WATCHLIST", "UPDATE_PLAYHEAD"].sort()
+      [
+        ...BT5_BT6_OPERATIONS,
+        ...BT7_OPERATIONS,
+        "ADD_TO_WATCHLIST",
+        "REMOVE_FROM_WATCHLIST",
+        "UPDATE_PLAYHEAD",
+        "SET_FAVORITE",
+        // Internal read with no tool of its own: names the watchlist's bare ids.
+        "GET_OBJECTS",
+        // Internal read behind SET_FAVORITE: one exact watchlist entry.
+        "GET_WATCHLIST_ENTRY",
+      ].sort()
     );
-    assert.equal(PRODUCTION_OPERATIONS.length, 16);
+    assert.equal(PRODUCTION_OPERATIONS.length, 19);
   });
 
   test("both deferred operations are absent — D-1c and F-1, neither forgotten", () => {
@@ -827,11 +838,11 @@ describe("BT7 — transport ownership moved out of the legacy client", () => {
 // ── Public surface ──────────────────────────────────────────────────────────
 
 describe("BT7 — the public contract is frozen", () => {
-  test("21 tools, and none of the six gained an argument", () => {
+  test("23 tools, and none of the six gained an argument", () => {
     const baseline = JSON.parse(
       readFileSync(join(REPO_ROOT, "test/fixtures/baseline-tools.json"), "utf-8")
     ) as Array<{ name: string; inputSchema: { properties?: Record<string, unknown> } }>;
-    assert.equal(baseline.length, 21);
+    assert.equal(baseline.length, 24);
 
     const expected: Record<string, string[]> = {
       crunchyroll_get_similar: ["series_id", "n"],

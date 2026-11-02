@@ -366,6 +366,17 @@ export class AuthContextAuthority {
     return this.state.kind === "READY" ? this.state.record.revision : this.state.revision;
   }
 
+  /**
+   * Whether the READY record can still serve requests. An observed browser
+   * bearer carries no refresh token and expires within minutes; READY alone
+   * would keep reporting a session nothing can use. Loggable: a boolean only.
+   */
+  hasUsableRecord(): boolean {
+    if (this.state.kind !== "READY") return false;
+    const record = this.state.record;
+    return !record.abortController.signal.aborted && this.recordRemainsUsable(record);
+  }
+
   /** Loggable state only — never the epoch, identity or material (design §19). */
   diagnostics(): AuthDiagnostics {
     if (this.state.kind === "READY") {
