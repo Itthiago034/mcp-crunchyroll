@@ -7,7 +7,7 @@
 //
 // No state here may imply authentication merely because a browser exists.
 //
-// Frozen design: CRUNCHYROLL-BT4-COMPLETION-ERRATA.md §6, §7, §10.
+// Frozen design: docs/dev/CRUNCHYROLL-BT4-COMPLETION-ERRATA.md §6, §7, §10.
 
 import type { ObservedAuthMaterial } from "./browser-auth.js";
 

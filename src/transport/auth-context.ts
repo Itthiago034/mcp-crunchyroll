@@ -6,8 +6,8 @@
 // NOT wired into any MCP tool: BT3 remains caller-unreachable, exactly like
 // BT1's registry and BT2's lifecycle before their own cutover gates.
 //
-// Frozen design: CRUNCHYROLL-BT3-DESIGN-GATE0.md, corrected by
-// CRUNCHYROLL-BT3-DESIGN-GATE0-FIX1-ERRATA.md.
+// Frozen design: docs/dev/CRUNCHYROLL-BT3-DESIGN-GATE0.md, corrected by
+// docs/dev/CRUNCHYROLL-BT3-DESIGN-GATE0-FIX1-ERRATA.md.
 
 import { randomBytes } from "node:crypto";
 import { registerSensitiveValue } from "../redact.js";

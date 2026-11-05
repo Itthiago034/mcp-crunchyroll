@@ -4,7 +4,7 @@
 // reader, a fake execution channel, no browser, no network, no credentials.
 // Every identity value here is synthetic.
 //
-// Frozen design: BT7-DESIGN.md over the closed BT5/BT6 contracts.
+// Frozen design: docs/dev/BT7-DESIGN.md over the closed BT5/BT6 contracts.
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";

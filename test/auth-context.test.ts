@@ -6,7 +6,7 @@
 // race in the frozen design is expressed as an explicit, ordered barrier rather
 // than as timing.
 //
-// Frozen design: CRUNCHYROLL-BT3-DESIGN-GATE0.md + …-FIX1-ERRATA.md.
+// Frozen design: docs/dev/CRUNCHYROLL-BT3-DESIGN-GATE0.md + …-FIX1-ERRATA.md.
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";

@@ -8,9 +8,9 @@
 // injection, declared structurally below, which is exactly what BT3 §27
 // specifies ("BT4 will receive only a restricted writer port from the
 // composition root; it will not receive the authority object") and what keeps
-// BT3's frozen unreachability closure intact. See CRUNCHYROLL-BT4-DESIGN.md §3.
+// BT3's frozen unreachability closure intact. See docs/dev/CRUNCHYROLL-BT4-DESIGN.md §3.
 //
-// Frozen design: CRUNCHYROLL-BT4-DESIGN.md.
+// Frozen design: docs/dev/CRUNCHYROLL-BT4-DESIGN.md.
 
 import { clearAuthData, isTokenExpired, loadTokens } from "../auth.js";
 import type { LogoutResult, TokenData } from "../auth.js";

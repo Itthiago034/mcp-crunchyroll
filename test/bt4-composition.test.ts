@@ -4,7 +4,7 @@
 // no browser. The fetch stub asserts the exact URL it is given and throws for
 // anything unexpected; persistence runs against an isolated temporary HOME.
 //
-// Frozen design: CRUNCHYROLL-BT4-COMPLETION-ERRATA.md §3, §4, §11.
+// Frozen design: docs/dev/CRUNCHYROLL-BT4-COMPLETION-ERRATA.md §3, §4, §11.
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";

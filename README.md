@@ -12,7 +12,7 @@
 [![CI](https://github.com/Itthiago034/mcp-crunchyroll/actions/workflows/ci.yml/badge.svg)](https://github.com/Itthiago034/mcp-crunchyroll/actions/workflows/ci.yml)
 ![Node.js](https://img.shields.io/badge/Node.js-18%20%7C%2020%20%7C%2022-333333?logo=nodedotjs)
 ![MCP](https://img.shields.io/badge/MCP-stdio-f47521)
-![License](https://img.shields.io/badge/license-MIT-333333)
+[![License](https://img.shields.io/badge/license-MIT-333333)](LICENSE)
 ![Unofficial](https://img.shields.io/badge/unofficial-community%20project-f47521)
 
 [Quick start](#quick-start) · [Tools](#tool-surface) · [Architecture](#how-it-works) · [Security](#security-boundaries) · [Validation](#development-and-tests)
@@ -28,21 +28,26 @@ After connecting the server and completing interactive sign-in, try asking your 
 
 Available results depend on the authenticated account, region, client, and Crunchyroll's services.
 
-## Release status
+## Status
 
-> [!IMPORTANT]
-> **Development snapshot, not a production approval.** This local branch contains the existing 23-tool surface plus one candidate favorite setter. Registration and passing tests do not guarantee that Crunchyroll will accept a live request. See [the release decision](DECISAO-FINAL.md) for the audit gates.
+> [!NOTE]
+> **Active development.** 21 tools are implemented, 1 (`crunchyroll_set_favorite`) is awaiting live validation, and 2 are deliberately deferred. Crunchyroll's web services are not a public API, so passing tests cannot guarantee that a live request will be accepted. See the [release decision](docs/DECISAO-FINAL.md) for the audit gates.
 
-| Surface | Count | Implementation status |
+<details>
+<summary>Tool count by surface</summary>
+
+| Surface | Count | Status |
 |---|---:|---|
-| Authentication and status | 3 | Existing implementations |
-| Catalog and discovery reads | 10 | Existing implementations |
-| Account reads | 3 | Existing implementations |
-| Watchlist and progress mutations | 3 | Existing implementations |
-| Playback and player control | 2 | Existing implementations |
-| Favorite setter | 1 | Candidate; unit-tested, live validation pending |
+| Authentication and status | 3 | Implemented |
+| Catalog and discovery reads | 10 | Implemented |
+| Account reads | 3 | Implemented |
+| Watchlist and progress mutations | 3 | Implemented |
+| Playback and player control | 2 | Implemented |
+| Favorite setter | 1 | Unit-tested; live validation pending |
 | Deferred tools | 2 | Deliberately fail closed |
-| **Advertised tools in this local snapshot** | **24** | **Not a release count** |
+| **Total advertised** | **24** | |
+
+</details>
 
 ### Start with what you want to do
 
@@ -178,20 +183,21 @@ Useful local tools:
 
 The managed browser profile is stored under `~/.strider/crunchyroll/browser-profile`. Do not point the server at a personal browser profile.
 
-The live validator (`npm run validate:live -- --login`) first opens the selected
-browser directly for manual sign-in in the same dedicated profile, without CDP.
-Complete verification and sign-in in Crunchyroll's own UI, decline browser-data
-import, and close that window normally. The validator then opens the managed
-browser and confirms MCP authentication before issuing its 12 reads. Close any
-earlier windows of that dedicated profile before starting. You can also run
-`npm run onboard:browser` separately to check the manual stage. Only an observed
-and validated authentication response grants MCP readiness; this flow does not
-guarantee that the provider will accept the session. See the
-[recorded onboarding procedure](CRUNCHYROLL-BT4-N5-ONBOARDING-ERRATA.md).
-
 ### Session expiry
 
-The bearer observed from the browser carries no refresh token and expires within minutes. `crunchyroll_status` reports an expired bearer as not authenticated, and `crunchyroll_login` then re-establishes it by reloading the signed-in managed page, which makes Crunchyroll mint a fresh bearer under observation. A content call that finds the session expired does this once on its own (waiting up to 45 s) and retries; the failure happens before anything is dispatched, so nothing is sent twice. A fresh server process still starts unauthenticated: call `crunchyroll_login` once, which takes seconds while the browser profile is signed in. Season and episode lists are compacted to the fields needed to choose and play (ids, numbers, titles, locales, availability and `versions` as `{audio_locale, guid, original}`); `crunchyroll_get_series` and `crunchyroll_get_episode` return the full record without image sets. `crunchyroll_get_episodes` accepts an optional `episode_number` to return a single episode, `crunchyroll_get_history` keeps resume data instead of the full panel, and `crunchyroll_get_watchlist` honours `n` and adds each item's `title` and `type` with one extra batched read. Login waits at most 240 s, below the 300 s tool timeout of clients such as Hermes.
+- The bearer observed from the browser has no refresh token and expires within minutes.
+- `crunchyroll_status` then reports *not authenticated*, and `crunchyroll_login` renews the session by reloading the signed-in managed page.
+- A content call that finds the session expired renews it once by itself (waiting up to 45 s) and retries. The failure happens before anything is dispatched, so nothing is sent twice.
+- A fresh server process starts unauthenticated: call `crunchyroll_login` once. It takes seconds while the browser profile is signed in, and waits at most 240 s (below the 300 s tool timeout of clients such as Hermes).
+
+<details>
+<summary>Live validation with a real account</summary>
+
+`npm run validate:live -- --login` first opens the selected browser directly, without CDP, for manual sign-in in the dedicated profile. Complete verification and sign-in in Crunchyroll's own UI, decline browser-data import, and close that window normally. The validator then opens the managed browser and confirms MCP authentication before issuing its 12 reads. Close any earlier windows of that profile before starting.
+
+`npm run onboard:browser` checks the manual stage on its own. Only an observed and validated authentication response grants MCP readiness; this does not guarantee that the provider accepts the session. See the [recorded onboarding procedure](docs/dev/CRUNCHYROLL-BT4-N5-ONBOARDING-ERRATA.md).
+
+</details>
 
 ## Tool surface
 
@@ -242,7 +248,7 @@ A provider response such as bad request, conflict, or operation-specific not fou
 
 `episode_id` must be a plain uppercase Crunchyroll id from `crunchyroll_get_episodes`; nothing else reaches the URL. Playback uses the browser's own signed-in session and makes no provider API request from the server.
 
-Player control runs one frozen page function with a closed command set, only in the playback tab's page and player-frame contexts on `www.crunchyroll.com` / `static.crunchyroll.com`. It exposes no script, CDP or port to the caller, never reads cookies or tokens, and reports success only when a later observation confirms the requested state. Autoplay and fullscreen remain subject to the browser's own policies; a refusal is reported as `REFUSED_BY_BROWSER`, never bypassed. See [ARQUITETURA.md](ARQUITETURA.md) and [SEGURANCA.md](SEGURANCA.md).
+Player control runs one frozen page function with a closed command set, only in the playback tab's page and player-frame contexts on `www.crunchyroll.com` / `static.crunchyroll.com`. It exposes no script, CDP or port to the caller, never reads cookies or tokens, and reports success only when a later observation confirms the requested state. Autoplay and fullscreen remain subject to the browser's own policies; a refusal is reported as `REFUSED_BY_BROWSER`, never bypassed. See [ARQUITETURA.md](docs/ARQUITETURA.md) and [SEGURANCA.md](docs/SEGURANCA.md).
 
 ### Deferred tools
 
@@ -300,11 +306,11 @@ requires interactive sign-in in a visible managed browser.
 
 | Document | What it covers |
 |---|---|
-| [Architecture](ARQUITETURA.md) | Channels, boundaries and component responsibilities |
-| [Security](SEGURANCA.md) | Threat model, guarantees and residual risks |
-| [Tests](TESTES.md) | Test environments and recorded evidence |
-| [Benchmarks](BENCHMARK.md) | Measurements and their real/synthetic/modeled labels |
-| [Release decision](DECISAO-FINAL.md) | Audit and authorized live-validation gates |
+| [Architecture](docs/ARQUITETURA.md) | Channels, boundaries and component responsibilities |
+| [Security](docs/SEGURANCA.md) | Threat model, guarantees and residual risks |
+| [Tests](docs/TESTES.md) | Test environments and recorded evidence |
+| [Benchmarks](docs/BENCHMARK.md) | Measurements and their real/synthetic/modeled labels |
+| [Release decision](docs/DECISAO-FINAL.md) | Audit and authorized live-validation gates |
 
 <details>
 <summary>Original project artwork</summary>
@@ -315,7 +321,7 @@ requires interactive sign-in in a visible managed browser.
 
 ## Credits and license
 
-Based on the open-source `@striderlabs/mcp-crunchyroll` project by StrikerLabs. Distributed under the MIT License.
+Based on the open-source [`@striderlabs/mcp-crunchyroll`](https://www.npmjs.com/package/@striderlabs/mcp-crunchyroll) project by StrikerLabs. Distributed under the [MIT License](LICENSE).
 
 ## Disclaimer
 
