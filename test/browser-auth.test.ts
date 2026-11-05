@@ -4,7 +4,7 @@
 // credentials. A fake interception channel plays back exactly the paused
 // responses each test dictates, and every timer is a controllable seam.
 //
-// Frozen design: CRUNCHYROLL-BT4-COMPLETION-ERRATA.md §9.
+// Frozen design: docs/dev/CRUNCHYROLL-BT4-COMPLETION-ERRATA.md §9.
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";

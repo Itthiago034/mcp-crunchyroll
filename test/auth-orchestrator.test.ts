@@ -3,7 +3,7 @@
 // Deterministic and offline: every race is an explicit barrier (deferred
 // promises), never a sleep. No browser, no CDP, no network, no credentials.
 //
-// Frozen design: CRUNCHYROLL-BT4-COMPLETION-ERRATA.md §6, §7, §10.
+// Frozen design: docs/dev/CRUNCHYROLL-BT4-COMPLETION-ERRATA.md §6, §7, §10.
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";

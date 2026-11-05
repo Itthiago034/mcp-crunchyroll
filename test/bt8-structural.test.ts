@@ -7,7 +7,7 @@
 // BT8.4 registers the final UPDATE_PLAYHEAD mutation; all three BT8 mutations
 // are asserted below while BT7 reads remain unchanged.
 //
-// Frozen design: CRUNCHYROLL-BT8-MUTATIONS-DESIGN.md §12 (registry evolution),
+// Frozen design: docs/dev/CRUNCHYROLL-BT8-MUTATIONS-DESIGN.md §12 (registry evolution),
 // §13 (body ownership), §14 (response model), §18 (browser boundary).
 
 import { test, describe } from "node:test";

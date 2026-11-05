@@ -3,7 +3,7 @@
 // Deterministic and offline: fake CDP, fake browser, no network, no browser
 // process. Proves the reachable graph, not merely the happy path.
 //
-// Frozen design: CRUNCHYROLL-BT5-CUTOVER-PLAN.md.
+// Frozen design: docs/dev/CRUNCHYROLL-BT5-CUTOVER-PLAN.md.
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";

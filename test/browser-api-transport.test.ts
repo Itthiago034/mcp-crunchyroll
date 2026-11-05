@@ -3,7 +3,7 @@
 // Deterministic and offline: a fake CDP connection, synthetic bearers, no
 // browser, no network. Every race is an explicit barrier, never a sleep.
 //
-// Frozen design: CRUNCHYROLL-BT5-CUTOVER-PLAN.md over source C §13/§13A and
+// Frozen design: docs/dev/CRUNCHYROLL-BT5-CUTOVER-PLAN.md over source C §13/§13A and
 // the external ruling authorizing Runtime.enable / executionContextCreated /
 // callFunctionOn and nothing else.
 

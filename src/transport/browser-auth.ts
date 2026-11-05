@@ -10,7 +10,7 @@
 // form field, never types a credential and never automates a challenge — a
 // CAPTCHA or device verification is the human's own browser activity.
 //
-// Frozen design: CRUNCHYROLL-BT4-COMPLETION-ERRATA.md §7, §9.
+// Frozen design: docs/dev/CRUNCHYROLL-BT4-COMPLETION-ERRATA.md §7, §9.
 
 import type { PausedResponse, ResponseInterception } from "./browser-lifecycle-types.js";
 

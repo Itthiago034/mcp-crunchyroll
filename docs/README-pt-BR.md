@@ -36,4 +36,4 @@ Chame `crunchyroll_login({})` e entre na sua conta na janela do navegador gerenc
 
 Os resultados dependem da conta, da região, do cliente e da disponibilidade do serviço. As interfaces web internas da Crunchyroll podem mudar.
 
-Projeto da comunidade, sem afiliação ou endosso da Crunchyroll. Baseado no projeto de código aberto `@striderlabs/mcp-crunchyroll`; licença MIT.
+Projeto da comunidade, sem afiliação ou endosso da Crunchyroll. Baseado no projeto de código aberto `@striderlabs/mcp-crunchyroll`; [licença MIT](../LICENSE).

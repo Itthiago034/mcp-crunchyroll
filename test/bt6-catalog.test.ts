@@ -4,7 +4,7 @@
 // network. Proves the migration, the ownership move, and the account boundary
 // that must NOT move.
 //
-// Frozen design: CRUNCHYROLL-BT6-CATALOG-PLAN.md.
+// Frozen design: docs/dev/CRUNCHYROLL-BT6-CATALOG-PLAN.md.
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";

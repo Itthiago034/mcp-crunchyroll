@@ -7,7 +7,7 @@
 // its REAL asWriter() port — BT4 mocks its own storage and legacy-network
 // ports, never the boundary it is being judged on.
 //
-// Frozen design: CRUNCHYROLL-BT4-DESIGN.md, over the closed BT3 contracts.
+// Frozen design: docs/dev/CRUNCHYROLL-BT4-DESIGN.md, over the closed BT3 contracts.
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";

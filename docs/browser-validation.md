@@ -159,7 +159,7 @@ Dados da execução: [live-mcp-linux.json](validation-results/live-mcp-linux.jso
 Uma página de verificação da Cloudflare não demonstra, por si só, erro de senha
 ou falta de conectividade. O repositório já registra uma tentativa de login
 manual no mesmo perfil dedicado em
-[BT4-N5](../CRUNCHYROLL-BT4-N5-ONBOARDING-ERRATA.md). Esse registro histórico não
+[BT4-N5](dev/CRUNCHYROLL-BT4-N5-ONBOARDING-ERRATA.md). Esse registro histórico não
 prova que o procedimento funcionará em outra máquina ou navegador.
 
 O runner `npm run validate:live -- --login` agora integra a preparação manual
